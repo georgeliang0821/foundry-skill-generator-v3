@@ -153,7 +153,7 @@ flowchart LR
 | `skills_index.py` | 以 DB + Blob 組「既有 Skill 索引」，供 PREPARE 階段做重複偵測 |
 | `testing.py` | 路由測試：把正負範例送 APIM Router，評估是否路由到本 Skill。以 `mode=route_only` 送出（不執行腳本），驗證 runtime 的 `mode` 回顯（不符即中止整批），並在持久化前遮蔽機密形狀 |
 | `patch.py` | 小型 V4A patch 解析與套用 |
-| `mcp_jsonrpc.py` | MCP JSON-RPC client（讀取 ACA 環境變數等） |
+| `mcp_jsonrpc.py` | MCP JSON-RPC client（讀取 ACA 環境變數等）。以 `MICROSOFT_*` App Registration 對自己做 client credentials 取得 app-only token（audience 預設從 `MICROSOFT_OBO_SCOPE` 推導），並快取至過期前 60 秒；audience 推導不出來則退回匿名呼叫 |
 | `db.py` | Azure SQL 連線輔助（`mssql-python`，AAD 驗證策略） |
 | `diagnostics.py` | 結構化記錄輔助（`log_event` / `log_exception`），會把疑似機密的值遮罩成 `***` |
 | `e2e.py` | 本機 E2E 測試掛鉤（搭配 `E2E_MODE`） |

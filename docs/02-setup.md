@@ -51,6 +51,7 @@ Copy-Item .env.example .env
 | **Microsoft Foundry Project** | `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 對應的服務主體 | 同一個服務主體；目前不會因部署至 Azure 而自動改用 Managed Identity | `DefaultAzureCredential()`；完整的 `AZURE_*` 三件套會由 `EnvironmentCredential` 優先採用 |
 | **Azure SQL Database** | 同一個 `.env` 服務主體 | 同一個服務主體 | `Authentication=ActiveDirectoryServicePrincipal`，沒有 Managed Identity 或 `az login` fallback |
 | **Azure Blob Storage** | 目前 `az login` 的使用者帳號 | 應用程式的 Managed Identity | `DefaultAzureCredential(exclude_environment_credential=True)`，刻意不採用上述服務主體 |
+| **MCP（ACA 環境變數查詢）** | `MICROSOFT_*` App Registration 的 app-only token | 同一支 App Registration | client credentials 對自己換 `api://<app-id>/.default`；詳見下方 MCP 章節 |
 
 > 瀏覽器的 Microsoft 登入只用來識別目前網頁使用者、套用 Skill ACL，以及取得需要的 delegated/OBO token；該使用者 token **不會**被轉送給 Foundry、SQL 或 Blob。由於 Foundry 與 SQL 共用 `AZURE_*` 服務主體，該服務主體必須分別取得兩邊的權限。
 
@@ -131,6 +132,18 @@ SKILL_SELECTION_TEST_APIM_RUN_URL=https://kurt-apim.azure-api.net/coding-tool-co
 | `ACA_APP_NAME` | 要查詢的 ACA 應用名稱 |
 | `ACA_RESOURCE_GROUP` | 該 app 的資源群組 |
 | `ACA_SUBSCRIPTION_ID` | 訂閱 ID |
+| `MCP_OAUTH_AUDIENCE` | 選用。只有當 MCP 伺服器驗證的 audience 與 `MICROSOFT_OBO_SCOPE` 不同支 app 時才需要填 |
+
+##### 呼叫 MCP 用的身分
+
+呼叫 `list_aca_environment_variables` 時帶的是 **app-only token**，由 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`（也就是負責網頁登入的那支 App Registration）以 **client credentials** 對**自己**換取，scope 為 `api://<app-id>/.default`。
+
+- **為什麼不是使用者委派身分**：PREPARE 進入時的查詢跑在背景執行緒，只拿得到 session，沒有 HTTP request 也沒有使用者 token，等同無人值守。手動重新整理（`POST /api/sessions/{id}/aca-env`）雖然有登入者，仍刻意沿用同一個 app-only 身分，避免兩條路徑結果不一致。
+- **audience 從哪來**：預設把 `MICROSOFT_OBO_SCOPE` 去掉 `/user_impersonation` 得到 `api://<app-id>`。MCP 伺服器驗證的正是這個值。若兩者不同支 app，才需要另外設 `MCP_OAUTH_AUDIENCE` 覆寫。
+- **token 內容**：app 對自己做 client credentials，取得的 token **沒有 `scp` 也沒有 `roles`**。MCP 伺服器的 token 驗證不檢查這兩者，因此可以通過。
+- **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
+
+> 這條身分**與路由測試無關**。TEST 階段打 APIM 送的是**使用者委派 token**，供 runtime 做 OBO 交換；app-only token 沒有使用者身分，不能用在那條路徑上。
 
 ### 3.2 Azure SQL 連線與驗證策略
 

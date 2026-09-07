@@ -3997,7 +3997,7 @@ function renderToolCall(call) {
     card.dataset.testid = "draft-card";
     card.innerHTML = `<strong>${svgIcon("i-document-text")} SKILL.md ready</strong><p>Review SKILL.md in the Files tab. Accepting stores this draft and moves you into refinement.</p>
       <label class="draft-name">Skill name
-        <input type="text" data-testid="draft-name-input" value="${escapeHtml(inferCurrentName())}" maxlength="64" spellcheck="false" autocomplete="off">
+        <input type="text" data-testid="draft-name-input" value="${escapeHtml(normalizeSkillName(inferCurrentName(args.skill_md)))}" placeholder="my-skill-name" maxlength="64" spellcheck="false" autocomplete="off">
       </label>
       <div class="draft-public">
         <label for="draftPublicToggle">
@@ -4052,7 +4052,7 @@ function renderToolCall(call) {
   } else if (call.tool === "rename_skill") {
     card.classList.add("patch-card");
     card.dataset.testid = "rename-card";
-    const oldName = escapeHtml(inferCurrentName());
+    const oldName = escapeHtml(session?.remote_skill_id || session?.target_skill_id || inferCurrentName());
     const newName = escapeHtml(String(args.new_name || ""));
     card.innerHTML = `<div class="patch-summary"><strong>${svgIcon("i-adjustments")} Rename proposed</strong><span>${oldName} &rarr; ${newName}</span></div>
       <p>${escapeHtml(args.reason || "Rename this skill.")}</p>
@@ -4938,10 +4938,15 @@ async function prepareRunTest() {
   return handleUnsavedBeforeTest();
 }
 
-function inferCurrentName() {
-  const md = session?.current_skill?.skill_md || "";
-  const match = md.match(/^name:\s*(.+)$/m);
-  return match ? match[1].trim() : "skill";
+// ``mdOverride`` matters for cards rendered from an SSE tool_call: the local
+// session is only refreshed by the later state_update event, so reading it
+// there would yield the previous draft's name.
+function inferCurrentName(mdOverride) {
+  const md = String(mdOverride ?? session?.current_skill?.skill_md ?? "");
+  const frontmatter = md.match(/^\ufeff?---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
+  const match = frontmatter && frontmatter[1].match(/^name:\s*(.+)$/m);
+  if (match) return match[1].trim();
+  return session?.target_skill_id || session?.remote_skill_id || "";
 }
 
 // Mirrors backend _SKILL_NAME_RE / dbo.skills.CK_skill_name_format.

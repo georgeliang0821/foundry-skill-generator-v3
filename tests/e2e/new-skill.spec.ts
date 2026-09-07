@@ -28,3 +28,15 @@ test("creates a new skill through chat and saves it locally", async ({ page, req
   await expect(page.getByTestId("markdown-preview")).not.toContainText("## Ground Rules");
   await expect(page.getByTestId("markdown-preview").locator("pre code").filter({ hasText: "def run" })).toBeVisible();
 });
+
+test("draft card prefills the name from the proposed frontmatter", async ({ page }) => {
+  await openApp(page);
+  await createDraftWithFakeAgent(page);
+
+  // The card renders on the tool_call event, before the session state_update
+  // arrives, so it must read the name off the proposed draft itself.
+  await expect(page.getByTestId("draft-name-input")).toHaveValue("e2e-calendar-skill");
+
+  const toggle = await page.getByTestId("draft-public-toggle").boundingBox();
+  expect(toggle!.width).toBeLessThan(40);
+});

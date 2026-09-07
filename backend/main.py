@@ -816,13 +816,19 @@ def _warn_rename_cleanup(session: Session, old_name: str, new_name: str, why: st
     session.touch()
 
 
-def _finalize_skill_rename(session: Session, user_upn: str, old_name: str, new_name: str) -> None:
+def _finalize_skill_rename(
+    session: Session,
+    user_upn: str,
+    old_name: str,
+    new_name: str,
+    *,
+    is_public: bool,
+) -> None:
     """Rename = delete the old skill, keep only the new one (method B).
 
     Called only AFTER the new skill is fully committed (blob + SQL + grant).
     Strictly gated: the old skill is deleted only if it is in the current
-    user's modifiable set (SQL grant intersect blob presence). The new skill
-    is granted to the current logged-in user (the author). Best-effort: a
+    user's modifiable set (SQL grant intersect blob presence). Best-effort: a
     cleanup failure is logged but never breaks the just-saved new skill.
     """
     if not _user_can_modify_skill(user_upn, old_name):
@@ -836,10 +842,31 @@ def _finalize_skill_rename(session: Session, user_upn: str, old_name: str, new_n
         )
         _warn_rename_cleanup(session, old_name, new_name, "you no longer have access to it")
         return
+    # Grants hang off skill_key, so deleting the old row cascades every share
+    # away. Copy them first, and abort the delete if that fails -- losing the
+    # old skill is worse than leaving both names around.
     try:
-        # The author keeps a grant on the new skill name.
-        skills_repo.add_grant(new_name, user_upn, granted_by=user_upn)
-        # Delete old SQL row (FK cascade clears its grants) then old blob.
+        for grant in skills_repo.list_grants(old_name):
+            skills_repo.add_grant(
+                new_name,
+                grant.user_upn,
+                granted_by=grant.granted_by,
+                expires_at=grant.expires_at,
+            )
+        if not is_public:
+            skills_repo.add_grant(new_name, user_upn, granted_by=user_upn)
+    except Exception as exc:  # noqa: BLE001 -- keep the old skill reachable.
+        log_exception(
+            "skill.rename.grants_failed",
+            exc,
+            session_id=session.id,
+            old_name=old_name,
+            new_name=new_name,
+        )
+        _warn_rename_cleanup(session, old_name, new_name, f"its grants could not be moved: {exc}")
+        return
+    try:
+        # Delete old SQL row (FK cascade clears its now-copied grants) then old blob.
         skills_repo.delete_skill(old_name)
         store.delete_skill(old_name)
         # Grants and the skill set changed -- drop caches so reads re-scan.
@@ -948,8 +975,10 @@ def save_skill_dual_write(
     if existing is not None:
         acl_mod.assert_can_access(user_upn, skill_name)
     # Saving is a content action. Visibility is owned solely by
-    # PATCH /api/skills/{name}/visibility, so it is only ever inherited here.
-    is_public = bool(existing.is_public) if existing is not None else False
+    # PATCH /api/skills/{name}/visibility, so it is only ever inherited here --
+    # on a rename from the row being renamed, since the new name has none yet.
+    visibility_row = old_row if is_rename else existing
+    is_public = bool(visibility_row.is_public) if visibility_row is not None else False
     files = SkillFiles(
         name=skill_name,
         skill_md=session.current_skill.skill_md,
@@ -997,7 +1026,7 @@ def save_skill_dual_write(
                     )
         acl_mod.get_cache().invalidate(None if is_public else user_upn)
         if is_rename:
-            _finalize_skill_rename(session, user_upn, old_name, saved.name)
+            _finalize_skill_rename(session, user_upn, old_name, saved.name, is_public=is_public)
     except Exception as exc:  # noqa: BLE001
         log_exception(
             "skill.save.sql_failed",

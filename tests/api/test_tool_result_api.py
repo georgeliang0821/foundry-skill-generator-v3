@@ -217,6 +217,59 @@ def test_rename_skill_preserves_is_internal(client, backend_main, grant_skill, f
     assert fake_sql.skills["new-skill"]["is_internal"] is True
 
 
+def test_rename_skill_preserves_is_public(client, backend_main, grant_skill, fake_sql) -> None:
+    # The new name has no row yet, so visibility must be read off the row being
+    # renamed -- otherwise a public skill silently drops back to private.
+    session = _persisted_refine_session(backend_main, grant_skill, "old-skill")
+    fake_sql.skills["old-skill"]["is_public"] = True
+
+    response = client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": "call_rename", "result": {"action": "accept"}},
+    )
+
+    assert response.status_code == 200
+    assert fake_sql.skills["new-skill"]["is_public"] is True
+
+
+def test_rename_skill_migrates_every_grant(client, backend_main, grant_skill, fake_sql) -> None:
+    session = _persisted_refine_session(backend_main, grant_skill, "old-skill")
+    fake_sql.add_grant("old-skill", "colleague@example.com", granted_by="test@example.com")
+
+    response = client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": "call_rename", "result": {"action": "accept"}},
+    )
+
+    assert response.status_code == 200
+    assert ("colleague@example.com", "new-skill") in fake_sql.grants
+    assert ("test@example.com", "new-skill") in fake_sql.grants
+    assert [key for key in fake_sql.grants if key[1] == "old-skill"] == []
+
+
+def test_rename_skill_keeps_old_skill_when_grants_cannot_move(
+    client, backend_main, grant_skill, fake_sql, monkeypatch
+) -> None:
+    session = _persisted_refine_session(backend_main, grant_skill, "old-skill")
+
+    def _unavailable(*args, **kwargs):
+        raise RuntimeError("grant store offline")
+
+    monkeypatch.setattr(backend_main.skills_repo, "list_grants", _unavailable)
+
+    response = client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": "call_rename", "result": {"action": "accept"}},
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "old-skill" in fake_sql.skills
+    assert ("test@example.com", "old-skill") in fake_sql.grants
+    assert backend_main.store.load_skill("old-skill") is not None
+    assert any("grants could not be moved" in m["content"] for m in body["conversation"])
+
+
 def test_rename_skill_onto_existing_name_is_refused_and_rolled_back(
     client, backend_main, grant_skill, fake_sql
 ) -> None:

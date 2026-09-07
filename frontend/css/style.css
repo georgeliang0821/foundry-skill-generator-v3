@@ -3081,7 +3081,7 @@ textarea:focus, input:focus, select:focus {
   color: #6b4a1c;
   cursor: pointer;
 }
-.grants-visibility-hint { margin: 4px 0 0 24px; font-size: 11px; color: #8a6d3b; }
+.grants-visibility-hint { margin: 4px 0 0 22px; font-size: 11px; color: #8a6d3b; }
 .draft-public {
   border: 1px solid #e0cfae;
   border-radius: 6px;
@@ -3098,7 +3098,15 @@ textarea:focus, input:focus, select:focus {
   color: #6b4a1c;
   cursor: pointer;
 }
-.draft-public-hint { margin: 4px 0 0 24px; font-size: 11px; color: #8a6d3b; }
+.draft-public-hint { margin: 4px 0 0 22px; font-size: 11px; color: #8a6d3b; }
+/* Undo the global `input { width: 100% }` so the box stays next to its label. */
+.draft-public input[type="checkbox"],
+.grants-visibility input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+}
 .binding-public {
   margin-left: 6px;
   padding: 1px 6px;

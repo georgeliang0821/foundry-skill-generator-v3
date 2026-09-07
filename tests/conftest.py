@@ -144,14 +144,18 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
             for (upn, sk), g in state.grants.items() if sk == key
         ]
 
+    def _delete_skill(name, owner_upn=None):
+        key = _skill_key(name, owner_upn)
+        state.skills.pop(key, None)
+        # Mirrors FK_user_skill_grants_skill ... ON DELETE CASCADE.
+        for grant_key in [candidate for candidate in state.grants if candidate[1] == key]:
+            state.grants.pop(grant_key, None)
+
     monkeypatch.setattr(skills_repo, "list_skills_for_user", _list_skills_for_user)
     monkeypatch.setattr(skills_repo, "get_skill", _get_skill)
     monkeypatch.setattr(skills_repo, "upsert_skill", state.upsert_skill)
     monkeypatch.setattr(skills_repo, "set_skill_visibility", state.set_skill_visibility)
-    monkeypatch.setattr(
-        skills_repo, "delete_skill",
-        lambda n, owner_upn=None: state.skills.pop(_skill_key(n, owner_upn), None),
-    )
+    monkeypatch.setattr(skills_repo, "delete_skill", _delete_skill)
     monkeypatch.setattr(skills_repo, "list_grants", _list_grants)
     monkeypatch.setattr(skills_repo, "list_grants_for_user", state.list_grants_for_user)
     monkeypatch.setattr(skills_repo, "add_grant", state.add_grant)
