@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skill Generator V3</title>
+    <link rel="stylesheet" href="/vendor/@highlightjs/cdn-assets/styles/github.min.css" />
+    <link rel="stylesheet" href="/assets/css/style.css?v=20260527-warm-refresh" />
+  </head>
+  <body>
+    <div id="permissionBanner" class="permission-banner hidden" role="alert">
+      <svg class="icon" aria-hidden="true"><use href="#i-warning"/></svg>
+      <span class="permission-banner-text" id="permissionBannerText">You do not have permission for that action.</span>
+      <button class="permission-banner-dismiss" type="button" aria-label="Dismiss" onclick="document.getElementById('permissionBanner').classList.add('hidden')">x</button>
+    </div>
+    <div id="loginGate" class="login-gate hidden" role="dialog" aria-modal="true">
+      <div class="login-gate-card">
+        <svg class="icon" aria-hidden="true" style="width:48px;height:48px"><use href="#i-user-circle"/></svg>
+        <h2>Sign-in required</h2>
+        <p>This Skill Generator manages skills per Microsoft account. Please sign in with your Microsoft account to continue.</p>
+        <button id="loginGateBtn" class="primary" type="button" onclick="window.location.href=(window.SG_API_BASE||'')+'/api/auth/login'">Sign in with Microsoft</button>
+      </div>
+    </div>
+    <div id="grantsModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="grantsModalTitle">
+      <div class="modal-card grants-modal">
+        <header class="modal-head">
+          <h3 id="grantsModalTitle">Skill access</h3>
+          <button class="modal-close" type="button" aria-label="Close" data-action="close-grants-modal">x</button>
+        </header>
+        <div class="modal-body">
+          <p class="grants-skill-line"><strong>Skill:</strong> <span id="grantsModalSkill"></span></p>
+          <div class="grants-visibility">
+            <label for="grantsPublicToggle">
+              <input id="grantsPublicToggle" type="checkbox" />
+              Public - everyone can use this skill
+            </label>
+            <p class="grants-visibility-hint" id="grantsPublicHint"></p>
+          </div>
+          <ul id="grantsList" class="grants-list" aria-live="polite"></ul>
+          <form id="grantsAddForm" class="grants-add" autocomplete="off">
+            <label for="grantsAddInput">Grant access to UPN</label>
+            <input id="grantsAddInput" type="email" placeholder="user@contoso.com" required />
+            <button class="primary" type="submit">Add</button>
+          </form>
+          <p id="grantsError" class="grants-error" role="alert" aria-live="assertive"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="saveSamplesModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="saveSamplesModalTitle">
+      <div class="modal-card save-samples-modal">
+        <header class="modal-head">
+          <h3 id="saveSamplesModalTitle">Save test samples</h3>
+          <button class="modal-close" type="button" aria-label="Close" data-action="close-save-samples-modal">x</button>
+        </header>
+        <div class="modal-body">
+          <p class="save-samples-text">You edited the routing samples. Choose what should happen:</p>
+          <ul class="save-samples-options">
+            <li><strong>Just update the samples</strong> &mdash; save them for testing only. The skill description and the confirmed checklist stay as they are.</li>
+            <li><strong>Update &amp; ask the agent to review</strong> &mdash; save them and let the agent re-check whether the description / checklist should change because of this edit.</li>
+          </ul>
+          <div class="modal-actions">
+            <button class="primary" type="button" data-action="save-samples-only">Just update the samples</button>
+            <button class="ghost" type="button" data-action="save-samples-revisit">Update &amp; ask the agent to review</button>
+            <button class="ghost" type="button" data-action="save-samples-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="materialViewModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="materialViewTitle">
+      <div class="modal-card material-view-modal">
+        <header class="modal-head">
+          <h3 id="materialViewTitle">Material content</h3>
+          <button class="modal-close" type="button" aria-label="Close" data-action="close-material-view">x</button>
+        </header>
+        <div class="modal-body">
+          <p class="material-view-kind"><strong>Kind:</strong> <span id="materialViewKind"></span></p>
+          <pre id="materialViewContent" class="material-view-content" data-testid="material-view-content"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inline Heroicons solid sprite (24x24). All path data is original / public Heroicons MIT licensed. -->
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-sparkles" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M9 4.5a.75.75 0 0 1 .721.544l.813 2.846a3.75 3.75 0 0 0 2.576 2.576l2.846.813a.75.75 0 0 1 0 1.442l-2.846.813a3.75 3.75 0 0 0-2.576 2.576l-.813 2.846a.75.75 0 0 1-1.442 0l-.813-2.846A3.75 3.75 0 0 0 4.89 13.534l-2.846-.813a.75.75 0 0 1 0-1.442l2.846-.813A3.75 3.75 0 0 0 7.466 7.89L8.28 5.044A.75.75 0 0 1 9 4.5ZM18 1.5a.75.75 0 0 1 .728.568l.258 1.036a2.63 2.63 0 0 0 1.91 1.91l1.036.258a.75.75 0 0 1 0 1.456l-1.036.258a2.63 2.63 0 0 0-1.91 1.91l-.258 1.036a.75.75 0 0 1-1.456 0l-.258-1.036a2.63 2.63 0 0 0-1.91-1.91l-1.036-.258a.75.75 0 0 1 0-1.456l1.036-.258a2.63 2.63 0 0 0 1.91-1.91l.258-1.036A.75.75 0 0 1 18 1.5ZM16.5 15a.75.75 0 0 1 .712.513l.394 1.183a1.5 1.5 0 0 0 .948.948l1.183.395a.75.75 0 0 1 0 1.422l-1.183.395a1.5 1.5 0 0 0-.948.948l-.395 1.183a.75.75 0 0 1-1.422 0l-.395-1.183a1.5 1.5 0 0 0-.948-.948l-1.183-.395a.75.75 0 0 1 0-1.422l1.183-.395a1.5 1.5 0 0 0 .948-.948l.395-1.183A.75.75 0 0 1 16.5 15Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-clipboard-check" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M7.5 5.25a3 3 0 0 1 3-3h3a3 3 0 0 1 3 3v.205c.933.085 1.857.197 2.774.334 1.454.218 2.476 1.483 2.476 2.917v3.033c0 8.131-6.45 14.61-14.5 14.61h-.001a.75.75 0 0 1-.75-.75v-3.86c0-1.434 1.022-2.7 2.476-2.917.917-.137 1.84-.249 2.774-.334V5.25Zm-1.5 9.564V4.875c-.62.038-1.236.087-1.849.146A1.5 1.5 0 0 0 3 6.508v3.033c0 1.853.493 3.616 1.36 5.131A18.91 18.91 0 0 1 6 14.814ZM12.97 9.97a.75.75 0 0 1 0 1.06l-3 3a.75.75 0 0 1-1.06 0l-1.5-1.5a.75.75 0 0 1 1.06-1.06l.97.97 2.47-2.47a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-document-text" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625Zm5.845 17.03a.75.75 0 0 0 0-1.06l-1.97-1.97 1.97-1.97a.75.75 0 0 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06 0Zm2.97-1.06a.75.75 0 0 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 0 0-1.06 1.06l1.97 1.97-1.97 1.97Z" clip-rule="evenodd"/><path fill="currentColor" d="M14.25 5.25a5.23 5.23 0 0 0-1.279-3.434 9.768 9.768 0 0 1 6.963 6.963A5.23 5.23 0 0 0 16.5 7.5h-1.875a.375.375 0 0 1-.375-.375V5.25Z"/></symbol>
+        <symbol id="i-adjustments" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 3.75a.75.75 0 0 1 .75.75v6.94l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06l1.72 1.72V4.5a.75.75 0 0 1 .75-.75Zm-9 9a.75.75 0 0 1 .75-.75h16.5a.75.75 0 0 1 0 1.5H3.75a.75.75 0 0 1-.75-.75Zm.75 5.25a.75.75 0 0 0 0 1.5h16.5a.75.75 0 0 0 0-1.5H3.75Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-beaker" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M8.25 6.75a.75.75 0 0 1 .75-.75h.75V3.75a.75.75 0 0 1 1.5 0V6h2.25V3.75a.75.75 0 0 1 1.5 0V6H15a.75.75 0 0 1 0 1.5h-.75v7.652l3.625 5.984A1.5 1.5 0 0 1 16.5 23.25h-9a1.5 1.5 0 0 1-1.375-2.114L9.75 15.152V7.5H9a.75.75 0 0 1-.75-.75Zm3 .75v7.85l-1.83 3.02a8.957 8.957 0 0 1 5.16 0L12.75 15.35V7.5h-1.5Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-check-circle" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm13.36-1.814a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-paper-clip" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M18.97 3.659a2.25 2.25 0 0 0-3.182 0l-10.94 10.94a3.75 3.75 0 1 0 5.304 5.303l7.693-7.693a.75.75 0 0 1 1.06 1.06l-7.693 7.693a5.25 5.25 0 1 1-7.424-7.424l10.939-10.94a3.75 3.75 0 1 1 5.303 5.304L9.097 19.81a.5.5 0 0 1-.069.057 2.252 2.252 0 0 1-3.183-3.182L13.59 8.94a.75.75 0 0 1 1.06 1.06l-7.722 7.722a.752.752 0 0 0 1.06 1.062L18.97 6.84a2.25 2.25 0 0 0 0-3.182Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-check-badge" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M8.603 3.799A4.49 4.49 0 0 1 12 2.25c1.357 0 2.573.6 3.397 1.549a4.49 4.49 0 0 1 3.498 1.307 4.491 4.491 0 0 1 1.307 3.497A4.49 4.49 0 0 1 21.75 12a4.49 4.49 0 0 1-1.549 3.397 4.491 4.491 0 0 1-1.307 3.497 4.491 4.491 0 0 1-3.497 1.307A4.49 4.49 0 0 1 12 21.75a4.49 4.49 0 0 1-3.397-1.549 4.49 4.49 0 0 1-3.498-1.306 4.491 4.491 0 0 1-1.307-3.498A4.49 4.49 0 0 1 2.25 12c0-1.357.6-2.573 1.549-3.397a4.49 4.49 0 0 1 1.307-3.497 4.49 4.49 0 0 1 3.497-1.307Zm7.007 6.387a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-document" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.625 1.5H9a3.75 3.75 0 0 1 3.75 3.75v1.875c0 1.036.84 1.875 1.875 1.875H16.5a3.75 3.75 0 0 1 3.75 3.75v7.875c0 1.035-.84 1.875-1.875 1.875H5.625a1.875 1.875 0 0 1-1.875-1.875V3.375c0-1.036.84-1.875 1.875-1.875Zm6.905 9.97a.75.75 0 0 0-1.06 0l-3 3a.75.75 0 1 0 1.06 1.06l1.72-1.72V18a.75.75 0 0 0 1.5 0v-4.19l1.72 1.72a.75.75 0 1 0 1.06-1.06l-3-3Z" clip-rule="evenodd"/><path fill="currentColor" d="M14.25 5.25a5.23 5.23 0 0 0-1.279-3.434 9.768 9.768 0 0 1 6.963 6.963A5.23 5.23 0 0 0 16.5 7.5h-1.875a.375.375 0 0 1-.375-.375V5.25Z"/></symbol>
+        <symbol id="i-bug" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M8.25 4.5a3.75 3.75 0 1 1 7.5 0v.95a8.965 8.965 0 0 1 2.252 1.487 9.66 9.66 0 0 1 2.124-.578.75.75 0 1 1 .248 1.479c-.4.067-.793.151-1.18.253A8.97 8.97 0 0 1 21 12c0 .689-.072 1.36-.21 2.007.408.115.808.249 1.199.4a.75.75 0 0 1-.42 1.44 9.84 9.84 0 0 0-1.193-.32 9.04 9.04 0 0 1-1.197 2.42c.41.073.812.166 1.206.275a.75.75 0 0 1-.395 1.448c-.435-.119-.879-.218-1.331-.296a8.99 8.99 0 0 1-2.911 2.155v.221a.75.75 0 0 1-1.5 0v-1.5a8.991 8.991 0 0 0 2.95-.586 8.962 8.962 0 0 0-1.7-13.85 7.477 7.477 0 0 1-.69-1.07.75.75 0 0 1 1.34-.67 5.962 5.962 0 0 0 .545.85 8.985 8.985 0 0 1 .55-.36 3.5 3.5 0 0 0-6.45 0c.183.116.367.234.55.36a5.97 5.97 0 0 0 .545-.85.75.75 0 0 1 1.34.67c-.218.392-.448.749-.69 1.07A8.962 8.962 0 0 0 6.7 19.834a8.991 8.991 0 0 0 2.95.586v1.5a.75.75 0 0 1-1.5 0v-.22A8.991 8.991 0 0 1 5.24 19.546a9.84 9.84 0 0 0-1.331.296.75.75 0 1 1-.395-1.448 11.43 11.43 0 0 1 1.206-.275 9.04 9.04 0 0 1-1.197-2.42 9.84 9.84 0 0 0-1.193.32.75.75 0 1 1-.42-1.44 11.4 11.4 0 0 1 1.199-.4A8.984 8.984 0 0 1 3 12c0-.918.138-1.804.394-2.638a11.422 11.422 0 0 1-1.18-.253.75.75 0 0 1 .247-1.479c.7.117 1.41.31 2.125.578A8.965 8.965 0 0 1 8.25 5.45V4.5Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-code" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm14.5 4.28a.75.75 0 0 0-1.06-1.06l-3 3-.018.02a.75.75 0 0 0 .018 1.04l3 3a.75.75 0 1 0 1.06-1.06l-2.47-2.47 2.47-2.47Zm-7.94-1.06a.75.75 0 0 0-1.06 1.06L10.97 12.75 8.5 15.22a.75.75 0 0 0 1.06 1.06l3-3a.75.75 0 0 0 0-1.06l-3-3Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-share" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M15.75 4.5a3 3 0 1 1 .825 2.066l-8.421 4.679a3.002 3.002 0 0 1 0 1.51l8.421 4.679a3 3 0 1 1-.729 1.31l-8.421-4.678a3 3 0 1 1 0-4.132l8.421-4.679a3.005 3.005 0 0 1-.096-.755Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-arrow-up-right" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.25 12a.75.75 0 0 1 .75-.75h11.69L13.72 7.28a.75.75 0 1 1 1.06-1.06l5.25 5.25a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 1 1-1.06-1.06l3.97-3.97H6a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-user-circle" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M18.685 19.097A9.723 9.723 0 0 0 21.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 0 0 3.065 7.097A9.716 9.716 0 0 0 12 21.75a9.716 9.716 0 0 0 6.685-2.653Zm-12.54-1.285A7.486 7.486 0 0 1 12 15a7.486 7.486 0 0 1 5.855 2.812A8.224 8.224 0 0 1 12 20.25a8.224 8.224 0 0 1-5.855-2.438ZM15.75 9a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-bolt" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.71l1.992-7.302H3.75a.75.75 0 0 1-.548-1.262l10.5-11.25a.75.75 0 0 1 .913-.143Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-expand" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M15 3.75a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 .75.75v4.5a.75.75 0 0 1-1.5 0V5.56l-3.97 3.97a.75.75 0 1 1-1.06-1.06l3.97-3.97h-2.69a.75.75 0 0 1-.75-.75Zm-12 0A.75.75 0 0 1 3.75 3h4.5a.75.75 0 0 1 0 1.5H5.56l3.97 3.97a.75.75 0 0 1-1.06 1.06L4.5 5.56v2.69a.75.75 0 0 1-1.5 0v-4.5Zm11.47 11.78a.75.75 0 1 1 1.06-1.06l3.97 3.97v-2.69a.75.75 0 0 1 1.5 0v4.5a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1 0-1.5h2.69l-3.97-3.97Zm-4.94-1.06a.75.75 0 0 1 0 1.06L5.56 19.5h2.69a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75v-4.5a.75.75 0 0 1 1.5 0v2.69l3.97-3.97a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-collapse" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3.97 3.97a.75.75 0 0 1 1.06 0l4.97 4.97V5.75a.75.75 0 0 1 1.5 0V11a.75.75 0 0 1-.75.75H5.5a.75.75 0 0 1 0-1.5h3.19L3.97 5.03a.75.75 0 0 1 0-1.06Zm12.94 0a.75.75 0 0 1 1.06 1.06l-4.97 4.97h3.19a.75.75 0 0 1 0 1.5H13a.75.75 0 0 1-.75-.75V5.75a.75.75 0 0 1 1.5 0v3.19l4.97-4.97a.75.75 0 0 1 .19-.14ZM5.03 20.03a.75.75 0 0 1-1.06-1.06L8.94 14H5.75a.75.75 0 0 1 0-1.5H11a.75.75 0 0 1 .75.75v5.25a.75.75 0 0 1-1.5 0v-3.19l-4.97 4.97a.75.75 0 0 1-.25.17Zm13.94 0a.75.75 0 0 1-1.06 0l-4.97-4.97v3.19a.75.75 0 0 1-1.5 0V13a.75.75 0 0 1 .75-.75h5.25a.75.75 0 0 1 0 1.5h-3.19l4.97 4.97a.75.75 0 0 1 0 1.06Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-arrow-path" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.919.53 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.984a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.53-.918Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.47 5.47a.75.75 0 0 1 1.06 0L12 10.94l5.47-5.47a.75.75 0 1 1 1.06 1.06L13.06 12l5.47 5.47a.75.75 0 1 1-1.06 1.06L12 13.06l-5.47 5.47a.75.75 0 0 1-1.06-1.06L10.94 12 5.47 6.53a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M19.916 4.626a.75.75 0 0 1 .208 1.04l-9 13.5a.75.75 0 0 1-1.154.114l-6-6a.75.75 0 0 1 1.06-1.06l5.353 5.353 8.493-12.74a.75.75 0 0 1 1.04-.207Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-warning" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-chat" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M4.804 21.644A6.707 6.707 0 0 0 6 21.75a6.721 6.721 0 0 0 3.583-1.029c.774.182 1.581.279 2.417.279 5.322 0 9.75-3.97 9.75-9 0-5.03-4.428-9-9.75-9s-9.75 3.97-9.75 9c0 2.409 1.025 4.587 2.674 6.192.232.226.277.428.254.543a3.73 3.73 0 0 1-.814 1.686.75.75 0 0 0 .44 1.223ZM8.25 10.875a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25ZM10.875 12a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Zm4.875-1.125a1.125 1.125 0 1 0 0 2.25 1.125 1.125 0 0 0 0-2.25Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-info" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12Zm8.706-1.442c1.146-.573 2.437.463 2.126 1.706l-.709 2.836.042-.02a.75.75 0 0 1 .67 1.34l-.04.022c-1.147.573-2.438-.463-2.127-1.706l.71-2.836-.042.02a.75.75 0 1 1-.671-1.34l.041-.022ZM12 9a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-layers" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M11.644 1.59a.75.75 0 0 1 .712 0l9.75 5.25a.75.75 0 0 1 0 1.32l-9.75 5.25a.75.75 0 0 1-.712 0l-9.75-5.25a.75.75 0 0 1 0-1.32l9.75-5.25ZM3.265 10.81a.75.75 0 0 1 1.02-.297l7.715 4.154 7.715-4.154a.75.75 0 1 1 .71 1.32l-8.05 4.334a.75.75 0 0 1-.71 0l-8.05-4.334a.75.75 0 0 1-.297-1.022Zm0 4.5a.75.75 0 0 1 1.02-.297l7.715 4.154 7.715-4.154a.75.75 0 1 1 .71 1.32l-8.05 4.334a.75.75 0 0 1-.71 0l-8.05-4.334a.75.75 0 0 1-.297-1.022Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path fill="currentColor" d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z"/></symbol>
+        <symbol id="i-puzzle" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M14.25 2.25a.75.75 0 0 1 .75.75v3a.75.75 0 0 0 .75.75h3a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-.75.75 1.5 1.5 0 0 0 0 3 .75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-.75.75h-3.75a.75.75 0 0 1-.75-.75 1.5 1.5 0 0 0-3 0 .75.75 0 0 1-.75.75H6a.75.75 0 0 1-.75-.75v-3a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 1-.75-.75V13.5a.75.75 0 0 1 .75-.75 1.5 1.5 0 0 0 0-3 .75.75 0 0 1-.75-.75V5.25a.75.75 0 0 1 .75-.75h3a.75.75 0 0 0 .75-.75v-1.5a.75.75 0 0 1 .75-.75h3.75Z" clip-rule="evenodd"/></symbol>
+        <symbol id="i-flag" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M3 3a.75.75 0 0 1 .75-.75h16.5a.75.75 0 0 1 .574 1.232l-4.762 5.668 4.762 5.668a.75.75 0 0 1-.574 1.232H4.5v6.75a.75.75 0 0 1-1.5 0V3Z" clip-rule="evenodd"/></symbol>
+      </defs>
+    </svg>
+
+    <div class="app-shell">
+      <header class="app-header" role="banner">
+        <div class="brand">
+          <img class="brand-mark" src="/assets/EAA-logo.png" alt="EAA logo" />
+          <span class="brand-text">
+            <strong>Skill Generator V3</strong>
+            <span class="brand-subtitle">Conversational skill authoring</span>
+          </span>
+        </div>
+
+        <div class="workflow-controls">
+          <div class="workflow-control-row">
+            <div class="control-group">
+              <label for="modeSelect">Mode</label>
+              <select id="modeSelect" data-testid="mode-select">
+                <option value="new">new</option>
+                <option value="modify">modify</option>
+              </select>
+            </div>
+            <div class="control-group skill-kind-group">
+              <label for="skillKindSelect">Kind</label>
+              <select id="skillKindSelect" data-testid="skill-kind-select">
+                <option value="capability">capability</option>
+                <option value="scenario">scenario</option>
+              </select>
+            </div>
+            <div class="control-group target-skill-group">
+              <label for="targetSkill">Skill</label>
+              <div class="skill-select-row">
+                <select id="targetSkill" class="hidden" data-testid="target-skill-select">
+                  <option value="">Select an existing skill</option>
+                </select>
+                <button id="refreshSkillsBtn" class="ghost icon-only-button" type="button" title="Refresh skills (re-read from SQL &amp; Blob)" data-testid="refresh-skills-button" aria-label="Refresh skills">
+                  <svg class="icon" aria-hidden="true"><use href="#i-arrow-path"/></svg>
+                </button>
+                <button id="grantsBtn" class="ghost icon-only-button" style="display:none" type="button" title="Manage who can access this skill" data-testid="grants-button" aria-label="Manage grants">
+                  <svg class="icon" aria-hidden="true"><use href="#i-user-circle"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="control-group session-picker-group">
+              <label for="sessionList">Session</label>
+              <select id="sessionList" data-testid="session-list">
+                <option value="">No saved sessions</option>
+              </select>
+            </div>
+            <button id="newSessionBtn" class="primary icon-button" data-testid="new-session-button" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
+              <span>New session</span>
+            </button>
+          </div>
+          <p id="modeHelp" class="mode-help" aria-hidden="true"></p>
+          <p id="kindHelp" class="mode-help" aria-hidden="true"></p>
+        </div>
+
+        <div class="auth-box">
+          <div class="auth-copy">
+            <span id="authStatus" class="auth-status">Checking sign-in</span>
+            <span id="authProfile" class="auth-profile">Not signed in</span>
+          </div>
+          <button id="authBtn" class="auth-button" type="button" aria-expanded="false" aria-controls="authProfilePanel">
+            <span class="auth-icon" aria-hidden="true"><svg class="icon"><use href="#i-user-circle"/></svg></span>
+            <span class="auth-label">Sign in</span>
+          </button>
+          <div id="authProfilePanel" class="auth-profile-panel hidden" role="dialog" aria-label="Signed-in profile"></div>
+        </div>
+      </header>
+
+      <main class="workspace" role="main">
+        <section class="panel chat-panel" aria-label="Conversation and workflow">
+          <div class="chat-stage-overview">
+            <div class="stage-overview-head">
+              <span class="eyebrow">Workflow</span>
+              <div class="header-status">
+                <span id="llmStatus" class="llm-status hidden">
+                  <span class="spinner" aria-hidden="true"></span>
+                  <span id="llmStatusText">Thinking</span>
+                </span>
+                <span id="skillBindingStatus" class="skill-binding-status" data-testid="skill-binding-status">Blob skill: NEW</span>
+                <span id="sessionId" class="session-pill is-hidden" data-testid="session-id" aria-hidden="true">No session</span>
+                <span id="doneBadge" class="done-badge hidden">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check-circle"/></svg>
+                  Done
+                </span>
+              </div>
+            </div>
+            <div class="stepper" id="stageList" data-testid="stage-list" role="list"></div>
+          </div>
+
+          <div id="chatStream" class="chat-stream" data-testid="chat-stream" aria-live="polite"></div>
+          <div id="toolCalls" class="tool-calls" data-testid="tool-calls"></div>
+          <div id="questionQueueStatus" class="question-queue hidden" data-testid="question-queue-status"></div>
+
+          <form id="chatForm" class="chat-form" autocomplete="off">
+            <textarea id="messageInput" rows="3" placeholder="Describe what this skill should do, or paste docs / code" data-testid="message-input"></textarea>
+            <button id="sendBtn" type="submit" class="icon-button primary" data-testid="send-button">
+              <span>Send</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
+            </button>
+          </form>
+        </section>
+
+        <div
+          id="workspaceResizer"
+          class="workspace-resizer"
+          role="separator"
+          aria-label="Resize chat and context panels"
+          aria-orientation="vertical"
+          tabindex="0"
+          data-testid="workspace-resizer"
+        ></div>
+
+        <section class="panel context-panel" aria-label="Workspace context">
+          <nav class="context-tabs" role="tablist" aria-label="Context views">
+            <button data-context="materials" data-testid="tab-materials" class="active" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-paper-clip"/></svg><span>Materials</span>
+            </button>
+            <button data-context="checklist" data-testid="tab-checklist" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-check-badge"/></svg><span>Checklist</span>
+            </button>
+            <button data-context="files" data-testid="tab-files" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-document"/></svg><span>SKILL.md</span>
+            </button>
+            <button data-context="tests" data-testid="tab-tests" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-beaker"/></svg><span>Tests</span>
+            </button>
+            <button data-context="topology" data-testid="tab-topology" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-check-circle"/></svg><span>Topology</span>
+            </button>
+            <button data-context="agent" data-testid="tab-agent" type="button" role="tab">
+              <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Agent Graph</span>
+            </button>
+            <button data-context="inspect" data-testid="tab-inspect" type="button" class="developer-tab" role="tab" title="Developer view">
+              <svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><span>Inspect</span><span class="dev-tag" aria-label="developer view">dev</span>
+            </button>
+          </nav>
+
+          <div class="context-pane" data-context-pane="materials">
+            <div class="pane-intro">
+              <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-paper-clip"/></svg> Materials</h2>
+              <p class="panel-subtitle">Press + Add material to attach docs, code, or a sample.</p>
+            </div>
+            <div id="materialList" class="material-list"></div>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="files">
+            <div class="pane-intro files-header">
+              <div>
+                <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-document"/></svg> SKILL.md</h2>
+                <p class="panel-subtitle">Single artifact. Environment guidance and sample code live inside this Markdown.</p>
+              </div>
+              <div class="button-row">
+                <button id="saveDraftBtn" type="button" class="icon-button primary" data-testid="accept-draft-button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>
+                  <span>Save skill</span>
+                </button>
+              </div>
+            </div>
+            <div class="skill-md-workspace">
+              <label class="skill-editor-pane">
+                <span>Source</span>
+                <textarea id="editor" spellcheck="false" data-testid="file-editor"></textarea>
+              </label>
+              <div
+                id="filesResizer"
+                class="files-resizer"
+                role="separator"
+                aria-label="Resize SKILL.md source and preview panes"
+                aria-orientation="vertical"
+                tabindex="0"
+                data-testid="files-resizer"
+              ></div>
+              <section class="skill-preview-pane" aria-label="Rendered SKILL.md preview">
+                <div class="skill-preview-header">
+                  <span>Preview</span>
+                </div>
+                <article id="markdownPreview" class="markdown-preview" data-testid="markdown-preview"></article>
+              </section>
+            </div>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="checklist">
+            <div class="pane-intro">
+              <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-check-badge"/></svg> Verify checklist</h2>
+              <p id="checklistSummary" class="panel-subtitle"></p>
+            </div>
+            <div id="checklist" class="check-list" data-testid="checklist"></div>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="tests">
+            <div class="pane-intro files-header">
+              <div>
+                <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-beaker"/></svg> Skill-selection tests</h2>
+                <p class="panel-subtitle">Run positive and negative samples against the saved Blob skill.</p>
+              </div>
+              <div class="button-row">
+                <button id="saveTestSamplesBtn" type="button" class="icon-button" data-testid="save-test-samples-button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>
+                  <span>Save samples</span>
+                </button>
+                <button id="runTestBtn" type="button" class="icon-button primary" data-testid="run-tests-button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-bolt"/></svg>
+                  <span>Run tests</span>
+                </button>
+              </div>
+            </div>
+            <details class="tests-section" id="samplesSection" open>
+              <summary class="tests-section-summary">
+                <span class="tests-section-title">Sample settings</span>
+                <span class="tests-section-hint">Positive &amp; negative routing samples</span>
+              </summary>
+              <div class="tests-section-body">
+            <div class="test-sample-editor">
+              <div class="samples-editor" data-test-samples-editor>
+                <div class="samples-group">
+                  <div class="samples-group-head"><strong>Positive samples — should route here</strong><button type="button" class="sample-add" data-add-test-sample="positive">+ Add row</button></div>
+                  <div class="samples-rows" data-test-rows="positive"></div>
+                </div>
+                <div class="samples-group">
+                  <div class="samples-group-head"><strong>Negative samples — should NOT route here</strong><button type="button" class="sample-add" data-add-test-sample="negative">+ Add row</button></div>
+                  <div class="samples-rows" data-test-rows="negative"></div>
+                </div>
+              </div>
+              <textarea id="positiveSamplesInput" hidden data-testid="positive-samples-input"></textarea>
+              <textarea id="negativeSamplesInput" hidden data-testid="negative-samples-input"></textarea>
+            </div>
+              </div>
+            </details>
+            <details class="tests-section" id="resultsSection" open>
+              <summary class="tests-section-summary">
+                <span class="tests-section-title">Test results</span>
+                <span class="tests-section-hint">Expected vs actual per sample, plus run history</span>
+              </summary>
+              <div class="tests-section-body">
+                <div id="testResults" class="test-list" data-testid="test-results"></div>
+              </div>
+            </details>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="topology">
+            <div class="pane-intro">
+              <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-check-circle"/></svg> Topology validation</h2>
+              <p class="panel-subtitle">Structural checks for the current SKILL.md.</p>
+            </div>
+            <div id="topologyResults" class="topology-results" data-testid="topology-results"></div>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="agent">
+            <div class="pane-intro agent-graph-intro">
+              <div>
+                <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-share"/></svg> Agent Graph</h2>
+                <p class="panel-subtitle">A visual aid for understanding how this agent works. Pick a stage to see its fixed prompts, injected context, carried data, and transitions.</p>
+              </div>
+              <div class="button-row">
+                <button id="fitAgentGraphBtn" type="button" class="icon-button" data-testid="fit-agent-graph-button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-arrow-path"/></svg>
+                  <span>Fit graph</span>
+                </button>
+                <button id="fullscreenAgentGraphBtn" type="button" class="icon-button" data-testid="fullscreen-agent-graph-button">
+                  <svg class="icon" aria-hidden="true"><use href="#i-expand"/></svg>
+                  <span>Fullscreen</span>
+                </button>
+              </div>
+            </div>
+            <div id="agentGraphLegend" class="agent-graph-legend" aria-label="Graph legend">
+              <span class="legend-item legend-prepare"><span class="legend-dot"></span>Prepare</span>
+              <span class="legend-item legend-draft"><span class="legend-dot"></span>Draft</span>
+              <span class="legend-item legend-refine"><span class="legend-dot"></span>Refine</span>
+              <span class="legend-item legend-test"><span class="legend-dot"></span>Test</span>
+              <span class="legend-item legend-done"><span class="legend-dot"></span>Done</span>
+              <span class="legend-divider" aria-hidden="true"></span>
+              <span class="legend-item legend-edge-out"><span class="legend-arrow">&rarr;</span>Out edge</span>
+              <span class="legend-item legend-edge-in"><span class="legend-arrow">&larr;</span>In edge</span>
+            </div>
+            <div id="agentGraphContent" class="agent-graph-content">
+              <div id="agentGraph" class="agent-graph" data-testid="agent-graph"></div>
+              <div
+                id="agentGraphResizer"
+                class="agent-graph-resizer"
+                role="separator"
+                aria-label="Resize Agent Graph and stage information"
+                aria-orientation="vertical"
+                aria-valuemin="25"
+                aria-valuemax="75"
+                tabindex="0"
+                data-testid="agent-graph-resizer"
+              ></div>
+              <aside id="agentGraphDetails" class="agent-graph-details" data-testid="agent-graph-details"></aside>
+            </div>
+          </div>
+
+          <div class="context-pane hidden" data-context-pane="inspect">
+            <div class="pane-intro">
+              <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-code"/></svg> Inspect</h2>
+              <p class="panel-subtitle">Raw agent state, transitions, tools, and output rules.</p>
+            </div>
+            <div id="inspectContent" class="inspect-content"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="fatalError" class="fatal-error hidden"></div>
+    <div id="appStatus" class="app-status hidden"></div>
+    <script src="/assets/js/config.js"></script>
+    <script src="/vendor/markdown-it/dist/markdown-it.min.js"></script>
+    <script src="/vendor/@highlightjs/cdn-assets/highlight.min.js"></script>
+    <script src="/vendor/cytoscape/dist/cytoscape.min.js"></script>
+    <script type="module" src="/assets/js/main.js?v=20260527-warm-refresh"></script>
+  </body>
+</html>

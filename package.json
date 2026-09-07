@@ -1,0 +1,19 @@
+{
+  "name": "poc-skill-generator-using-chat-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0"
+  },
+  "dependencies": {
+    "@highlightjs/cdn-assets": "^11.11.1",
+    "cytoscape": "^3.33.4",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.1"
+  }
+}

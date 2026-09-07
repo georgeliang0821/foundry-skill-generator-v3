@@ -1,0 +1,96 @@
+# Stage: REFINE
+
+Goal: improve the accepted SKILL.md via narrow `propose_patch` calls. Every
+accepted patch is written back to Blob **and** Azure SQL automatically, so the
+content and the metadata always stay consistent.
+
+## Rules
+
+- Use V4A patch format with unique anchors. Include the nearest section
+  heading and enough unchanged context so the old block appears exactly once.
+- You MAY patch the YAML frontmatter `description`. Frontmatter lines are short,
+  so use a wider, unique anchor (include adjacent keys) to avoid ambiguous-anchor
+  failures.
+- **Never patch the frontmatter `name`.** A rename goes through `rename_skill`,
+  which rewrites the name for you.
+- Route the fix by failure type:
+  - **Discoverability** (the router did not pick this skill, or picked it when
+    it should not have) is a **description** problem. The skill router decides
+    routing by reading the frontmatter `description` ONLY, so refine ONLY the
+    `description` so the trigger conditions are precise. Do not rely on tags.
+  - **Usage** (the skill was picked but answered wrong / low quality) is a
+    **content** problem -> patch the body (Ground Rules, API Reference,
+    Sample Code).
+- **Keep variables and sample code in sync.** When a patch adds, renames, or
+  removes any variable (a `## Environment Variables` value, a `## OBO Token
+  Scopes` token, or a `## Required Inputs` runtime variable), you MUST also
+  patch `## API Reference / Sample Code` (and any other section referencing it)
+  in the same turn so the code reads it via `os.environ[...]` / the token / the
+  input and no stale or hard-coded value remains. Never edit the variable
+  section alone.
+- **Keep the success-path output reader-friendly.** When patching
+  `## API Reference / Sample Code`, the final primary output of `main()` must
+  stay a natural-language summary for a general end user (plain prose, not a raw
+  dict/list/JSON or structured `result` dump), unless the user explicitly asked
+  for structured/JSON output. The `[NEEDS_INFO]` line format is unchanged.
+- **Material fidelity survives REFINE.** A patch must never rewrite sample code
+  that came from a Tier 1 (`code`) material back into an invented equivalent, and
+  must never introduce a SQL object, stored procedure, table, column, endpoint or
+  payload field that appears in no material. If a fix genuinely requires
+  something the materials do not contain, say so and ask the user for the
+  material instead of guessing a name.
+- `rename_skill` RENAMES the skill: the Blob folder, the SQL row, and grants are
+  all moved and the old name is deleted. Only call it when the user explicitly
+  asks for a rename. `new_name` must be lowercase kebab-case (`a-z`, `0-9`, `-`,
+  no leading or trailing hyphen, at most 64 characters). Skills that reference
+  the old name are NOT updated, so say so when you propose the rename.
+- Do NOT emit `propose_skill_draft` in REFINE.
+- **Never remove or rewrite `metadata.children` or `metadata.skill_type` in a
+  patch.** They define which layer the skill belongs to. A patch whose applied
+  result drops or reshapes either of them is rejected. If the user genuinely
+  wants to change the dependency whitelist, change the list contents -- keep the
+  key, keep it a non-empty YAML list, and keep `metadata.skill_type:
+  scenario-orchestration` alongside it. Removing an entry removes that
+  capability from the host silently.
+- **Never inline a child's field contract back into the scenario.** A patch must
+  not add a field table, a required-field list, or a JSON payload example copied
+  from a child. If a step needs more of the child's body, widen the `sections`
+  list on the existing `fetch_skill` pointer instead of adding a second call.
+- **A scenario skill's pointers and its child must change together.** When a
+  patch adds, renames, or removes any field of the delegated payload, or changes
+  the `credentials` key, you MUST also call `propose_child_edit` in the SAME
+  turn to update the child's `## Required Inputs` to match. A payload contract
+  that only one side knows about fails at runtime with a `[NEEDS_INFO] missing=`
+  the host cannot explain.
+- **Renaming a child's `##` heading is a breaking change.** Those headings are
+  what every scenario points at. If a `propose_child_edit` renames one, update
+  every pointer naming it in the same turn.
+- **Clear the content lint before moving on.** A `skill-lint finding(s)` system
+  message lists content defects the topology rules do not cover: an unparseable
+  code block (A1), a declared/read variable mismatch (A2), a non-`SystemExit`
+  raise that misfiles a caller or business error as a deployment failure (A3),
+  an undocumented `[NEEDS_INFO]` code (A4), an uncaught SQL `THROW` (A5), a
+  missing or incomplete `## Skill 身分使用規範` section (I1), a defaulted read of
+  `EAA_VERIFIED_USER_UPN` (I2), a `try` that recovers from its `KeyError` (I3),
+  the verified identity reaching a log or output call (I4), a step
+  whose host-capability column contradicts its detail (B1), or a child branch
+  with no row in the return-branch table (B2). Patch each one, or state plainly
+  why it is a false positive. Do not propose the next stage with findings left
+  unexplained.
+- **Never weaken the verified actor contract.** If the skill has a
+  `## Skill 身分使用規範` section, a patch may not delete it, paraphrase R1-R4,
+  add a default to the `EAA_VERIFIED_USER_UPN` read, or make its absence
+  recoverable -- not even when the user asks for it while debugging. The only
+  legitimate way for the section to disappear is a PREPARE variable edit that
+  removes the `platform_identity` variable because the downstream turned out to
+  authenticate by token. If the user pushes for a fallback, explain that the
+  fallback is the vulnerability and offer to revisit the variable instead.
+- If a previous patch failed (ambiguous anchor / not found / version
+  mismatch), regenerate with a wider, unique anchor instead of repeating.
+- When the user asks for substantial scope change, emit
+  `request_stage_transition target_stage="prepare"` (the Prepare Brief is
+  preserved and `revisit` is set automatically).
+- When the user wants to validate routing quality, emit
+  `request_stage_transition target_stage="test"`.
+- When the user is satisfied and wants to finalize, emit
+  `request_stage_transition target_stage="done"`.
