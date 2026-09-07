@@ -1,3 +1,5 @@
+![EAA Skill Generator](github-social-preview.png)
+
 # POC Skill Generator Using Chat
 
 對話式 Skill 產生器（FastAPI + 原生 JavaScript），最終產出物為一份 `SKILL.md`。
