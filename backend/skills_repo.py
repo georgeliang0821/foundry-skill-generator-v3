@@ -353,13 +353,15 @@ def upsert_skill(
         1 if enabled else 0,
         None if is_internal is None else (1 if is_internal else 0),
     )
-    with db.get_cursor() as cur:
+    def _op(cur) -> bool:
         cur.execute(sql, params)
         try:
             action_row = cur.fetchone()
         except Exception:  # noqa: BLE001
             action_row = None
-        was_insert = bool(action_row and str(action_row[0]).upper() == "INSERT")
+        return bool(action_row and str(action_row[0]).upper() == "INSERT")
+
+    was_insert = db.run(_op)
     log_event(
         "skills_repo.upsert",
         skill_name=skill_name,
@@ -468,13 +470,15 @@ def add_grant(
             VALUES (source.user_upn, source.skill_key, ?, ?)
         OUTPUT $action;
     """
-    with db.get_cursor() as cur:
+    def _op(cur) -> bool:
         cur.execute(sql, (user_upn, key, granted_by, expires_at, granted_by, expires_at))
         try:
             row = cur.fetchone()
         except Exception:  # noqa: BLE001
             row = None
-        was_insert = bool(row and str(row[0]).upper() == "INSERT")
+        return bool(row and str(row[0]).upper() == "INSERT")
+
+    was_insert = db.run(_op)
     log_event(
         "skills_repo.grant_add",
         skill_name=skill_name,

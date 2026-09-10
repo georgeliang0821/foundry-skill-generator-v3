@@ -56,6 +56,12 @@ SCENARIO_SKILL_TYPE = "scenario-orchestration"
 
 
 class MaterialKind(str, Enum):
+    """Only CODE, API_SPEC and TEXT are offered in the UI -- one per fidelity tier.
+
+    FILE, EXISTING_SKILL and URL are retired aliases retained so sessions persisted
+    before the picker was reduced still deserialize.
+    """
+
     CODE = "code"
     API_SPEC = "api_spec"
     URL = "url"
@@ -75,14 +81,12 @@ class Material(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     kind: MaterialKind = MaterialKind.TEXT
     content: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
 
 
 class MaterialUpsertRequest(BaseModel):
     kind: MaterialKind = MaterialKind.TEXT
     content: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatMessage(BaseModel):
@@ -480,6 +484,8 @@ class PatchRecord(BaseModel):
     applied_at: str = Field(default_factory=utc_now_iso)
     applied_by: Literal["agent", "user"] = "user"
     reason: str = ""
+    # Verbatim IterationReflection.what_to_change entries this patch closes.
+    addresses: list[str] = Field(default_factory=list)
 
 
 class TestResult(BaseModel):
@@ -501,6 +507,11 @@ class TestResult(BaseModel):
     apim_session_id: str = ""
     apim_uploads: list[str] = Field(default_factory=list)
     apim_raw_response: dict[str, Any] = Field(default_factory=dict)
+    # Lint findings against ``apim_response`` -- the script the runtime WROTE
+    # from the body prose, which is a different artifact from the sample code
+    # the file ships. Computed once at run time: recomputing it later would
+    # report the current SKILL.md against a script an older one produced.
+    prepared_code_lint: list[dict[str, Any]] = Field(default_factory=list)
     request_sent: str = ""
     tokens: int | None = None
     duration_ms: int | None = None

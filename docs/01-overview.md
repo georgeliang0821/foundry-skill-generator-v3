@@ -108,6 +108,7 @@ flowchart TD
 | **Router（路由器）** | 依 Skill 的 frontmatter `description` 決定某個查詢要交給哪個 Skill。 |
 | **正面 / 負面範例** | 正面＝這個查詢「應該」選到本 Skill；負面＝相近但「不應該」選到本 Skill。 |
 | **Peer Skills（鄰近 Skill）** | 與本 Skill 容易混淆的其他 Skill，用來界定路由邊界。 |
+| **素材 Tier（Materials fidelity tier）** | 使用者附加素材的可信度層級，由上傳時選的 kind 決定：Tier 1 `code`（必須原樣沿用）、Tier 2 `api_spec`（識別字權威）、Tier 3 `text`（僅背景，不得作為 API/程式碼細節來源）。詳見 [04-agent-mechanism.md 第 7 節](04-agent-mechanism.md#7-素材materials的三層可信度合約)。 |
 | **OBO Token** | On-Behalf-Of 權杖；Skill 執行時代表使用者去呼叫下游系統所需的權杖。 |
 | **RLS** | Row-Level Security，資料列級隔離；以使用者 email 比對 `dbo.user_skill_grants`。 |
 | **Patch（V4A）** | AI 對 `SKILL.md` 的差異修改格式，可預覽、接受、還原。 |

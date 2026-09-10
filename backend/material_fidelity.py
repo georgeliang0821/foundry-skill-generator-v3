@@ -19,11 +19,14 @@ from .sections import h2_sections, normalize_section
 # Tier 1: reproduce, do not paraphrase.
 VERBATIM_KINDS = frozenset({MaterialKind.CODE})
 # Tier 2: the identifiers are authoritative, the surrounding code is not.
+# FILE and EXISTING_SKILL are retired aliases of API_SPEC, kept so materials saved by
+# older sessions still land in this tier.
 NO_INVENTION_KINDS = frozenset(
     {MaterialKind.API_SPEC, MaterialKind.FILE, MaterialKind.EXISTING_SKILL}
 )
 # Tier 3: prose. Deliberately excluded from the scan -- background text is not a
 # source of code detail, and scanning it yields nothing but false positives.
+# URL is a retired alias of TEXT (a pasted link is never dereferenced).
 CONTEXT_ONLY_KINDS = frozenset({MaterialKind.TEXT, MaterialKind.URL})
 
 SCANNED_KINDS = VERBATIM_KINDS | NO_INVENTION_KINDS

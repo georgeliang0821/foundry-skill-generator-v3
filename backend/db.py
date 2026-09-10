@@ -17,13 +17,15 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 import mssql_python
 
 from .diagnostics import log_exception
 
 _thread_local = threading.local()
+
+T = TypeVar("T")
 
 
 def _connection_string() -> str:
@@ -95,24 +97,37 @@ def _is_transient(exc: Exception) -> bool:
 
 @contextmanager
 def get_cursor() -> Iterator[Any]:
-    """Yield a cursor with retry-on-transient + connection recycling on failure."""
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        cn = _thread_connection()
+    """Yield a cursor for a single attempt. Retries belong in ``run``.
+
+    A @contextmanager generator must not yield again after ``throw()``, so this
+    one deliberately has no retry loop -- doing it here turned every failed
+    query into RuntimeError("generator didn't stop after throw()").
+    """
+    cn = _thread_connection()
+    cursor = cn.cursor()
+    try:
+        yield cursor
+        cn.commit()
+    except Exception:  # noqa: BLE001
         try:
-            cursor = cn.cursor()
-            try:
-                yield cursor
-                cn.commit()
-                return
-            finally:
-                cursor.close()
+            cn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    finally:
+        try:
+            cursor.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run(fn: Callable[[Any], T]) -> T:
+    """Run ``fn(cursor)`` inside a transaction, retrying transient failures."""
+    for attempt in range(3):
+        try:
+            with get_cursor() as cur:
+                return fn(cur)
         except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            try:
-                cn.rollback()
-            except Exception:  # noqa: BLE001
-                pass
             transient = _is_transient(exc)
             log_exception(
                 "azure_sql.query.failed",
@@ -124,26 +139,31 @@ def get_cursor() -> Iterator[Any]:
                 raise
             _drop_thread_connection()
             time.sleep(0.5 * (2 ** attempt))
-    if last_exc:
-        raise last_exc
+    raise AssertionError("unreachable")
 
 
 def fetchall(sql: str, params: tuple | list = ()) -> list:
-    with get_cursor() as cur:
+    def _op(cur: Any) -> list:
         cur.execute(sql, params)
         return cur.fetchall()
 
+    return run(_op)
+
 
 def fetchone(sql: str, params: tuple | list = ()) -> Any | None:
-    with get_cursor() as cur:
+    def _op(cur: Any) -> Any | None:
         cur.execute(sql, params)
         return cur.fetchone()
 
+    return run(_op)
+
 
 def execute(sql: str, params: tuple | list = ()) -> int:
-    with get_cursor() as cur:
+    def _op(cur: Any) -> int:
         cur.execute(sql, params)
         return cur.rowcount
+
+    return run(_op)
 
 
 def ping() -> bool:

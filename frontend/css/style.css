@@ -2710,6 +2710,7 @@ textarea:focus, input:focus, select:focus {
 .material-edit { display: grid; gap: 8px; }
 .material-edit-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .material-edit-head select { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); }
+.material-kind-hint { margin: -4px 0 0; font-size: 11px; line-height: 1.4; color: var(--text-3); }
 .material-edit textarea { width: 100%; min-height: 120px; padding: 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-1); font-family: inherit; font-size: var(--fs-sm); resize: vertical; }
 .material-add-bar { margin: 0 0 12px; }
 .material-add-btn { width: 100%; justify-content: center; border-style: dashed; font-weight: 600; }

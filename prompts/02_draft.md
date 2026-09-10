@@ -58,9 +58,21 @@ user's accept/reject.
      value and every `## OBO Token Scopes` token via `os.environ["NAME"]` by
      index - never `.get()`, `os.getenv`, a fallback or a default, and never
      inside a `try` that recovers - and read every `## Required Inputs` runtime
-     variable (printing the
+     variable from `os.environ` too (printing the
      `[NEEDS_INFO]` line when one is missing). No `aca_env` or `obo_token` name
-     may ever appear in a `[NEEDS_INFO] missing=` list. When
+     may ever appear in a `[NEEDS_INFO] missing=` list. **`main()` takes NO
+     parameters.** The host executes this code block verbatim as a script, so
+     nothing ever calls `main` with an argument: a signature like
+     `main(payload: dict)` writes a host mechanism that does not exist into the
+     artifact as a settled contract, and the value it names can never arrive.
+     Caller data reaches the skill only as a serialized JSON string the host puts
+     in a `credentials` entry, which the script reads back out of `os.environ`
+     and `json.loads`. **Every runtime variable needs a `[NEEDS_INFO]` code of
+     its own**, the envelope variable included: the most common caller mistake is
+     sending the payload in the free-text `request` parameter instead of a
+     `credentials` entry, and without `missing=THE_ENVELOPE_VAR` the caller gets
+     no readable signal at all. Say `credentials` by name in that explanation, so
+     the caller learns where the value belongs. When
      `## Skill 身分使用規範` is
      present, the actor is read exactly once as
      `os.environ["EAA_VERIFIED_USER_UPN"]`, is never wrapped in a `try` that

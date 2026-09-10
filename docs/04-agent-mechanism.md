@@ -174,6 +174,16 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > 💾 **接受即雙寫機制：**
 > 在 REFINE 階段，使用者每一個被接受的 Patch 或手動點擊的存檔，後端均會直接自動觸發 **雙寫 (Dual-Write)** 機制：將變更推入 Azure Blob ＋ 寫入 Microsoft Azure SQL 的 metadata (`updated_at` 自動刷新、同步 ACL)。雙寫完成即生效，**不需要任何 sync / publish 步驟**——runtime 每次請求都直接從 SQL + Blob 動態解析 skill。
 
+> 📋 **Open Fix List（一次反思、連續修完）：**
+>
+> 一次 TEST 反思常同時吐出多個 finding。若每接受一個 Patch 就回頭重跑一次盲測，N 個 finding 就要付 N 趟 router round-trip，使用者還得重複核准同一個方向。因此 `record_reflection` 的 `what_to_change` 被視為**一份有狀態的待辦清單**：
+>
+> - `open_fix_items()`（[state_machine.py](../backend/state_machine.py)）取最新一次反思的清單，扣掉**該反思之後**被接受、且 `addresses` 有指名該項的 Patch，得出「已完成／未完成」。
+> - 未完成項會以 `## Open Fix List` 注入 REFINE / TEST 的 System Prompt，清單非空時明令**不得** `request_test_run` 或轉場 TEST。
+> - 每次 Patch 被接受，後端 `_note_open_fixes()`（[main.py](../backend/main.py)）另外寫一則 system 訊息報告「還剩 N 項 / 全部完成」，作法與 `_note_skill_lint` 相同。
+> - `propose_patch` 因此新增選填的 `addresses` 欄位：逐字複製它所關閉的那一項。沒帶 `addresses` 的 Patch 不會關掉任何一項。
+> - 對使用者端的意義：Agent 在 TEST 徵求同意時，必須主動給出「一次修完全部 N 項（建議）」這類**可點選**的批次選項；使用者不需要、也不應該知道要自己打字要求連續出 Patch。
+
 ---
 
 ### 3.4 TEST（APIM Router 路由盲測）
@@ -184,7 +194,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | 屬性 | 規格說明 |
 | --- | --- |
 | **Input (上下文)** | 預先在準備期備妥的 6+6 組測試範例、已儲存於 Blob 的 Skill 正式版本。 |
-| **決策邏輯** | 呼叫 `request_test_run` 後，在該回合強制 **「不准發布 propose_patch」**。大腦必須在對話中提出完整反思（包含路由與使用精度），並必須寫入 `record_reflection` 才能重返 REFINE。 |
+| **決策邏輯** | 呼叫 `request_test_run` 後，在該回合強制 **「不准發布 propose_patch」**。大腦必須在對話中提出完整反思（包含路由與使用精度），並必須寫入 `record_reflection` 才能重返 REFINE。`what_to_change` 的每一個元素必須是**單一、可用一個 Patch 關閉的原子修正項**，因為它就是 REFINE 的 Open Fix List。 |
 | **Output** | `request_test_run` ➔ `show_test_results` ➔ `record_reflection` |
 | **解鎖下一關條件** | `record_reflection` 觸編後系統**自動將狀態轉移回 REFINE**，若測試全數亮綠燈安全，使用者亦可點擊 DONE 完成。 |
 
@@ -193,6 +203,13 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > - 選擇測試（capability 的正負樣本、scenario 的 L2）一律以 `mode="route_only"` 送出：Router 照常路由、回傳它本來會執行的腳本，但**不執行、不寫入**，因此負面樣本不會誤觸有寫入行為的 skill，也不會因為缺 runtime 變數而只拿到 `[NEEDS_INFO]`。
 > - 唯一的例外是 scenario skill 的 **L3 子項契約驗證**，它顯式送 `mode="execute"`：能證明 payload 契約成立的唯一證據，就是真的跑一次而且沒有 `[NEEDS_INFO]`。**L3 會真的執行、可能真的寫入。**
 > - runtime 必須在回應頂層回顯同一個 `mode`。缺漏或不符會**中止整批**並回 HTTP 502，沒有降級開關。
+
+> 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
+>
+> - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
+> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。
+> - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings，[prompts/04_test.md](../prompts/04_test.md) 則明令大腦**不得重新推導**已印出的結論，只需照抄成 `what_to_change` 項目。
+> - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）與未檢查回傳碼（A12）全數下放給 lint。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。
 
 > ⚖️ **雙軸診斷學：**
@@ -266,15 +283,63 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Import Mode Addendum** | **C** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前的 mode 為 `import` 代碼入庫。 |
 | **Modify Mode Addendum** | **C** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前正在修改已經在 DB 掛號使用者現有 Skill。 |
 | **Existing Skills Index** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 資料庫內所有已登記的現存技能索引表 |
-| **Materials Count** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 記錄目前工作區已保存的附加素材 (Session materials) 總數統計 |
+| **Materials** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_materials`，把使用者附加的素材**全文**依可信度分層（Tier 1/2/3）注入，並附上各層的引用邊界。詳見[第 7 節](#7-素材materials的三層可信度合約) |
 | **Prepare Brief** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 準備期已確認的 Goal / Sources / Capabilities 等 Brief 歸檔結構 |
 | **Iteration Log** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 局部 Patch 補丁歷史、以及 TEST 回合所保存的反思資訊 |
+| **Open Fix List** | **D** | | | ✓ | ✓ | | 呼叫 `_format_open_fixes`。把最新一次 `record_reflection` 的 `what_to_change` 逐項列成 `[x]`/`[ ]` 待辦清單，未清空前禁止重跑 TEST。詳見 [3.3 節](#33-refine打磨精修與局部修正) |
 | **Research Summary** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 經 Agent 查證好的網路研究結論。 |
 | **Current Draft** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前已被接受的 `SKILL.md` 快照本體 |
 
 ---
 
-## 7. Agent Graph（流程視覺化輔助工具）
+## 7. 素材（Materials）的三層可信度合約
+
+使用者附加的每一份素材都帶有一個 **kind**，後端據此把它歸入三個 **fidelity tier** 之一，並在 System Prompt 的 `## Materials` 區塊裡明確告訴模型「這一層可以怎麼用、不可以怎麼用」。
+
+> **Tier 由使用者選的 kind 決定，不由內容推斷。** 一份完整的 OpenAPI 文件若被標成 `text`，模型仍必須把它當背景資料，不得據以撰寫 sample code。這是刻意的設計：可信度是人為聲明的責任歸屬，不是猜出來的。
+
+- 分層定義：[backend/material_fidelity.py](../backend/material_fidelity.py)（`VERBATIM_KINDS` / `NO_INVENTION_KINDS` / `CONTEXT_ONLY_KINDS`）
+- 注入文案：[backend/state_machine.py](../backend/state_machine.py)（`_MATERIAL_TIERS`、`_format_materials`）
+- 行為規則：[prompts/11_output_rules.md](../prompts/11_output_rules.md)、[prompts/02_draft.md](../prompts/02_draft.md)（Material fidelity 段）
+- UI 選項與提示：[frontend/js/main.js](../frontend/js/main.js)（`MATERIAL_KINDS`）
+
+### 7.1 三層的引用邊界
+
+| Tier | UI 選項（kind） | 定位 | **模型可以做** | **模型不可以做** |
+| :-: | --- | --- | --- | --- |
+| **Tier 1** | Code（`code`） | 使用者自己可運作的實作，具權威性 | 當 Tier 1 素材涵蓋本 skill 的某個操作時，`## API Reference / Sample Code` **必須**由該檔案衍生：保留其 guard clause、**安全閘的順序**、錯誤分類、helper function 與輸出語言。僅允許 (a) 改識別字以對齊已宣告的變數、(b) 刪除與本 skill 無關的程式碼、(c) 補上缺少的 `[NEEDS_INFO]` 合約 | 改寫成「等價」的自製版本；憑空新增任何未出現在該檔案的 SQL 物件、stored procedure、資料表、欄位、endpoint 或 payload 欄位。上述三項以外的任何偏離，都必須在 `text` 欄位明講並說明理由 |
+| **Tier 2** | API spec / doc（`api_spec`；舊值 `file`、`existing_skill`） | 規格文件，**識別字**具權威性 | 逐字沿用其 endpoint 路徑、方法名、參數名、回傳欄位名；周邊程式碼可自行撰寫 | 發明文件中不存在的識別字 |
+| **Tier 3** | Text / notes（`text`；舊值 `url`） | 純背景敘述 | 用於界定範圍、prose 與 routing description | **永遠不得**作為 API 或程式碼細節的來源；其字句也不得被抄進 skill 內文 |
+
+跨層的共同硬規則（見 `11_output_rules.md`）：
+
+> 產出的程式碼中，每一個 SQL 物件、stored procedure、資料表、欄位、endpoint 與 payload 欄位，都必須出現在某一份素材裡 —— **一個看起來很合理的名字，仍然是發明出來的**。
+
+因此常見情境是：使用者貼了一份寫得很完整、但把回傳欄位寫成「概念說明」（例如「使用者識別碼」「預算清單」）而沒有真實 JSON key 的文件。即使把它升到 Tier 2，模型仍會要求補一段**真實輸出樣本**，因為 sample code 需要的 key 根本不存在於素材中。
+
+### 7.2 注入時的預算與截斷
+
+`materials_for_prompt()` 在注入前套用預算：單份上限 `MATERIAL_PROMPT_MAX_CHARS = 40,000` 字元，全部素材合計上限 `MATERIALS_PROMPT_TOTAL_MAX_CHARS = 120,000` 字元。超出的部分會被截斷並附上明確標記，要求模型**不要補完**缺少的部分，而是回報並請使用者拆分素材。素材全文以 `<<<BEGIN MATERIAL ...>>>` / `<<<END MATERIAL ...>>>` 包夾且**不加程式碼圍欄**（素材本身可能含程式碼區塊）。
+
+注意 `## Materials` 明確覆寫了另一條規則：「不得逐字複製」只適用於**路由測試樣本**，絕不適用於素材。
+
+### 7.3 產出後的忠實度掃描（僅警告，不阻擋）
+
+草稿產生後，`scan_material_fidelity()` 會比對 sample code 與素材。它**只掃 Tier 1 與 Tier 2**（Tier 3 被刻意排除，掃背景散文只會製造假陽性），而且**永遠只發警告、不會擋下草稿** —— 偏離與否是人的判斷。
+
+| 規則 | 嚴重度 | 觸發條件 |
+| --- | :-: | --- |
+| `material_truncated` | info | 該素材因預算被截斷，以下發現只涵蓋模型實際看到的部分 |
+| `dropped_from_material` | warning | Tier 1 素材中定義的 `def` / `class` 未出現在草稿的 sample code |
+| `invented_sql_object` | warning | sample code 參照的 SQL 物件（`EXEC`、`FROM/JOIN/INTO/UPDATE` 的 schema-qualified 名稱）不在任何素材中 |
+| `invented_payload_field` | warning | sample code 讀取的欄位（`.get("x")` / `["x"]`）不在任何素材中 |
+| `undocumented_enum` | warning | 素材宣告了封閉值集（SQL `CHECK ... IN`、`ENUM`、JSON/YAML `enum`），但 `## Required Inputs` 沒有列出全部合法值 |
+
+警告的呈現位置：草稿工具執行後由 `_note_material_fidelity()` 寫入一則 system 訊息提示數量；完整清單在 **Topology 分頁**（`/api/sessions/{id}/topology` 回應的 `fidelity` 欄位，每次呼叫即時計算）。
+
+---
+
+## 8. Agent Graph（流程視覺化輔助工具）
 
 Agent Graph 是開發與理解 Agent 流程時使用的**唯讀視覺化工具**。它把目前的五階段狀態機 `PREPARE → DRAFT → REFINE → TEST → DONE` 畫成節點與連線，方便快速確認每個 Stage 的 Prompt、允許的轉移方向，以及目前 Session 所在的位置。它不會直接執行工具、修改 Session 或強制切換 Stage；實際流程仍由 Agent tool call、後端 `TRANSITION_TABLE` 與品質閘門控制。
 
@@ -304,7 +369,7 @@ Agent Graph 的 Stage 與連線來自後端 `/api/inspect`，其中轉移規則�
 
 ---
 
-## 8. 重要決策優先級：規則以 prompts/ 為準，強制力以程式碼為準
+## 9. 重要決策優先級：規則以 prompts/ 為準，強制力以程式碼為準
 
 這兩件事要分開看：
 

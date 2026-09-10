@@ -90,6 +90,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "target_file": {"type": "string"},
                 "patch": {"type": "string"},
                 "reason": {"type": "string"},
+                "addresses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Which items of the '## Open Fix List' this patch closes. Copy each item "
+                        "VERBATIM from that list (equivalently, from the latest record_reflection "
+                        "what_to_change). Required whenever an Open Fix List is present, so the "
+                        "backend can track what still remains."
+                    ),
+                },
             },
             "required": ["target_file", "patch", "reason"],
             "additionalProperties": False,
@@ -210,7 +220,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "test_run_id": {"type": "string"},
                 "what_went_wrong": {"type": "array", "items": {"type": "string"}},
-                "what_to_change": {"type": "array", "items": {"type": "string"}},
+                "what_to_change": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "One ATOMIC, independently patchable fix per entry -- never bundle several "
+                        "fixes into one string. This array becomes the Open Fix List that drives the "
+                        "REFINE round, and each entry must be closable by a single propose_patch."
+                    ),
+                },
                 "confidence_delta": {"type": "number"},
                 "raw": {"type": "string"},
             },

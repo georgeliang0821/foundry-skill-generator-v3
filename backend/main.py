@@ -93,6 +93,7 @@ from . import db
 from .state_machine import (
     TRANSITION_TABLE,
     QualityGateError,
+    open_fix_items,
     register_post_transition_hook,
     transition,
 )
@@ -1552,6 +1553,46 @@ def _note_skill_lint(session: Session, skill_md: str, *, tool: str) -> None:
     )
 
 
+def _note_open_fixes(session: Session) -> None:
+    """Keep the reflection's remaining fix items in front of the agent.
+
+    Without this the agent treats every accepted patch as the end of the round
+    and asks for a new test run, so a reflection with N findings costs N router
+    round-trips and N re-approvals of the same direction.
+    """
+    closed, still_open = open_fix_items(session)
+    total = len(closed) + len(still_open)
+    if not total:
+        return
+    if still_open:
+        listed = "\n".join(f"- {item}" for item in still_open)
+        content = (
+            f"{len(still_open)} of {total} fix item(s) from the latest reflection are still "
+            f"open:\n{listed}\n"
+            "Propose the next narrow patch now (set `addresses` to the item it closes). Do NOT "
+            "request a test run or a transition to TEST until this list is empty."
+        )
+    else:
+        content = (
+            f"All {total} fix item(s) from the latest reflection are addressed. A new "
+            "skill-selection test run is now appropriate -- ask the user before running it."
+        )
+    session.conversation.append(
+        ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=content,
+            metadata={"open_fixes": still_open, "closed_fixes": closed},
+        )
+    )
+    session.touch()
+    log_event(
+        "open_fixes.remaining",
+        session_id=session.id,
+        total=total,
+        remaining=len(still_open),
+    )
+
+
 def _note_material_fidelity(session: Session, skill_md: str, *, tool: str) -> None:
     """Surface sample code that drifted from the user's materials.
 
@@ -2172,7 +2213,7 @@ def e2e_read_session(session_id: str) -> Session:
 @app.post("/api/sessions/{session_id}/materials")
 def add_session_material(session_id: str, req: MaterialUpsertRequest, upn: str = Depends(require_upn)) -> Session:
     session = get_session_for_user(session_id, upn)
-    material = Material(kind=req.kind, content=req.content, metadata=req.metadata)
+    material = Material(kind=req.kind, content=req.content)
     session.materials.append(material)
     session.touch()
     persist_session(session)
@@ -2196,7 +2237,6 @@ def update_session_material(session_id: str, material_id: str, req: MaterialUpse
                 id=existing.id,
                 kind=req.kind,
                 content=req.content,
-                metadata=req.metadata,
                 created_at=existing.created_at,
             )
             session.touch()
@@ -2668,8 +2708,10 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
                     content_before=content,
                     content_after=updated,
                     reason=args.get("reason", ""),
+                    addresses=[str(x) for x in (args.get("addresses") or [])],
                 )
             )
+            _note_open_fixes(session)
             # Keep Blob + SQL consistent on every change: once a skill has
             # been persisted, push the patched content (and any metadata
             # change such as description) straight to Blob + SQL.

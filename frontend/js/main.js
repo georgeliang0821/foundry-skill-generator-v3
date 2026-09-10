@@ -1291,23 +1291,62 @@ function messagePlaceholder(stage) {
   return "Send feedback or additional context";
 }
 
-const MATERIAL_KIND_OPTIONS = ["text", "code", "api_spec", "url", "file", "existing_skill"];
+// The three offered kinds map 1:1 onto the fidelity tiers in backend/material_fidelity.py.
+const MATERIAL_KINDS = [
+  {
+    value: "text",
+    label: "Text / notes",
+    hint: "Tier 3 — background only. Never used as a source of API or code detail.",
+  },
+  {
+    value: "code",
+    label: "Code",
+    hint: "Tier 1 — reproduced in the sample code, and checked for drift afterwards.",
+  },
+  {
+    value: "api_spec",
+    label: "API spec / doc",
+    hint: "Tier 2 — identifiers are authoritative; surrounding code may be written fresh.",
+  },
+];
+// Retired kinds that older sessions may still carry, mapped to the tier they belong to.
+const LEGACY_MATERIAL_KINDS = { file: "api_spec", existing_skill: "api_spec", url: "text" };
 const editingMaterialIds = new Set();
 let creatingMaterial = false;
 let creatingMaterialDraft = { kind: "text", content: "" };
 
+function materialKindHint(kind) {
+  const key = LEGACY_MATERIAL_KINDS[kind] || kind;
+  return MATERIAL_KINDS.find((k) => k.value === key)?.hint || "";
+}
+
+function materialKindOptionsHtml(kind) {
+  const selected = kind || "text";
+  const options = MATERIAL_KINDS.map(
+    (k) => `<option value="${k.value}"${k.value === selected ? " selected" : ""}>${escapeHtml(k.label)}</option>`,
+  );
+  // Keep a retired kind selectable so editing an old material does not silently rewrite it.
+  if (!MATERIAL_KINDS.some((k) => k.value === selected)) {
+    options.push(`<option value="${escapeHtml(selected)}" selected>${escapeHtml(selected)} (legacy)</option>`);
+  }
+  return options.join("");
+}
+
+function syncMaterialKindHint(select) {
+  const hint = select.closest(".material-edit")?.querySelector("[data-kind-hint]");
+  if (hint) hint.textContent = materialKindHint(select.value);
+}
+
 function materialAddBarHtml() {
   if (creatingMaterial) {
     const draftKind = creatingMaterialDraft.kind || "text";
-    const options = MATERIAL_KIND_OPTIONS
-      .map((k) => `<option value="${k}"${k === draftKind ? " selected" : ""}>${k}</option>`)
-      .join("");
     return `<div class="material-new-editor" data-material-new>
       <div class="material-edit">
         <div class="material-edit-head"><strong>New material</strong>
-          <select data-new-kind data-testid="material-kind" aria-label="Material kind">${options}</select>
+          <select data-new-kind data-testid="material-kind" aria-label="Material kind">${materialKindOptionsHtml(draftKind)}</select>
         </div>
-        <textarea data-new-content data-testid="material-input" rows="6" placeholder="Paste docs, code, an old skill, or a rough note">${escapeHtml(creatingMaterialDraft.content || "")}</textarea>
+        <p class="material-kind-hint" data-kind-hint data-testid="material-kind-hint">${escapeHtml(materialKindHint(draftKind))}</p>
+        <textarea data-new-content data-testid="material-input" rows="6" placeholder="Paste the text of the doc, code or note here">${escapeHtml(creatingMaterialDraft.content || "")}</textarea>
         <div class="material-actions">
           <button type="button" class="icon-button primary" data-action="save-new" data-testid="attach-material-button">Save</button>
           <button type="button" class="icon-button" data-action="cancel-new">Cancel</button>
@@ -1323,7 +1362,7 @@ function renderMaterials() {
   const pending = Array.isArray(attachedMaterials) ? attachedMaterials : [];
   const list = el("materialList");
   if (!saved.length && !pending.length) {
-    list.innerHTML = `<div class="material-add-bar">${materialAddBarHtml()}</div><div class="empty-state">${svgIcon("i-paper-clip")}<strong>No materials in this session</strong><em>Press + Add material to attach docs, code, or a sample.</em></div>`;
+    list.innerHTML = `<div class="material-add-bar">${materialAddBarHtml()}</div><div class="empty-state">${svgIcon("i-paper-clip")}<strong>No materials in this session</strong><em>Press + Add material and paste the text of a doc, some code, or a note.</em></div>`;
     return;
   }
   const previewText = (content) => {
@@ -1333,15 +1372,14 @@ function renderMaterials() {
   const renderSavedRow = (m, i) => {
     const id = m.id || "";
     if (id && editingMaterialIds.has(id)) {
-      const options = MATERIAL_KIND_OPTIONS
-        .map((k) => `<option value="${k}"${k === (m.kind || "text") ? " selected" : ""}>${k}</option>`)
-        .join("");
+      const kind = m.kind || "text";
       return `<tr class="material-item material-item-editing" data-source="saved" data-material-id="${escapeHtml(id)}" data-testid="saved-material-item">
         <td colspan="4">
           <div class="material-edit">
             <div class="material-edit-head"><strong>${i + 1}. Editing material</strong>
-              <select data-edit-kind aria-label="Material kind">${options}</select>
+              <select data-edit-kind aria-label="Material kind">${materialKindOptionsHtml(kind)}</select>
             </div>
+            <p class="material-kind-hint" data-kind-hint>${escapeHtml(materialKindHint(kind))}</p>
             <textarea data-edit-content rows="6">${escapeHtml(m.content || "")}</textarea>
             <div class="material-actions">
               <button type="button" class="icon-button primary" data-action="save" data-material-id="${escapeHtml(id)}" data-testid="save-material-button">Save</button>
@@ -4450,8 +4488,14 @@ async function acceptTool(call, result) {
       await sendChatPayload(testAnalysisPrompt(), []);
     }
     if (call.tool === "propose_patch" && result.action === "accept") {
-      appendStatus("Patch applied. Requesting the next skill-selection test run.");
-      await sendChatPayload(nextTestPrompt(), []);
+      const remaining = openFixItems();
+      if (remaining.length) {
+        appendStatus(`Patch applied. ${remaining.length} fix item(s) still open — asking for the next patch.`);
+        await sendChatPayload(nextFixPrompt(remaining), []);
+      } else {
+        appendStatus("Patch applied. Requesting the next skill-selection test run.");
+        await sendChatPayload(nextTestPrompt(), []);
+      }
     }
   } catch (err) {
     setToolCardBusy(call.call_id, false);
@@ -4990,13 +5034,42 @@ function testAnalysisPrompt() {
     "Do not emit propose_patch yet.",
     "If all positive and negative samples pass, summarize the result and ask_user_input whether to finish or continue refining.",
     "If any sample failed, summarize the failure pattern, propose a concise modification direction, and ask_user_input whether the user accepts that direction.",
+    "Record every distinct finding as its own atomic entry in record_reflection.what_to_change.",
+    "When there is more than one finding, the ask_user_input options must let the user pick the batch in one click -- spell out the count, e.g. 「一次修完全部 N 項（建議）」 as the recommended default, 「只修第 1 項，其餘先擱置」, 「先不修」.",
     "Only after the user accepts the suggested direction should you produce a V4A propose_patch in a later turn.",
+  ].join("\n");
+}
+
+/** Fix items from the latest reflection that no accepted patch has closed yet. */
+function openFixItems() {
+  const reflection = (session?.iteration_reflections || []).slice(-1)[0];
+  if (!reflection) return [];
+  const items = (reflection.what_to_change || []).map(String).filter((x) => x.trim());
+  if (!items.length) return [];
+  const since = Date.parse(reflection.created_at || "");
+  const closed = new Set();
+  for (const patch of session?.patch_history || []) {
+    const applied = Date.parse(patch.applied_at || "");
+    if (!Number.isNaN(since) && !Number.isNaN(applied) && applied < since) continue;
+    for (const item of patch.addresses || []) closed.add(String(item).replace(/\s+/g, " ").trim().toLowerCase());
+  }
+  return items.filter((item) => !closed.has(item.replace(/\s+/g, " ").trim().toLowerCase()));
+}
+
+function nextFixPrompt(remaining) {
+  return [
+    "The user accepted the proposed patch and it has been applied.",
+    `${remaining.length} item(s) of the Open Fix List are still open:`,
+    ...remaining.map((item, index) => `${index + 1}. ${item}`),
+    "Propose the next narrow propose_patch for the first open item now, with addresses set to that item verbatim.",
+    "Do NOT request a test run and do NOT transition to TEST until the list is empty.",
   ].join("\n");
 }
 
 function nextTestPrompt() {
   return [
     "The user accepted the proposed patch and it has been applied.",
+    "No fix items remain open.",
     "Immediately request the next skill-selection test run.",
     "Use request_test_run with the prior positive and negative samples when available; otherwise generate 5 relevant positive and 5 relevant negative samples from the current skill.",
   ].join("\n");
@@ -5046,6 +5119,8 @@ async function sendMessage(event) {
   event.preventDefault();
   appLog("Send triggered");
   if (isSending) return;
+  // startSession() resets the pending list, so hold on to it before the implicit create.
+  const pendingMaterials = attachedMaterials;
   if (!session) await startSession();
   if (!session) return;
   const message = el("messageInput").value.trim();
@@ -5055,8 +5130,16 @@ async function sendMessage(event) {
   }
   appendMessage("user", message || "(materials attached)");
   el("messageInput").value = "";
-  await sendChatPayload(message, attachedMaterials);
+  await sendChatPayload(message, pendingMaterials);
   attachedMaterials = [];
+  if (pendingMaterials.length) {
+    // The turn appended them server-side; pull the saved rows back so the pane can edit them.
+    try {
+      session = await getSession(session.id);
+    } catch (err) {
+      appLog(`Could not refresh materials after send: ${err.message}`);
+    }
+  }
   persistSessionState();
   renderMaterials();
 }
@@ -5315,7 +5398,7 @@ async function attachMaterial() {
   const content = (card?.querySelector("[data-new-content]")?.value || "").trim();
   if (!content) return;
   const kind = card?.querySelector("[data-new-kind]")?.value || "text";
-  const payload = { kind, content, metadata: {} };
+  const payload = { kind, content };
   if (!session?.id) {
     attachedMaterials.push(payload);
     creatingMaterial = false;
@@ -5434,7 +5517,7 @@ async function handleSavedMaterialAction(event) {
     }
     setInputBusy(true);
     try {
-      session = await updateSessionMaterial(session.id, id, { kind, content, metadata: {} });
+      session = await updateSessionMaterial(session.id, id, { kind, content });
       persistSessionState();
       editingMaterialIds.delete(id);
       appendConversationStatus("Material updated.");
@@ -5595,8 +5678,12 @@ bind("sendBtn", "click", (event) => {
 });
 bind("materialList", "input", (event) => {
   const t = event.target;
-  if (t && t.matches && t.matches("[data-new-content]")) creatingMaterialDraft.content = t.value;
-  else if (t && t.matches && t.matches("[data-new-kind]")) creatingMaterialDraft.kind = t.value;
+  if (!t || !t.matches) return;
+  if (t.matches("[data-new-content]")) creatingMaterialDraft.content = t.value;
+  else if (t.matches("[data-new-kind]")) {
+    creatingMaterialDraft.kind = t.value;
+    syncMaterialKindHint(t);
+  } else if (t.matches("[data-edit-kind]")) syncMaterialKindHint(t);
 });
 bind("materialList", "click", handleSavedMaterialAction);
 // Revise a confirmed PREPARE checkpoint: flips it to pending and cascades the

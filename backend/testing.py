@@ -537,6 +537,26 @@ def _scenario_lint(
         return []
 
 
+def _lint_prepared_code(skill_content: str, results: list[TestResult]) -> None:
+    """Lint the script the runtime WROTE for each sample, in place.
+
+    The body prose -- not the sample code block -- is what the runtime reads, so
+    the two artifacts drift and only one of them was ever linted. Run this once
+    here rather than at prompt-build time: a later patch changes ``skill_content``
+    but not the script an earlier run produced.
+    """
+    for result in results:
+        if not (result.apim_response or "").strip():
+            continue
+        try:
+            issues = lint_skill(
+                skill_content, SkillKind.CAPABILITY, code_override=result.apim_response
+            )
+        except Exception:  # noqa: BLE001 - a broken lint must never fail the run
+            continue
+        result.prepared_code_lint = [issue.to_dict() for issue in issues]
+
+
 def _run_scenario_tests(
     skill_content: str,
     positive_samples: list[str],
@@ -700,6 +720,7 @@ def run_selection_tests(
 
     pos_passed = [r for r in positive_results if r.passed is True]
     neg_passed = [r for r in negative_results if r.passed is True]
+    _lint_prepared_code(skill_content, positive_results + negative_results)
     run = TestRun(
         skill_version_hash=version_hash,
         positive_results=positive_results,

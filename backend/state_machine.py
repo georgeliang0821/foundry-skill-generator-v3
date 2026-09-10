@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
@@ -498,6 +499,77 @@ def _format_iteration_log(session: Session) -> str | None:
     return "\n".join(lines)
 
 
+def _norm_fix_item(text: str) -> str:
+    return " ".join(str(text or "").split()).casefold()
+
+
+def open_fix_items(session: Session) -> tuple[list[str], list[str]]:
+    """Split the latest reflection's fix list into (closed, still open).
+
+    A fix item is closed once an accepted patch applied AFTER that reflection
+    named it in ``addresses``. Patches that carry no ``addresses`` close
+    nothing, so an agent that skips the field is reminded rather than let off.
+    """
+    if not session.iteration_reflections:
+        return [], []
+    reflection = session.iteration_reflections[-1]
+    items = [str(x) for x in reflection.what_to_change if str(x).strip()]
+    if not items:
+        return [], []
+    since = _parse_iso(reflection.created_at)
+    closed_keys: set[str] = set()
+    for patch in session.patch_history:
+        applied = _parse_iso(patch.applied_at)
+        if since is not None and applied is not None and applied < since:
+            continue
+        closed_keys.update(_norm_fix_item(a) for a in patch.addresses)
+    closed = [i for i in items if _norm_fix_item(i) in closed_keys]
+    still_open = [i for i in items if _norm_fix_item(i) not in closed_keys]
+    return closed, still_open
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_open_fixes(session: Session) -> str | None:
+    closed, still_open = open_fix_items(session)
+    if not closed and not still_open:
+        return None
+    total = len(closed) + len(still_open)
+    lines = [
+        "## Open Fix List",
+        "",
+        f"{len(still_open)} of {total} fix item(s) from the latest reflection are still open.",
+        "",
+    ]
+    for item in closed:
+        lines.append(f"- [x] {item}")
+    for item in still_open:
+        lines.append(f"- [ ] {item}")
+    lines.append("")
+    if still_open:
+        lines.append(
+            "Work through the open items one at a time: propose ONE narrow `propose_patch` "
+            "for the first open item, set its `addresses` to that item VERBATIM, and after it "
+            "is accepted immediately propose the next one. Do NOT call `request_test_run` and "
+            "do NOT `request_stage_transition` to test while any item is open -- a test run "
+            "between fixes wastes a full router round-trip and forces the user to re-approve "
+            "the same direction. The two exceptions: the user explicitly asks to test now, or "
+            "an item needs human judgement / a material you do not have -- say which item and "
+            "why, then ask the user how to proceed."
+        )
+    else:
+        lines.append(
+            "All items are closed. Ask the user (via `ask_user_input`) whether to re-run the "
+            "skill-selection test now."
+        )
+    return "\n".join(lines)
+
+
 def _format_aca_environment(session: Session) -> str | None:
     if session.aca_env_error:
         return f"## Existing ACA Environment Variables\n\nLookup status: failed\n\nError: {session.aca_env_error}"
@@ -557,6 +629,7 @@ def _format_prepared_code(results: list[TestResult]) -> list[str]:
         "code belongs to another skill and is not evidence about this one.",
     ]
     by_body: dict[str, list[str]] = {}
+    findings: dict[str, list[dict]] = {}
     order: list[tuple[str, str]] = []
     for result in results:
         key = sha256(result.apim_response.encode("utf-8")).hexdigest()
@@ -564,6 +637,7 @@ def _format_prepared_code(results: list[TestResult]) -> list[str]:
             by_body[key].append(result.query)
             continue
         by_body[key] = [result.query]
+        findings[key] = result.prepared_code_lint
         order.append((key, result.apim_response))
     budget = _TEST_CODE_BUDGET_CHARS
     shown = 0
@@ -577,6 +651,7 @@ def _format_prepared_code(results: list[TestResult]) -> list[str]:
         lines.append("")
         lines.append(f"From: {'; '.join(by_body[key])}")
         lines.append(f"```python\n{body}\n```")
+        lines.extend(_format_prepared_code_lint(findings.get(key) or []))
     if omitted:
         lines.append("")
         lines.append(
@@ -584,6 +659,22 @@ def _format_prepared_code(results: list[TestResult]) -> list[str]:
             + "; ".join(omitted)
             + ". Do not review those from memory -- ask the user to check them in the UI."
         )
+    return lines
+
+
+def _format_prepared_code_lint(issues: list[dict]) -> list[str]:
+    """Static findings against the script above. Already decided -- do not re-derive them."""
+    if not issues:
+        return []
+    lines = [
+        "",
+        "Static findings on that script (already checked -- read them, do not re-derive them):",
+    ]
+    for issue in issues:
+        rule = issue.get("rule", "?")
+        detail = issue.get("detail") or ""
+        suffix = f" [{detail}]" if detail else ""
+        lines.append(f"- {rule}{suffix}: {issue.get('message', '')}")
     return lines
 
 
@@ -968,6 +1059,10 @@ def build_system_prompt(session: Session) -> str:
     iteration_section = _format_iteration_log(session)
     if iteration_section:
         parts.append(iteration_section)
+    if stage in {Stage.REFINE, Stage.TEST}:
+        open_fix_section = _format_open_fixes(session)
+        if open_fix_section:
+            parts.append(open_fix_section)
     if session.research_summary:
         parts.append(f"## Research Summary\n\n{session.research_summary}")
     aca_env_section = _format_aca_environment(session)

@@ -17,6 +17,12 @@ content check that can reject a draft would be worse than the drift it catches.
 The scenario layer no longer restates a child's field contract, so the rule that
 required it to (B3) is gone; ``topology.py`` P6 now flags the opposite. That id
 stays retired -- the operation-coverage rule added later is B4.
+
+A2 compares two sets, which made it satisfiable by emptying both: drop the
+``os.environ`` read, declare nothing, and the artifact becomes a script the host
+runs to no effect. A9-A11 cover that gap by checking the entry point's shape
+(A9), that a caller has a channel at all (A10) and that every runtime input can
+report its own absence (A11).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Collection, Iterable, Mapping, Sequence
 
 from .models import SkillKind
 from .sections import h2_sections, normalize_section
@@ -35,8 +41,10 @@ INPUTS_SECTION = "Required Inputs"
 # The platform injects this after a successful OBO exchange; a skill never
 # declares it as an ACA variable and never accepts it from the caller.
 IDENTITY_SECTION = "身分使用規範"
+DEPLOYMENT_SECTION = "部署設定使用規範"
 VERIFIED_UPN_VAR = "EAA_VERIFIED_USER_UPN"
 _IDENTITY_RULE_IDS = ("R1", "R2", "R3", "R4")
+_DEPLOYMENT_RULE_IDS = ("D1", "D2", "D3")
 _LOGGING_FUNCS = frozenset(
     {"print", "debug", "info", "warning", "error", "exception", "critical", "log"}
 )
@@ -47,6 +55,9 @@ _HEADING_RE = re.compile(r"^(#{2,3})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # Declared variables are written as a backticked ALL-CAPS token in a bullet.
 _DECLARED_NAME_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
 _NEEDS_INFO_RE = re.compile(r"\[NEEDS_INFO\][ \t]*missing=([A-Za-z0-9_,\- ]+)")
+# The f-string prefix a `needs_info(code, ...)` helper prints; the code itself is
+# a placeholder, so the regex above finds nothing and only the AST can resolve it.
+_NEEDS_INFO_TEMPLATE = "[NEEDS_INFO] missing="
 _ERROR_KEY_RE = re.compile(r"[\"']error[\"'][ \t]*:[ \t]*[\"']([A-Za-z0-9_]+)[\"']")
 _SQL_THROW_RE = re.compile(r"\bTHROW[ \t]+\d|\bRAISERROR\b", re.IGNORECASE)
 _STEP_ROW_RE = re.compile(r"^\|[ \t]*(\d+)[ \t]*\|", re.MULTILINE)
@@ -207,19 +218,79 @@ def _is_os_environ(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "environ"
 
 
+def _is_env_read_call(node: ast.Call) -> bool:
+    """``os.environ.get(...)``, ``os.getenv(...)`` or a bare imported ``getenv(...)``."""
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return (func.attr == "get" and _is_os_environ(func.value)) or func.attr == "getenv"
+    return isinstance(func, ast.Name) and func.id == "getenv"
+
+
 def _env_keys(tree: ast.AST) -> list[str]:
-    """Every literal key read out of ``os.environ`` by subscript or ``.get``."""
+    """Every literal key read out of the environment by subscript, ``.get`` or ``getenv``."""
     keys: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and _is_os_environ(node.value):
             if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
                 keys.append(node.slice.value)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr == "get" and _is_os_environ(node.func.value) and node.args:
-                first = node.args[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    keys.append(first.value)
+        elif isinstance(node, ast.Call) and node.args and _is_env_read_call(node):
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                keys.append(first.value)
     return _unique(keys)
+
+
+def _needs_info_emitters(tree: ast.AST) -> set[str]:
+    """Helpers that print the ``[NEEDS_INFO] missing=`` line from an argument.
+
+    The inline form is plain text the regex already finds. This is the other
+    idiom -- ``needs_info(code, explanation)`` -- whose code reaches the line as
+    an f-string placeholder, so a text scan resolves nothing and the rules that
+    read the emitted codes were silently vacuous on every skill written that way.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.JoinedStr):
+                continue
+            literal = "".join(
+                part.value
+                for part in sub.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            if _NEEDS_INFO_TEMPLATE in literal:
+                names.add(node.name)
+                break
+    return names
+
+
+def _needs_info_codes(tree: ast.AST, code: str) -> list[str]:
+    """Every ``missing=`` code the sample can print, both idioms included."""
+    codes = [
+        part.strip()
+        for group in _NEEDS_INFO_RE.findall(code)
+        for part in group.split(",")
+        if part.strip()
+    ]
+    emitters = _needs_info_emitters(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        func = node.func
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else ""
+        )
+        first = node.args[0]
+        if name in emitters and isinstance(first, ast.Constant):
+            if isinstance(first.value, str):
+                codes.extend(part.strip() for part in first.value.split(",") if part.strip())
+    return _unique(codes)
 
 
 def _raised_names(tree: ast.AST) -> list[str]:
@@ -250,25 +321,47 @@ def _has_ancestor(node: ast.AST, parents: Mapping[ast.AST, ast.AST], kind: type)
     return False
 
 
-def _verified_upn_reads(tree: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
-    """Reads of the verified UPN, split into indexed (R1-compliant) and defaulted."""
+def _env_reads_for(tree: ast.AST, wanted: Collection[str]) -> tuple[list[ast.AST], list[ast.AST]]:
+    """Reads of the named env keys, split into indexed (strict) and defaulted (lenient)."""
+    names = {name.upper() for name in wanted}
     strict: list[ast.AST] = []
     lenient: list[ast.AST] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and _is_os_environ(node.value):
-            if isinstance(node.slice, ast.Constant) and node.slice.value == VERIFIED_UPN_VAR:
-                strict.append(node)
-        elif isinstance(node, ast.Call) and node.args:
-            func = node.func
-            attr = func.attr if isinstance(func, ast.Attribute) else ""
-            plain = func.id if isinstance(func, ast.Name) else ""
-            environ_get = attr == "get" and _is_os_environ(getattr(func, "value", None))
-            if not (environ_get or attr == "getenv" or plain == "getenv"):
-                continue
+            key = node.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                if key.value.upper() in names:
+                    strict.append(node)
+        elif isinstance(node, ast.Call) and node.args and _is_env_read_call(node):
             first = node.args[0]
-            if isinstance(first, ast.Constant) and first.value == VERIFIED_UPN_VAR:
-                lenient.append(node)
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                if first.value.upper() in names:
+                    lenient.append(node)
     return strict, lenient
+
+
+def _verified_upn_reads(tree: ast.AST) -> tuple[list[ast.AST], list[ast.AST]]:
+    """Reads of the verified UPN, split into indexed (R1-compliant) and defaulted."""
+    return _env_reads_for(tree, {VERIFIED_UPN_VAR})
+
+
+def _in_recovering_try(tree: ast.AST, reads: Sequence[ast.AST]) -> bool:
+    """Whether any of ``reads`` sits in a ``try`` whose handler swallows the absence."""
+    read_ids = {id(node) for node in reads}
+    if not read_ids:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try) or not node.handlers:
+            continue
+        if not any(id(inner) in read_ids for stmt in node.body for inner in ast.walk(stmt)):
+            continue
+        if any(
+            handler.type is None
+            or (isinstance(handler.type, ast.Name) and handler.type.id in _RECOVERING_HANDLERS)
+            for handler in node.handlers
+        ):
+            return True
+    return False
 
 
 def _aliases_of(tree: ast.AST, read_ids: set[int]) -> set[str]:
@@ -502,9 +595,9 @@ def _is_string_shaped(annotation: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _lint_capability(skill_md: str) -> list[LintIssue]:
+def _lint_capability(skill_md: str, code_override: str | None = None) -> list[LintIssue]:
     issues: list[LintIssue] = []
-    code = _python_code(skill_md)
+    code = _python_code(skill_md) if code_override is None else code_override
     if not code.strip():
         return issues
 
@@ -525,9 +618,14 @@ def _lint_capability(skill_md: str) -> list[LintIssue]:
 
     issues.extend(_check_variable_closure(skill_md, tree))
     issues.extend(_check_explicit_raises(tree))
-    issues.extend(_check_needs_info_documented(skill_md, code))
+    issues.extend(_check_needs_info_documented(skill_md, code, tree))
+    issues.extend(_check_main_signature(tree))
+    issues.extend(_check_runtime_input_channel(skill_md, tree))
+    issues.extend(_check_runtime_needs_info_codes(skill_md, tree, code))
     issues.extend(_check_caller_field_contract(skill_md, tree))
     issues.extend(_check_uncaught_sql_throw(tree))
+    issues.extend(_check_unchecked_call_result(tree))
+    issues.extend(_check_deployment_config(skill_md, tree, code))
     issues.extend(_check_identity_contract(skill_md, tree))
     return issues
 
@@ -567,7 +665,9 @@ def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
                     rule="A2",
                     message=(
                         f"The sample code reads `os.environ` key `{key}`, which is declared in "
-                        "none of Required Inputs / Environment Variables / OBO Token Scopes."
+                        "none of Required Inputs / Environment Variables / OBO Token Scopes. "
+                        "Declare it -- deleting the read is not the fix, it removes the channel "
+                        "the value arrives through."
                     ),
                     detail=key,
                 )
@@ -604,19 +704,14 @@ def _needs_info_contract(skill_md: str) -> str:
     )
 
 
-def _check_needs_info_documented(skill_md: str, code: str) -> list[LintIssue]:
+def _check_needs_info_documented(skill_md: str, code: str, tree: ast.AST) -> list[LintIssue]:
     """A4 -- every ``[NEEDS_INFO] missing=X`` code must be documented in a named section."""
     inputs = _section_body(skill_md, INPUTS_SECTION)
     contract = _needs_info_contract(skill_md)
     documented = f"{inputs}\n{contract}"
     if not documented.strip():
         return []
-    codes = _unique(
-        part.strip()
-        for group in _NEEDS_INFO_RE.findall(code)
-        for part in group.split(",")
-        if part.strip()
-    )
+    codes = _needs_info_codes(tree, code)
     return [
         LintIssue(
             rule="A4",
@@ -629,6 +724,100 @@ def _check_needs_info_documented(skill_md: str, code: str) -> list[LintIssue]:
         )
         for item in codes
         if item not in documented
+    ]
+
+
+def _runtime_env_reads(skill_md: str, tree: ast.AST) -> list[str]:
+    """Env keys that carry CALLER data: not deployment config, not the identity."""
+    reserved = {VERIFIED_UPN_VAR}
+    reserved.update(name.upper() for name in _declared_names(_section_body(skill_md, ENV_SECTION)))
+    reserved.update(name.upper() for name in _declared_names(_section_body(skill_md, OBO_SECTION)))
+    return [key for key in _env_keys(tree) if key.upper() not in reserved]
+
+
+def _check_main_signature(tree: ast.AST) -> list[LintIssue]:
+    """A9 -- ``main`` takes no parameters, because nothing ever calls it with any."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "main":
+            continue
+        args = node.args
+        params = [arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]]
+        if args.vararg:
+            params.append(f"*{args.vararg.arg}")
+        if args.kwarg:
+            params.append(f"**{args.kwarg.arg}")
+        if not params:
+            continue
+        return [
+            LintIssue(
+                rule="A9",
+                message=(
+                    f"`main` takes {_quoted_list(params)}. The host executes this block verbatim "
+                    "as a script, so nothing ever calls `main` with an argument: a parameter "
+                    "writes an unconfirmed host mechanism into the artifact as a settled "
+                    "contract, and the value it names can never arrive. Caller data reaches the "
+                    "skill as a serialized JSON string in an environment variable -- read it "
+                    "inside `main` via `os.environ`."
+                ),
+                detail=", ".join(params),
+            )
+        ]
+    return []
+
+
+def _check_runtime_input_channel(skill_md: str, tree: ast.AST) -> list[LintIssue]:
+    """A10 -- code that consumes caller fields needs a channel the caller can use.
+
+    A2 is a set comparison, so it is equally satisfied by shrinking BOTH sets to
+    empty: drop the ``os.environ`` read, declare nothing, and the artifact is a
+    script the host runs to no effect. That is worse than the drift A2 catches
+    and nothing else looked at it.
+    """
+    if _runtime_env_reads(skill_md, tree):
+        return []
+    fields = list(_payload_field_reads(tree))
+    if not fields:
+        return []
+    return [
+        LintIssue(
+            rule="A10",
+            message=(
+                f"The sample code consumes caller fields ({_quoted_list(fields)}) but never reads "
+                "a runtime input from the environment, so nothing the caller sends can reach it. "
+                "The host passes caller data as a serialized JSON string in a `credentials` "
+                "entry, which arrives as an environment variable: declare that variable in "
+                "`## Required Inputs` and read it with `os.environ`."
+            ),
+            detail=", ".join(fields),
+        )
+    ]
+
+
+def _check_runtime_needs_info_codes(
+    skill_md: str, tree: ast.AST, code: str
+) -> list[LintIssue]:
+    """A11 -- a runtime input the caller can omit needs a ``missing=`` code of its own.
+
+    Keyed on the READ rather than on the declaration, so the envelope variable is
+    covered without tracing the value into ``json.loads`` -- a trace that breaks
+    at the first helper boundary. Case folding collapses the
+    ``get("x") or get("X")`` pair into the one code that satisfies both.
+    """
+    emitted = {item.upper() for item in _needs_info_codes(tree, code)}
+    return [
+        LintIssue(
+            rule="A11",
+            message=(
+                f"The sample code reads the runtime input `{key}` from the environment but can "
+                f"never print `[NEEDS_INFO] missing={key}`. When the host omits it -- most often "
+                "by putting the payload in the free-text `request` parameter instead of a "
+                "`credentials` entry -- the caller gets no readable signal at all: the script "
+                "exits silently or crashes on a value that was never there."
+            ),
+            detail=key,
+        )
+        for key in _unique(read.upper() for read in _runtime_env_reads(skill_md, tree))
+        if key not in emitted
     ]
 
 
@@ -745,6 +934,189 @@ def _check_uncaught_sql_throw(tree: ast.AST) -> list[LintIssue]:
     return []
 
 
+def _check_unchecked_call_result(tree: ast.AST) -> list[LintIssue]:
+    """A12 -- an external call whose result is never inspected before the skill reports success.
+
+    Deliberately narrow: it does not try to decide which ``print`` is the success
+    message, only whether the result of the call was looked at AT ALL. When it
+    was not, every path to the end of the run is a success path, and under the
+    EAA output contract a ``status="completed"`` response is shown to the user
+    verbatim -- so a fabricated "submitted" line reaches them unquestioned, and a
+    non-idempotent operation gets retried into a duplicate.
+    """
+    issues: list[LintIssue] = []
+    for label, node in _external_calls(tree):
+        result = _call_result_name(tree, node)
+        if result is None:
+            issues.append(_unchecked_issue(label, "its result is never assigned"))
+            continue
+        if not _result_is_inspected(tree, result, label):
+            issues.append(_unchecked_issue(label, f"`{result}` is never inspected"))
+    return _dedupe_issues(issues)
+
+
+def _external_calls(tree: ast.AST) -> list[tuple[str, ast.Call]]:
+    """Calls whose outcome the caller must check: subprocess launches and HTTP requests."""
+    found: list[tuple[str, ast.Call]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            continue
+        receiver = func.value.id if isinstance(func.value, ast.Name) else ""
+        if receiver == "subprocess" and func.attr in {"run", "call"}:
+            # check=True already raises on a non-zero exit.
+            if any(kw.arg == "check" and _is_true(kw.value) for kw in node.keywords):
+                continue
+            found.append((f"subprocess.{func.attr}", node))
+        elif receiver.lower() in _HTTP_RECEIVERS and func.attr in _HTTP_SINK_ATTRS:
+            found.append((f"{receiver}.{func.attr}", node))
+    return found
+
+
+def _is_true(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _call_result_name(tree: ast.AST, call: ast.Call) -> str | None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and node.value is call:
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if targets:
+                return targets[0]
+        elif isinstance(node, ast.AnnAssign) and node.value is call:
+            if isinstance(node.target, ast.Name):
+                return node.target.id
+    return None
+
+
+def _result_is_inspected(tree: ast.AST, name: str, label: str) -> bool:
+    wanted = (
+        {"returncode", "check_returncode"}
+        if label.startswith("subprocess")
+        else {"status_code", "ok", "raise_for_status", "status"}
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in wanted:
+            if isinstance(node.value, ast.Name) and node.value.id == name:
+                return True
+    return False
+
+
+def _unchecked_issue(label: str, why: str) -> LintIssue:
+    return LintIssue(
+        rule="A12",
+        message=(
+            f"`{label}(...)` is called but {why}, so the code reaches its success output "
+            "whether the call succeeded or not. The host shows a completed response to the "
+            "user verbatim, so an unconditional success line is a claim nobody verifies -- and "
+            "a create/submit operation the user believes failed gets sent twice. Check the "
+            "outcome (`check=True`, `returncode`, `raise_for_status()`) before saying anything "
+            "succeeded, or print the tool's own output instead of composing a verdict."
+        ),
+        detail=label,
+    )
+
+
+def _dedupe_issues(issues: Sequence[LintIssue]) -> list[LintIssue]:
+    seen: dict[tuple[str, str], LintIssue] = {}
+    for issue in issues:
+        seen.setdefault((issue.rule, issue.detail), issue)
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Deployment configuration rules
+# ---------------------------------------------------------------------------
+
+
+def _deployment_names(skill_md: str) -> list[str]:
+    return _unique(
+        _declared_names(_section_body(skill_md, ENV_SECTION))
+        + _declared_names(_section_body(skill_md, OBO_SECTION))
+    )
+
+
+def _check_deployment_config(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
+    """D1-D3 -- deployment config must fail loudly, never look like a missing caller input.
+
+    ``[NEEDS_INFO]`` + exit 0 tells the host "ask the caller and retry". A broken
+    deployment or a broken OBO chain is not something a caller can supply, so
+    every shape that routes it there makes the host retry forever against an
+    environment nobody was told is misconfigured.
+    """
+    names = _deployment_names(skill_md)
+    if not names:
+        return []
+    strict, lenient = _env_reads_for(tree, names)
+    issues: list[LintIssue] = []
+
+    lenient_keys = _unique(
+        arg.value
+        for node in lenient
+        if isinstance(node, ast.Call) and node.args
+        for arg in [node.args[0]]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+    )
+    for key in lenient_keys:
+        issues.append(
+            LintIssue(
+                rule="D1",
+                message=(
+                    f"`{key}` is deployment configuration but is read with `.get()` / "
+                    "`os.getenv()`. D1 requires `os.environ[...]` indexing: a default turns a "
+                    "misconfigured deployment into an empty string the code then works with."
+                ),
+                detail=key,
+            )
+        )
+
+    emitted = {item.upper() for item in _needs_info_codes(tree, code)}
+    for name in names:
+        if name.upper() in emitted:
+            issues.append(
+                LintIssue(
+                    rule="D2",
+                    message=(
+                        f"`{name}` is deployment configuration but appears in a "
+                        f"`[NEEDS_INFO] missing={name}` line. D2 forbids asking the caller for "
+                        "it: nobody on that side can set an ACA variable or an OBO scope, so "
+                        "the host retries forever and the real fault is never reported."
+                    ),
+                    detail=name,
+                )
+            )
+
+    if _in_recovering_try(tree, strict):
+        issues.append(
+            LintIssue(
+                rule="D3",
+                message=(
+                    "A deployment configuration lookup sits in a `try` that recovers. D3 "
+                    "requires a non-zero exit: recovering here substitutes a fallback "
+                    "credential or an empty value for configuration that is simply absent."
+                ),
+                detail=", ".join(names),
+            )
+        )
+
+    if issues and DEPLOYMENT_SECTION not in skill_md:
+        issues.append(
+            LintIssue(
+                rule="D1",
+                message=(
+                    f"The file has no `## {DEPLOYMENT_SECTION}` section. The runtime writes its "
+                    "own script from this prose, so correcting only the sample code leaves the "
+                    "rule unstated and the next generated script repeats the mistake. Add the "
+                    "section with the verbatim `D1`-`D3` rules."
+                ),
+                detail=DEPLOYMENT_SECTION,
+            )
+        )
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Identity contract rules
 # ---------------------------------------------------------------------------
@@ -815,32 +1187,19 @@ def _check_identity_keyerror_recovery(
     tree: ast.AST, strict: Sequence[ast.AST]
 ) -> list[LintIssue]:
     """I3 -- R2: absence must abort, so the read may not sit in a recovering ``try``."""
-    if not strict:
+    if not _in_recovering_try(tree, strict):
         return []
-    read_ids = {id(node) for node in strict}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Try) or not node.handlers:
-            continue
-        if not any(id(inner) in read_ids for stmt in node.body for inner in ast.walk(stmt)):
-            continue
-        recovers = any(
-            handler.type is None
-            or (isinstance(handler.type, ast.Name) and handler.type.id in _RECOVERING_HANDLERS)
-            for handler in node.handlers
+    return [
+        LintIssue(
+            rule="I3",
+            message=(
+                f"The `{VERIFIED_UPN_VAR}` lookup sits in a `try` that catches its "
+                "`KeyError`. R2 requires the skill to abort and report instead: every "
+                "way of recovering here substitutes an unverified identity."
+            ),
+            detail=VERIFIED_UPN_VAR,
         )
-        if recovers:
-            return [
-                LintIssue(
-                    rule="I3",
-                    message=(
-                        f"The `{VERIFIED_UPN_VAR}` lookup sits in a `try` that catches its "
-                        "`KeyError`. R2 requires the skill to abort and report instead: every "
-                        "way of recovering here substitutes an unverified identity."
-                    ),
-                    detail=VERIFIED_UPN_VAR,
-                )
-            ]
-    return []
+    ]
 
 
 def _check_identity_leak(tree: ast.AST, reads: Sequence[ast.AST]) -> list[LintIssue]:
@@ -1072,12 +1431,20 @@ def lint_skill(
     *,
     child_full_md: Mapping[str, str] | None = None,
     host_capabilities: Sequence[str] = (),
+    code_override: str | None = None,
 ) -> list[LintIssue]:
-    """Return every content issue in the artifact. Only A1 is an error."""
+    """Return every content issue in the artifact. Only A1 is an error.
+
+    ``code_override`` swaps the python block for another script -- the code the
+    runtime PREPARED for a test sample. That script is regenerated from the body
+    prose, so it is a different artifact from the sample code and nothing else
+    ever looked at it; the declarations it is reconciled against still come from
+    ``skill_md``.
+    """
     if not (skill_md or "").strip():
         return []
     if kind is SkillKind.SCENARIO:
         return _lint_scenario(
             skill_md, child_full_md=child_full_md, host_capabilities=host_capabilities
         )
-    return _lint_capability(skill_md)
+    return _lint_capability(skill_md, code_override)
