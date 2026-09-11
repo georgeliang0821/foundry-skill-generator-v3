@@ -173,7 +173,7 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 | --- | --- | --- |
 | `startup()` / `shutdown()` | 外部 runtime lifecycle；generator 無直接呼叫 | Factory DI、必要 env、resource ownership 改變時更新 snapshot；通常不需改 generator。 |
 | `_build_static_skills_provider()` | Mode A/Mode B skill resource parity | Resource extension/directory、provider class 或 MAF `from_paths()` 變更時，與 factory dynamic path 一起同步。 |
-| `run_workflow()` | APIM/MCP TEST contract、scenario routing | `request/session_id/credentials/mode/scenario`、回傳 status/envelope 或 timeout/detach 行為改變時，檢查 `backend.testing.py` 與 API 測試。 |
+| `run_workflow()` | Router runtime/MCP TEST contract、scenario routing | `request/session_id/credentials/mode/scenario`、回傳 status/envelope 或 timeout/detach 行為改變時，檢查 `backend.testing.py` 與 API 測試。 |
 | `_project_boundary_result()` | Generator 對 runtime response 的解析 | Whitelist 欄位、status、session/job id、token/diagnostic projection 改變。 |
 | `cancel_pending_task()` / `check_pending_tasks()` | 測試 runner 若輪詢 async job | Job status、polling、picked-up 或 terminal result shape 改變時才需檢查 generator；純 storage 實作變更不需。 |
 | `_declared_children()` / `_project_scenario_skills()` | `backend.topology.py`、`backend.skills_index.py` | `metadata.children`、`is_internal` 或 host catalog projection 改變。注意此 helper 接受 scalar string，Generator 仍可維持更保守的 list-only 輸出。 |
@@ -193,7 +193,7 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 | `_declares_children`、`_declared_child_names`、scenario whitelist 改變 | 是 | **是** | 檢查 `backend/topology.py`、`backend/state_machine.py`、`backend/main.py`、scenario tests。 |
 | `v_my_skills`、RLS、`skill_key`、owner/public/internal 改變 | 是 | **是** | 檢查 `backend/skills_repo.py`、`backend/skills_index.py`、DB migrations；SQL schema 先部署。 |
 | Blob path/prefix、private folder、skill files 過濾改變 | 是 | **是** | 檢查 `backend/blob_store.py`、save/import 流程與 folder tests。 |
-| `list_skills`、`fetch_skill`、`run_workflow` 對外 contract 改變 | 是 | **是** | 檢查 `backend/testing.py`、APIM/MCP payload/response parser 與 API tests。 |
+| `list_skills`、`fetch_skill`、`run_workflow` 對外 contract 改變 | 是 | **是** | 檢查 `backend/testing.py`、Router runtime/MCP payload/response parser 與 API tests。 |
 | Gatekeeper 產出的 SKILL.md/frontmatter schema 改變 | 是 | 可能 | 若 Generator 會 import、modify 或 lint 該產物，就檢查 parser/state machine。 |
 | Gatekeeper internal scoring/prompt 改變，但輸入輸出 contract 不變 | 是 | 通常否 | 只更新 snapshot 與版本紀錄。 |
 | JobStore、heartbeat、Teams 通知、conversation persistence 改變 | 是 | 通常否 | Generator 未執行 reference runtime；除非外部 response contract 同時改變。 |

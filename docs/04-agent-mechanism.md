@@ -57,7 +57,7 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 | `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter，每 session 僅限一次）。 |
 | `propose_patch` | REFINE / TEST | 提交極小區間 of V4A git-like Patch（依 Anchor 替換代碼或內文）。 |
 | `rename_skill` | REFINE / TEST | 改名。後端直接改寫 frontmatter `name`，並把 Blob 資料夾、SQL 列與所有授權搬到新名稱，舊名刪除。frontmatter `name` 不得用 `propose_patch` 修改。 |
-| `request_test_run` | TEST | 異步提交正面、負面測試用例集合給 APIM Router 跑路由盲測（`mode=route_only`，只路由不執行）。 |
+| `request_test_run` | TEST | 異步提交正面、負面測試用例集合給設定的 Router runtime endpoint 跑路由盲測（`mode=route_only`，只路由不執行；端點可直連，也可選擇經由 APIM 等閘道）。 |
 | ... | TEST | 內部占位 |
 | `show_test_results` | TEST | 引導前端渲染並呈現路由測試的實測結果（包含覆蓋與誤判日誌）。 |
 | `record_reflection` | TEST | 寫入路由檢試後的 Agent 自我反思與下一步行動計畫（**觸發後自動回推至 REFINE**）。 |
@@ -76,15 +76,15 @@ flowchart LR
     PREPARE -->|1. 品質閘口通過| DRAFT
     DRAFT -->|2. 儲存/接受首版| REFINE
     DRAFT -->|3. 打掉方案重練| PREPARE
-    REFINE --> TEST
-    REFINE -->|4. 手工驗收完成| DONE
-    REFINE -->|5. 修改核心目標| PREPARE
-    TEST -->|6. 自我反思自動轉移| REFINE
-    TEST -->|7. 測試全綠通過| DONE
-    TEST -->|8. 定義致命撞車| PREPARE
-    DONE -->|9. 小幅微調代碼| REFINE
-    DONE -->|10. 重新盲測| TEST
-    DONE -->|11. 方向徹底重調| PREPARE
+    REFINE -->|4. 選擇執行路由測試| TEST
+    REFINE -->|5. 無需修改或測試，驗收完成| DONE
+    REFINE -->|6. 修改核心目標| PREPARE
+    TEST -->|7. 自我反思自動轉移| REFINE
+    TEST -->|8. 測試全綠通過| DONE
+    TEST -->|9. 定義致命撞車| PREPARE
+    DONE -->|10. 小幅微調代碼| REFINE
+    DONE -->|11. 重新盲測| TEST
+    DONE -->|12. 方向徹底重調| PREPARE
 ```
 
 ---
@@ -171,7 +171,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Input (上下文)** | 完整的 Prepare Brief（定義、研究、三類變數、測試用例）、Peer Skills 名錄、`10_format_spec.md`。 |
 | **決策邏輯** | 唯有在草稿為空時，方可發動一次 `propose_skill_draft`。大腦必須全力保證 YAML 格式合法（多國與 `:` 符號等引號包覆處理，避免 SQL 剖析 YAMLError）。 |
 | **Output** | `propose_skill_draft` 工具調用（單 session 限一次）。 |
-| **解鎖下一關條件** | 使用者在 UI 端予以接受（Accept Draft / 點選「儲存」），系統隨即將 DRAFT進展到 REFINE 狀態。 |
+| **解鎖下一關條件** | 使用者在 UI 端予以接受（Accept Draft / 點選「儲存」），系統會儲存初版、執行 material fidelity 與 skill lint，隨即將 DRAFT 進展到 REFINE 狀態。 |
 
 > 📜 **代碼段落排列規範：**
 > 首版 `SKILL.md` 的 Markdown 架構必須死首以下次序：
@@ -183,14 +183,16 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 ### 3.3 REFINE（打磨精修與局部修正）
 
 - **提示燃料**：[prompts/03_refine.md](../prompts/03_refine.md)
-- **目標**：杜絕重新打包整份 Skill，改採 **V4A Git-like Patch** 實施不影響他處的超窄區段迭代。
+- **目標**：審閱已接受的初版；僅在使用者 feedback、skill lint 或測試結果指出問題時，採 **V4A Git-like Patch** 實施不影響他處的超窄區段迭代。
 
 | 屬性 | 規格說明 |
 | --- | --- |
 | **Input (上下文)** | 當前 Cloud / Azure Blob 的 `SKILL.md` 快照、修補日誌 (Iteration patch records)、(來自 TEST) 的測試盲測明細。 |
-| **決策邏輯** | 對症下藥分為以下兩種情形與規則。其一是 **Discoverability (路由誤選/漏選)**，屬於 metadata 描述範疇，僅對 frontmatter 的 `description` 部分進行局部 V4A 補丁，不改變任何 Tags。其二是 **Usage (選中但解答錯誤/不全)**，屬於 內文 body 範疇，僅對 Ground Rules 或 Sample Code 內實施補丁。 |
-| **Output** | 發動局部補丁工具 `propose_patch` (依靠一組專利的 Anchor 精準定位)。 |
-| **解鎖下一關條件** | Patch 套用完成後，使用者可手動點擊盲測（進 TEST）、修正大綱（返回 PREPARE）或進行手工存檔（DONE）。 |
+| **決策邏輯** | 有修正需求時對症下藥：**Discoverability（路由誤選/漏選）**屬於 metadata 描述範疇，僅對 frontmatter 的 `description` 進行局部 V4A 補丁，不改變任何 Tags；**Usage（選中但解答錯誤/不全）**屬於 body 範疇，僅對 Ground Rules 或 Sample Code 實施補丁。若初版沒有問題，則不製造無意義的 Patch。 |
+| **Output** | 有修正需求時發動局部補丁工具 `propose_patch`（依靠 Anchor 精準定位）；無修正需求時直接提出進入 TEST 或 DONE 的階段轉移。 |
+| **解鎖下一關條件** | REFINE 不要求至少套用一個 Patch。若沒有使用者 feedback、待處理的 lint finding 或 Open Fix List，可直接進 TEST；若也不需要路由測試，可直接進 DONE。若核心目標改變則返回 PREPARE。 |
+
+> **零修改路徑：** PREPARE 的資訊完整、DRAFT 初版正確且接受後檢查沒有待辦時，REFINE 只負責確認下一步，不會重寫 `SKILL.md`。正常路徑可以是 `PREPARE → DRAFT → REFINE → TEST`，也可以是 `PREPARE → DRAFT → REFINE → DONE`。
 
 > 💾 **接受即雙寫機制：**
 > 在 REFINE 階段，使用者每一個被接受的 Patch 或手動點擊的存檔，後端均會直接自動觸發 **雙寫 (Dual-Write)** 機制：將變更推入 Azure Blob ＋ 寫入 Microsoft Azure SQL 的 metadata (`updated_at` 自動刷新、同步 ACL)。雙寫完成即生效，**不需要任何 sync / publish 步驟**——runtime 每次請求都直接從 SQL + Blob 動態解析 skill。
@@ -207,10 +209,10 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 ---
 
-### 3.4 TEST（APIM Router 路由盲測）
+### 3.4 TEST（Router endpoint 路由盲測）
 
 - **提示燃料**：[prompts/04_test.md](../prompts/04_test.md)
-- **目標**：啟動 APIM 對外用例校對，並在大腦中走完客觀分流的自我反省。
+- **目標**：呼叫設定的 Router runtime endpoint 執行用例校對，並在大腦中走完客觀分流的自我反省。端點只需符合 `/run` 契約，可直接連到 runtime，也可選擇經由 APIM 等閘道；APIM 不是必要元件。
 
 | 屬性 | 規格說明 |
 | --- | --- |
@@ -228,7 +230,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
 >
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
-> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。
+> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。
 > - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings，[prompts/04_test.md](../prompts/04_test.md) 則明令大腦**不得重新推導**已印出的結論，只需照抄成 `what_to_change` 項目。
 > - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）與未檢查回傳碼（A12）全數下放給 lint。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。

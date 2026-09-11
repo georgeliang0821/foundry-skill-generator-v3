@@ -46,7 +46,7 @@
 - **五階段工作流**（見下方流程圖）：PREPARE → DRAFT → REFINE → TEST → DONE，每個階段有明確產出與品質關卡（quality gate）。
 - **既有 Skill 重複偵測**：PREPARE 階段比對知識庫（SQL + Blob），協助判斷該「新增」還是「修改既有 Skill」。
 - **鄰近 Skill 差異化（Peer Skills）**：載入使用者有權限的其他 Skill，協助把 `description` 的路由邊界寫清楚（何時用、何時不要用）。
-- **路由測試（TEST）**：把正面/負面範例查詢送到 APIM 的 Router，驗證「該選中時有選中、不該選中時沒選中」，並把結果回饋給 AI 自動修正。請求以 `mode="route_only"` 送出：Router 照常路由並回傳它「本來會執行」的腳本，但**不執行、不寫入任何外部系統**，因此負面樣本不會誤觸有寫入行為的 skill。
+- **路由測試（TEST）**：把正面/負面範例查詢送到設定的 Router runtime endpoint，驗證「該選中時有選中、不該選中時沒選中」，並把結果回饋給 AI 自動修正。端點只需實作 `/run` 契約，可直接連到 runtime，也可選擇經由 APIM 等閘道對外提供；APIM 不是必要元件。請求以 `mode="route_only"` 送出：Router 照常路由並回傳它「本來會執行」的腳本，但**不執行、不寫入任何外部系統**，因此負面樣本不會誤觸有寫入行為的 skill。
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
 - **登入與資料列級隔離（RLS）**：以 Entra 登入後的 email 作為身分，依 `dbo.user_skill_grants` 決定可存取的 Skill。
 - **公開 Skill（`is_public`）**：將一個全域 Skill 標為公開，所有登入者即可使用，**不需逐人授權**。前端在「Skill access」彈窗切換，並以 `public` 標記顯示於 Skill 清單與綁定狀態列。
@@ -71,14 +71,17 @@ flowchart TD
     end
 
     P -->|三關卡全綠（品質關卡通過）| D[DRAFT 草稿<br/>產生第一版完整 SKILL.md]
-    D --> R[REFINE 精修<br/>description=路由問題 / 內文=使用問題 / 變數]
-    R --> T[TEST 測試<br/>送正負範例給 Router 驗證路由 + 使用正確性]
+    D -->|使用者接受並儲存初版| R[REFINE 審閱與條件式精修<br/>有 feedback / finding 才套用 Patch]
+    R -->|選擇執行路由測試| T[TEST 測試<br/>送正負範例給 Router 驗證路由 + 使用正確性]
+    R -->|無需修改或測試，驗收完成| DONE
     T -->|有問題：record_reflection 自動回 REFINE| R
     T -->|通過| DONE[DONE 完成<br/>已存 Blob + SQL]
     D -->|換方向| P
     R -->|需要重新規劃| P
     DONE -->|小修→REFINE / 改範圍→PREPARE / 重測→TEST| R
 ```
+
+> REFINE 是條件式修正階段，不要求至少套用一個 Patch。若使用者沒有修改意見，且沒有待處理的 lint finding 或 Open Fix List，接受 DRAFT 後可從 REFINE 直接進入 TEST；若不需要路由測試，也可直接進入 DONE。
 
 > 每個 state 的 Input / Prompt / Output、工具清單與轉換細節，請見 [04-agent-mechanism.md](04-agent-mechanism.md)。
 

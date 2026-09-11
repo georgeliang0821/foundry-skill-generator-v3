@@ -15,7 +15,7 @@
 | **Microsoft Entra ID App Registration** | 使用者登入（OAuth2 授權碼 + PKCE），核發 access token | 是 |
 | **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 是 |
 | **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 是 |
-| **APIM 端點（Router / Sync）** | 路由測試（TEST）與儲存後同步 Skill 清單；也可改指向任何實作 `/run` 契約的 runtime（例如 ACA） | 選用（TEST 功能需要） |
+| **Router runtime endpoint** | 路由測試（TEST）；可直接指向任何實作 `/run` 契約的 runtime，也可選擇經由 APIM 等閘道對外提供。儲存後不需要同步 Skill 清單 | 選用（僅 TEST 功能需要） |
 
 ---
 
@@ -142,13 +142,13 @@ SGV2_AUTH_STORE=blob
 | --- | --- |
 | `SKILL_SELECTION_TEST_RUN_URL` | runtime 的 `/run` 端點；TEST 把正 / 負面範例送去，看 Router 是否路由到本 skill（讀取位置：`backend/testing.py`） |
 
-**不限定 APIM**。程式只做一次一般 HTTP POST，不檢查主機名稱，因此任何實作下方契約的端點都可以，例如直接指向 Azure Container Apps。走 APIM 只是多了 subscription key、rate limit 與 policy；繞過 APIM 直接打 ACA 時，請確認原本是否有 policy 負責 token 轉換。
+**這是 runtime HTTP 契約，不是 APIM 依賴。**程式只做一般 HTTP POST，不檢查主機名稱，因此任何實作下方契約的端點都可以，例如直接指向 Azure Container Apps。APIM 只是可選閘道，用於 subscription key、rate limit 或 policy；未使用 APIM 時，請確認 runtime 本身已處理部署所需的驗證與 token 轉換。
 
 ```dotenv
-# APIM 閘道
-#SKILL_SELECTION_TEST_RUN_URL=https://kurt-apim.azure-api.net/coding-tool-contoso-apis/run
-# 或直接指向 ACA
- SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainerapps.io/run
+# 直接指向 runtime（例如 ACA）
+SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainerapps.io/run
+# 也可選擇指向 APIM 等閘道
+#SKILL_SELECTION_TEST_RUN_URL=https://example-apim.azure-api.net/coding-tool-apis/run
 ```
 
 端點必須符合的契約：接受 POST JSON（`request` / `session_id` / `mode` / `credentials`），回應 JSON 頂層要有 `response`，並原樣回顯 `mode`；同時能驗證 `Authorization: Bearer` 帶的使用者委派 token，且在 120 秒內回應。
@@ -178,7 +178,7 @@ SGV2_AUTH_STORE=blob
 - **token 內容**：app 對自己做 client credentials，取得的 token **沒有 `scp` 也沒有 `roles`**。MCP 伺服器的 token 驗證不檢查這兩者，因此可以通過。
 - **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
 
-> 這條身分**與路由測試無關**。TEST 階段打 APIM 送的是**使用者委派 token**，供 runtime 做 OBO 交換；app-only token 沒有使用者身分，不能用在那條路徑上。
+> 這條身分**與路由測試無關**。TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；無論端點是直連或經過閘道，app-only token 都沒有使用者身分，不能用在那條路徑上。
 
 ### 3.2 Azure SQL 連線與驗證策略
 
