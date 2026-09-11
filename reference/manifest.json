@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/agent-accelerators/enterprise-agent-accelerator.git",
+    "local_checkout": "C:\\dev\\code_tool_hosted-async-1.8.0",
+    "commit": "1e4cb47b72bad52bf6e000855f85bb4686cd5dca",
+    "verified_at": "2026-09-11"
+  },
+  "files": [
+    {
+      "source": "core_handler.py",
+      "destination": "reference/core_handler.py",
+      "version": "1.11",
+      "sha256": "9b73175103c5fe4015ddd66b489579d4a618fa03d4004cf540713528a49e5315"
+    },
+    {
+      "source": "skill_gatekeeper.py",
+      "destination": "reference/skill_gatekeeper.py",
+      "version": "2.8",
+      "sha256": "64e265d9b98c45e377076dce2491a690b18749c57f93e0662b8a361415a506c0"
+    },
+    {
+      "source": "skills_provider_factory.py",
+      "destination": "reference/skills_provider_factory.py",
+      "version": "1.14",
+      "sha256": "3394d403145ecf7ea8ed3462b3498a3e03c556382f5166f647116f1d67c00e12"
+    }
+  ],
+  "contracts": [
+    {
+      "source": "core_handler.py",
+      "symbol": "run_workflow",
+      "parameters": [
+        "user_input",
+        "session_id",
+        "credentials",
+        "mode",
+        "scenario"
+      ],
+      "review": [
+        "backend/testing.py",
+        "tests/api/test_test_runner_api.py"
+      ],
+      "wire": {
+        "file": "backend/testing.py",
+        "match": "dict_key",
+        "params": {
+          "user_input": "request",
+          "session_id": "session_id",
+          "credentials": "credentials",
+          "mode": "mode",
+          "scenario": "scenario"
+        }
+      }
+    },
+    {
+      "source": "core_handler.py",
+      "symbol": "fetch_skill",
+      "parameters": [
+        "skill_name",
+        "credentials",
+        "sections"
+      ],
+      "review": [
+        "backend/state_machine.py",
+        "backend/testing.py"
+      ],
+      "wire": {
+        "file": "backend/topology.py",
+        "match": "text",
+        "params": {
+          "skill_name": "skill_name",
+          "sections": "sections"
+        }
+      }
+    },
+    {
+      "source": "skills_provider_factory.py",
+      "symbol": "_declared_child_names",
+      "parameters": [
+        "content"
+      ],
+      "review": [
+        "backend/topology.py",
+        "backend/state_machine.py"
+      ]
+    },
+    {
+      "source": "skills_provider_factory.py",
+      "symbol": "_declares_children",
+      "parameters": [
+        "content"
+      ],
+      "review": [
+        "backend/topology.py",
+        "tests/unit/test_topology_differential.py"
+      ]
+    },
+    {
+      "source": "skills_provider_factory.py",
+      "symbol": "SkillsProviderFactory._materialize_skills",
+      "parameters": [
+        "self",
+        "metas",
+        "target_dir",
+        "scenario"
+      ],
+      "review": [
+        "backend/topology.py",
+        "backend/skills_index.py"
+      ]
+    },
+    {
+      "source": "skills_provider_factory.py",
+      "symbol": "SkillsProviderFactory.create_provider_scope",
+      "parameters": [
+        "self",
+        "sql_token",
+        "session_id",
+        "turn_id",
+        "scenario"
+      ],
+      "review": [
+        "backend/testing.py",
+        "backend/state_machine.py"
+      ]
+    },
+    {
+      "source": "skill_gatekeeper.py",
+      "symbol": "GatekeeperDecision",
+      "fields": [
+        "action_taken",
+        "pending_id",
+        "skill_name",
+        "skill_md_etag"
+      ],
+      "review": [
+        "backend/skill_lint.py",
+        "backend/state_machine.py"
+      ]
+    }
+  ],
+  "response_wire": {
+    "source": "core_handler.py",
+    "symbol": "RESPONSE_BOUNDARY_WHITELIST",
+    "file": "backend/testing.py",
+    "required": [
+      "response",
+      "status",
+      "session_id",
+      "uploads",
+      "skills_referenced",
+      "loaded_resources"
+    ],
+    "ignored": {
+      "success": "Pass/fail is decided from skills_referenced, not from the runtime's own verdict.",
+      "needs_input": "route_only never executes, so the runtime cannot ask for input.",
+      "job_id": "TEST is synchronous; the Generator never detaches a job.",
+      "task_description": "Async job lifecycle only.",
+      "existing_job": "Async job lifecycle only.",
+      "message": "Non-success control field; status already drives the Generator's branching.",
+      "reason": "Non-success control field; status already drives the Generator's branching."
+    }
+  },
+  "validation": {
+    "commands": [
+      [
+        "uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit/test_reference_sync.py",
+        "tests/unit/test_topology_differential.py"
+      ]
+    ]
+  }
+}

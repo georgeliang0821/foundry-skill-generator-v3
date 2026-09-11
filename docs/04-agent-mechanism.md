@@ -223,8 +223,9 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 > 🔒 **執行模式（`mode`）：**
 >
-> - 選擇測試（capability 的正負樣本、scenario 的 L2）一律以 `mode="route_only"` 送出：Router 照常路由、回傳它本來會執行的腳本，但**不執行、不寫入**，因此負面樣本不會誤觸有寫入行為的 skill，也不會因為缺 runtime 變數而只拿到 `[NEEDS_INFO]`。
-> - 唯一的例外是 scenario skill 的 **L3 子項契約驗證**，它顯式送 `mode="execute"`：能證明 payload 契約成立的唯一證據，就是真的跑一次而且沒有 `[NEEDS_INFO]`。**L3 會真的執行、可能真的寫入。**
+> - 選擇測試一律以 `mode="route_only"` 送出：capability 的正負樣本與 scenario 的每一層都是，**沒有任何一層會執行技能**。Router 照常路由、回傳它本來會執行的腳本，但不執行、不寫入，因此負面樣本不會誤觸有寫入行為的 skill，也不會因為缺 runtime 變數而只拿到 `[NEEDS_INFO]`。
+> - scenario 的 **L3（Child reachability）不發自己的請求**，改為對 L2 的回應做斷言。要證明 payload 契約成立確實得真的跑一次，但路由測試不得有副作用，因此這裡只驗證樣本是否路由到已宣告的 child。
+> - scenario 的 L2 探針會在 body 頂層額外送 `scenario`（該 scenario 自己的名稱）。runtime 收到後只會把該 skill `metadata.children` 指名的 skill 交給 model，其餘的即使使用者有權限也看不到——這重現了正式環境的條件。不送的話 runtime 不過濾、整池都給，`metadata.children` 漏寫或打錯字的 skill 照樣被路由到，L3 會假性通過。前提是該 skill 已存回 Blob，否則 runtime 查不到這個名字，一樣退回不過濾。capability 測試送空字串，因為能力層 skill 是跨情境共用的。
 > - runtime 必須在回應頂層回顯同一個 `mode`。缺漏或不符會**中止整批**並回 HTTP 502，沒有降級開關。
 
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**

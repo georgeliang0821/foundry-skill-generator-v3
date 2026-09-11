@@ -231,6 +231,7 @@ import asyncio
 import contextlib  # 2026.06.12 George : max_replicas>1 — W4/W5 companion task 收尾
 import time  # 2026.06.12 George : max_replicas>1 — W2 查表 long-poll deadline
 import json
+import re
 import socket
 import uuid
 import logging
@@ -270,7 +271,39 @@ from obo_helper import (
 # 2026.05.18 George : v1.8 Phase 4 — JWT claims 解析 (oid / upn)
 # 用於從 Bearer token 取得 user identity 寫進 Job Store + Teams 通知 payload。
 # 純 base64 decode,不驗簽章 — 詳見 jwt_helper.py 模組註解。
-from jwt_helper import parse_jwt_claims, is_user_delegated_token
+from jwt_helper import (
+    parse_jwt_claims,
+    is_user_delegated_token,
+    extract_verified_upn,
+)
+
+# 2026.09.04 George : 平台保留前綴 — 已驗證身分注入
+# EAA_VERIFIED_* 一律由平台在執行期產生,呼叫端與容器環境都不得供給。
+# skill 端以 os.environ["EAA_VERIFIED_USER_UPN"] 取用(禁用 .get / getenv,
+# 讓身分缺席直接 KeyError 中止)— 見 README「Skill 身分使用規範」。
+EAA_VERIFIED_PREFIX = "EAA_VERIFIED_"
+VERIFIED_USER_UPN_ENV = "EAA_VERIFIED_USER_UPN"
+
+
+def _purge_reserved_identity_env() -> None:
+    """從行程環境刪除所有 EAA_VERIFIED_* 變數。
+
+    executor 是 `os.environ.copy()` 後才 update 注入值(見 code_executor.py),
+    所以容器層級設的同名變數會成為每個 subprocess 的底值。若某回合因未通過
+    驗證而『不注入』,那個底值仍會留在 env 裡被 skill 讀到 —— 靜默地把一個
+    未驗證的假身分餵給授權判斷,且 KeyError 那道防線永遠不會觸發。
+    在此主動清掉,讓保證是結構性的,而不是靠「不要在 ACA 設這個變數」的叮嚀。
+    """
+    leaked = [k for k in os.environ if k.startswith(EAA_VERIFIED_PREFIX)]
+    for key in leaked:
+        os.environ.pop(key, None)
+    if leaked:
+        logger.warning(
+            f"[Identity] Purged {len(leaked)} reserved env var(s) inherited from "
+            f"the container environment: {leaked}. "
+            f"{EAA_VERIFIED_PREFIX}* must never be configured on the platform "
+            f"— they are injected per-turn from the verified token only."
+        )
 
 # 2026.05.12 George : v1.6 Phase 0 — 抽象介面層
 # 三個介面分別對應 design doc §17 的三個 Protocol。
@@ -512,6 +545,9 @@ async def startup():
     logger.info("=" * 60)
     logger.info("Core Handler - Starting...")
     logger.info("=" * 60)
+
+    # 2026.09.04 George : 必須早於任何 skill 執行 — 見函式 docstring
+    _purge_reserved_identity_env()
 
     # 2026.05.18 George : v1.7 Phase 3
     # 2026.06.12 George : max_replicas>1 — replica_id 雙平台 fallback
@@ -779,6 +815,11 @@ RESPONSE_BOUNDARY_WHITELIST = frozenset({
     "needs_input",
     "session_id",
     "skills_referenced",
+    # 2026.08.31 George : route_only — model 實際 read_skill_resource 的清單。
+    # 只有 route_only 的短路 payload 會建立這個 key;execute 路徑的 result 從不含它。
+    # 本 whitelist 是「保留清單」不是「補齊清單」,多列一個從不存在的 key 對既有
+    # 流量是 no-op。
+    "loaded_resources",
     # detach / rejected / cancelled 等非 success shape 的控制欄位也保留,
     # 讓 mcp_server._build_response_payload 仍能正確分流。
     "status",
@@ -858,10 +899,34 @@ def _project_boundary_result(result: dict) -> dict:
     return projected
 
 
+# 2026.08.31 George : route_only — mode 回顯
+# ─────────────────────────────────────────────────────────────────────────
+# 為什麼在 _project_boundary_result 「之後」注入,而不是把 "mode" 加進 whitelist:
+#   (1) whitelist 只作用在正常完成的 result;rejected / running 這些非完成 shape
+#       根本不經過投影。呼叫端要靠回顯判斷「新版是否生效」,漏掉這些 shape 會讓
+#       他們把 rejected 誤判成「舊版靜默忽略了 mode 參數」。
+#   (2) 不動 whitelist = 不新增任何欄位外洩面。
+# execute(預設)時原樣回傳「同一個物件」—— 不 copy、不加 key,既有 caller 收到的
+# JSON 與改動前 byte-identical。
+def _echo_mode(payload: dict, mode: str) -> dict:
+    if mode == "execute" or not isinstance(payload, dict):
+        return payload
+    return {**payload, "mode": mode}
+
+
 async def run_workflow(
     user_input: str,
     session_id: str = None,
     credentials: dict = None,
+    # 2026.08.31 George : route_only — "execute"(預設,現行行為) | "route_only"
+    # route_only 只做 skill 路由判定就收工,不執行任何生成的程式碼。
+    # 用途見 code_agent_hosted._run_turn_loop 的短路點註解。
+    # 預設值確保所有既有 caller(main.py 的兩處、MCP tool)行為完全不變。
+    mode: str = "execute",
+    # 2026.09.04 George : scenario 收斂 — 宿主選定的情境層 skill 名稱。
+    # 空字串 = 不收斂(現行行為)。驗證在 SkillsProviderFactory 那一層做且全程
+    # fail-open —— 這裡不擋。
+    scenario: str = "",
 ) -> dict:
     """
     執行 workflow,回傳 result dict。
@@ -882,6 +947,8 @@ async def run_workflow(
         user_input: 用戶的請求文字
         session_id: 可選的 session ID(用於跨 invocation 延續 metadata)
         credentials: 可選的 credentials dict(注入為環境變數)
+        scenario: 可選。宿主選定的情境層 skill 名稱,決定本輪載哪些能力層
+                  skill。不隨 session 持久化,宿主每輪都要重帶。
 
     Returns:
         以下三種 shape 之一:
@@ -915,9 +982,11 @@ async def run_workflow(
             session_id_hint=session_id,
             credentials=credentials,
             job_id=None,  # 沒 job 追蹤
+            mode=mode,
+            scenario=scenario,
         )
         # v1.10: dev/test fallback 也是同步回邊界 → 投影
-        return _project_boundary_result(fallback_result)
+        return _echo_mode(_project_boundary_result(fallback_result), mode)
 
     # ─────────────────────────────────────────────────────────────
     # Step 1: 確保 session_id 存在 (主文件 §5.6.4)
@@ -952,7 +1021,7 @@ async def run_workflow(
             f"existing_job_id={existing.job_id}, "
             f"started_at={existing.created_at}"
         )
-        return {
+        return _echo_mode({
             "status": "rejected",
             "reason": "concurrent_job_exists",
             "session_id": effective_session_id,
@@ -962,7 +1031,7 @@ async def run_workflow(
                 "started_at": existing.created_at,
             },
             "message": "你還有一個任務在進行中,請先等它完成或取消",
-        }
+        }, mode)
 
     # ─────────────────────────────────────────────────────────────
     # Step 3: 建 job (Table Storage 持久化) + 註冊 in-process waiter
@@ -1029,6 +1098,8 @@ async def run_workflow(
             session_id_hint=effective_session_id,
             credentials=credentials,
             job_id=job_id,
+            mode=mode,
+            scenario=scenario,
         )
     )
     # 名字方便 debug
@@ -1058,8 +1129,11 @@ async def run_workflow(
                 f"[run_workflow] event set but no result for job={job_id}, "
                 f"unexpected state, returning as running"
             )
-            return _build_running_response(
-                job_id, effective_session_id, task_description
+            return _echo_mode(
+                _build_running_response(
+                    job_id, effective_session_id, task_description
+                ),
+                mode,
             )
 
         logger.info(
@@ -1067,7 +1141,7 @@ async def run_workflow(
             f"{ADAPTIVE_TIMEOUT_SECONDS}s"
         )
         # v1.10: 同步完成 → 投影成 Helper Agent 該看的最小 shape (剝診斷欄位)
-        return _project_boundary_result(result)
+        return _echo_mode(_project_boundary_result(result), mode)
 
     except asyncio.TimeoutError:
         # ─────────────────────────────────────────────────────────
@@ -1082,15 +1156,18 @@ async def run_workflow(
                 f"in timeout boundary, returning result directly"
             )
             # v1.10: race window 也是同步回邊界 → 投影
-            return _project_boundary_result(result)
+            return _echo_mode(_project_boundary_result(result), mode)
 
         # 真的還沒完成,detach 進入 running 狀態
         logger.info(
             f"[run_workflow] Job {job_id} exceeded "
             f"{ADAPTIVE_TIMEOUT_SECONDS}s, detaching to background"
         )
-        return _build_running_response(
-            job_id, effective_session_id, task_description
+        return _echo_mode(
+            _build_running_response(
+                job_id, effective_session_id, task_description
+            ),
+            mode,
         )
 
     finally:
@@ -1319,6 +1396,11 @@ async def _run_coding_agent_inner(
     session_id_hint: Optional[str],
     credentials: Optional[dict],
     job_id: Optional[str],
+    # 2026.08.31 George : route_only — 從 run_workflow 透傳,寫進 state.mode 供
+    # turn loop 短路點與保險絲判斷。預設值讓既有 fallback 路徑不用改。
+    mode: str = "execute",
+    # 2026.09.04 George : scenario 收斂 — 從 run_workflow 透傳,寫進 state.scenario。
+    scenario: str = "",
 ) -> dict:
     """
     Coding Agent 的核心執行函式 (Phase 0 v1.6 run_workflow 主體搬進來)。
@@ -1369,6 +1451,8 @@ async def _run_coding_agent_inner(
         if credentials:
             # 提取 user token(由 mcp_server.py 注入的 __user_token)
             user_token = credentials.pop("__user_token", None)
+            # OBO 成功與否 = 這張 token 有沒有被 Entra 驗過,是下方注入身分的唯一依據
+            obo_verified = False
             if user_token:
                 # 2026.06.09 George: Routine fire-time 分流
                 # Routine 觸發時,Foundry 帶進來的是 agent identity token
@@ -1382,6 +1466,7 @@ async def _run_coding_agent_inner(
                     try:
                         obo_tokens = await obo_exchange_all(user_token)
                         if obo_tokens:
+                            obo_verified = True
                             state.user_data.update(obo_tokens)
                             logger.info(
                                 f"[OBO] Injected {len(obo_tokens)} resource tokens: "
@@ -1428,10 +1513,45 @@ async def _run_coding_agent_inner(
                             f"(routine path): {e}"
                         )
 
+            # 2026.09.04 George : 保留前綴清洗 —— 必須在 merge 之前
+            # 呼叫端不得自稱身分。順序是本段唯一的安全性關鍵:
+            #   剔除呼叫端的 EAA_VERIFIED_* → merge credentials → 最後才寫我方的值。
+            # 顛倒任一環,呼叫端就能靠 last-write-wins 冒充任意使用者。
+            forged_keys = [
+                k for k in credentials if k.startswith(EAA_VERIFIED_PREFIX)
+            ]
+            for key in forged_keys:
+                credentials.pop(key, None)
+            if forged_keys:
+                logger.warning(
+                    f"[Identity] Stripped {len(forged_keys)} caller-supplied "
+                    f"reserved key(s) from credentials: {forged_keys}"
+                )
+
             # 剩餘的 credentials 照舊注入(向後相容)
             if credentials:
                 state.user_data.update(credentials)
                 logger.info(f"[State] Injected {len(credentials)} credentials as env vars")
+
+            # 2026.09.04 George : 注入已驗證身分
+            # 取信的依據是 OBO 成功 —— Entra 在交換時已驗過簽章 / aud / exp /
+            # 交換資格,偽造的 token 換不到下游 token,所以本地不需要再驗一次簽。
+            # ⚠️ 反過來說:日後若拿掉或繞過 OBO,這個變數的可信度會一併消失。
+            # OBO 沒跑 / 失敗 / 取不到 claim → 不建立 key,讓 skill 端 KeyError
+            # 中止,而不是拿到空字串繼續往下做。
+            if obo_verified:
+                verified_upn = extract_verified_upn(user_token)
+                if verified_upn:
+                    state.user_data[VERIFIED_USER_UPN_ENV] = verified_upn
+                    logger.info(
+                        f"[Identity] Injected {VERIFIED_USER_UPN_ENV} "
+                        f"(source: OBO-verified token)"
+                    )
+                else:
+                    logger.warning(
+                        f"[Identity] OBO succeeded but no UPN claim resolved — "
+                        f"{VERIFIED_USER_UPN_ENV} not injected"
+                    )
 
         # 2. 從 Table Storage 載入 metadata
         # session_id_hint 是外殼算好的 effective_session_id (Phase 3 新增)。
@@ -1467,6 +1587,14 @@ async def _run_coding_agent_inner(
         # state.job_id 是 Phase 3 新增的 attribute (ConversationState 需要
         # 新增此欄位,預設 None)。fallback 路徑下 job_id=None。
         state.job_id = job_id
+
+        # 2.8 (2026.08.31 George) route_only — 把 mode 寫進 state。
+        # 必須在 _workflow.run() 之前,turn loop 第一輪就要讀得到。
+        state.mode = mode
+
+        # 2.9 (2026.09.04 George) scenario 收斂 — 同上,還要趕在 per-turn
+        # SkillsProvider 建立之前。
+        state.scenario = scenario
 
         # 3. 注入 session context
         if metadata:
@@ -1565,7 +1693,10 @@ async def _run_coding_agent_inner(
             state.recent_full_outputs = {}
 
         # 5. 儲存 metadata 到 Table Storage
-        if _conv_store:
+        # 2026.08.31 George : route_only 不落 metadata。呼叫端(skill generator 的
+        # 路由驗證)每個樣本用獨立 session 且永不回帶,寫了沒人讀;批次跑數百個樣本
+        # 會在 Table 累積等量垃圾。也讓「route_only 不寫入」這條不變式少一個例外。
+        if _conv_store and mode != "route_only":
             await _conv_store.save_metadata(effective_session_id, state)
 
         # 6. 在 result 中帶回 session_id(供 caller 下輪帶回)
@@ -2852,13 +2983,60 @@ async def list_skills(credentials: Optional[Dict] = None) -> str:
 # 2026.08.21 George : Skill Registry 分階配套 —— list_skills 只給 frontmatter,
 # 這裡給正文。
 #
+# 2026.09.06 George : sections 段落投影。mcp_server 的 fetch_skill tool 從一開始
+# 就對外開放這個參數,但下游一直沒接 —— 宿主真的傳了就會 TypeError。
+_H2_HEADING_RE = re.compile(r"^##(?!#)\s*(.+?)\s*$")
+
+
+def _normalize_heading(text: str) -> str:
+    # 只留字母數字與 CJK,emoji / 反引號 / 標點 / 空白全丟,讓宿主給片段就能命中。
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def _split_h2_sections(content: str):
+    """切成 [(標題, 該節原文)]。code fence 內的 ## 不算標題。"""
+    lines = content.splitlines()
+    heads = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _H2_HEADING_RE.match(line)
+        if m:
+            heads.append((i, m.group(1)))
+    out = []
+    for n, (start, title) in enumerate(heads):
+        end = heads[n + 1][0] if n + 1 < len(heads) else len(lines)
+        out.append((title, "\n".join(lines[start:end]).rstrip()))
+    return out
+
+
+def _project_sections(content: str, sections: str):
+    """回傳 (投影後正文, 可用節名清單)。無命中時第一個元素為 None。"""
+    all_sections = _split_h2_sections(content)
+    titles = [t for t, _ in all_sections]
+    wanted = [_normalize_heading(s) for s in sections.split(",")]
+    wanted = [w for w in wanted if w]
+    if not wanted or not all_sections:
+        return (None, titles)
+    picked = [
+        body
+        for title, body in all_sections
+        if any(w in _normalize_heading(title) for w in wanted)
+    ]
+    return ("\n\n".join(picked) if picked else None, titles)
+
+
 # 情境層 parent skill 的內容有兩種讀者:EAA 內部 agent(靠 MAF load_skill 讀
 # materialize 到 /tmp 的檔案)與宿主 agent(DA / Foundry helper)。宿主沒有
 # 檔案系統,也拿不到 /tmp,而 parent 的編排指引恰好只有宿主能執行 —— 例如
 # 「先去查行事曆」這種 EAA 本身沒有權限做的事。沒有這條路徑,那些指引就永遠
 # 到不了會執行它的人。
 async def fetch_skill(
-    skill_name: str, credentials: Optional[Dict] = None
+    skill_name: str, credentials: Optional[Dict] = None, sections: str = ""
 ) -> str:
     """
     取得單一 skill 的 SKILL.md 完整內容(progressive disclosure 的第二段)。
@@ -2912,6 +3090,29 @@ async def fetch_skill(
             f"⚠️ 找不到 skill `{skill_name}`,或你沒有使用它的權限。"
             "請先呼叫 list_skills 確認名稱。"
         )
+
+    if sections and sections.strip():
+        projected, available = _project_sections(content, sections)
+        if projected is None:
+            avail = (
+                "、".join(f"`{t}`" for t in available)
+                if available
+                else "(此 skill 沒有 H2 段落,請把 sections 留空)"
+            )
+            logger.info(
+                "[fetch_skill] %s sections=%r no match (avail=%d)",
+                skill_name, sections, len(available),
+            )
+            return (
+                f"⚠️ skill `{skill_name}` 找不到符合 `{sections}` 的段落。\n"
+                f"可用段落:{avail}\n"
+                "請改用其中一個節名,或把 sections 留空取回完整正文。"
+            )
+        logger.info(
+            "[fetch_skill] %s sections=%r resolved (%d/%d chars)",
+            skill_name, sections, len(projected), len(content),
+        )
+        return f"## Skill: {skill_name}\n\n{projected}"
 
     logger.info("[fetch_skill] %s resolved (%d chars)", skill_name, len(content))
     return f"## Skill: {skill_name}\n\n{content}"

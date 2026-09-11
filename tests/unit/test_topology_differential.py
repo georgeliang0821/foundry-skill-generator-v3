@@ -38,14 +38,19 @@ def _reference_version() -> str:
 
 
 def _reference_declares_children():
-    """Extract just ``_declares_children``; the module itself needs aioodbc et al."""
+    """Extract the parent parser's minimal closure; the full module needs aioodbc et al."""
     tree = ast.parse(REFERENCE_FILE.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "_declares_children":
-            namespace: dict = {"yaml": yaml}
-            module = ast.Module(body=[node], type_ignores=[])
-            exec(compile(module, str(REFERENCE_FILE), "exec"), namespace)  # noqa: S102
-            return namespace["_declares_children"]
+    required = {"_declared_child_names", "_declares_children"}
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in required
+    ]
+    if {node.name for node in functions} == required:
+        namespace: dict = {"yaml": yaml}
+        module = ast.Module(body=functions, type_ignores=[])
+        exec(compile(module, str(REFERENCE_FILE), "exec"), namespace)  # noqa: S102
+        return namespace["_declares_children"]
     pytest.skip(f"_declares_children not found in {REFERENCE_FILE.name}")
 
 

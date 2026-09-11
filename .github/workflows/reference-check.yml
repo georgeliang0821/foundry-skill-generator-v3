@@ -1,0 +1,38 @@
+name: Reference contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The upstream runtime lives in another organization and cannot be cloned
+      # here, so CI checks the Generator against the committed snapshots only.
+      # Upstream drift is caught by running `check` without --offline locally.
+      - name: Reference contract check
+        run: |
+          set +e
+          uv run --no-sync python scripts/sync_reference.py check --offline
+          code=$?
+          set -e
+          case "$code" in
+            0) ;;
+            4) echo "::warning title=Runtime contract not fully used::sync_reference exited 4; the Generator ignores part of the runtime contract." ;;
+            *) exit "$code" ;;
+          esac
+
+      - name: Compatibility tests
+        run: uv run --no-sync python -m pytest tests/unit tests/api -q

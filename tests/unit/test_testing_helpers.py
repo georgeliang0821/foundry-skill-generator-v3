@@ -641,6 +641,61 @@ def test_scenario_layers_send_one_route_only_request(monkeypatch: pytest.MonkeyP
     assert [layer.passed for layer in run.scenario_layers] == [True, True, True]
 
 
+def test_scenario_probe_names_the_scenario_so_the_runtime_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without the name the runtime materializes every skill, so an incomplete
+    # metadata.children list would pass L3 here and fail closed in production.
+    scenarios: list[str] = []
+
+    def fake_post(query, delegated_token, **kwargs):  # noqa: ANN001
+        scenarios.append(kwargs["scenario"])
+        return {"response_text": "Skill used: child-skill", "skills_referenced": ["child-skill"]}
+
+    monkeypatch.setattr("backend.testing._post_apim_run", fake_post)
+
+    run_selection_tests(
+        _scenario_skill_md(),
+        ["do the thing"],
+        [],
+        kind=SkillKind.SCENARIO,
+        mode=Mode.NEW,
+        expected_name="parent-skill",
+        delegation=[Delegation(child_skill="child-skill", credentials_key="payload_json")],
+        child_resolver=_child_resolver,
+    )
+
+    assert scenarios == ["parent-skill"]
+
+
+def test_capability_probe_sends_no_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Capability skills are shared across scenarios; converging would misreport.
+    scenarios: list[str] = []
+
+    def fake_post(query, delegated_token, **kwargs):  # noqa: ANN001
+        scenarios.append(kwargs.get("scenario", ""))
+        return {"skills_referenced": ["demo-skill"]}
+
+    monkeypatch.setattr("backend.testing._post_apim_run", fake_post)
+
+    run_selection_tests(
+        "---\nname: demo-skill\ndescription: Demo\n---\n",
+        ["a"],
+        ["b"],
+        delegated_token="token",
+    )
+
+    assert scenarios == ["", ""]
+
+
+def test_scenario_is_a_top_level_body_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _stub_apim(monkeypatch, {"response": "ok", "mode": "route_only", "skills_referenced": []})
+
+    _post_apim_run("hello", "token", mode=ROUTE_ONLY, scenario="parent-skill")
+
+    assert sent[0]["scenario"] == "parent-skill"
+
+
 def test_batch_with_no_routing_at_all_is_reported_as_signal_loss(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty candidate set makes every negative look like a perfect reject.
 

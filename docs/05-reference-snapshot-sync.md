@@ -4,6 +4,14 @@
 >
 > `reference/` 是外部 EAA runtime 的唯讀快照，不是本專案 production backend。禁止讓 `backend/` import 它；同步時應從同一個 upstream commit 整檔更新，不要把單一 function 手動摘進 `backend/`。
 
+日常維護不需要人工逐檔計算 hash 或閱讀完整 diff。先執行：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check
+```
+
+工具會分開回答兩件事：檔案是否 drift，以及已知 Generator 契約是否仍相容。只有出現 `[RED]` 時才需要依報告點名的 backend/test 檔案做人工判斷；`[YELLOW]` 代表有新快照可同步，但已知契約沒有改變。
+
 ---
 
 ## 1. 來源與目前狀態
@@ -13,25 +21,16 @@
 | Upstream repository | `https://github.com/agent-accelerators/enterprise-agent-accelerator.git` |
 | 本機 upstream checkout | `C:\dev\code_tool_hosted-async-1.8.0` |
 | Upstream branch | `main` |
-| 最後核對 commit | `614ed2541e05c1433eb6cc5db8e70102dbda7724` |
-| 最後核對日期 | 2026-09-05 |
 | 本地 snapshot | `reference/` |
+| 現況與 provenance 唯一來源 | `reference/manifest.json` |
 
-| Snapshot | 本地版本 | Upstream 版本 | SHA-256 狀態 | 目前要做的事 |
-| --- | ---: | ---: | --- | --- |
-| `core_handler.py` | 1.11 | 1.11 | **已 drift** | 版本字串未升版，但 upstream 已新增 `run_workflow(mode, scenario)`、mode 回顯與 `fetch_skill(..., sections)` 等契約；下次更新 snapshot 時整檔同步。 |
-| `skill_gatekeeper.py` | 2.8 | 2.8 | **完全相同** | 本地與 upstream SHA-256 相同；upstream 再異動時依第 4 節檢查 payload、decision、ETag 與 publish contract。 |
-| `skills_provider_factory.py` | 1.13 | 1.14 | **已 drift** | 下次更新 snapshot 時整檔同步；採用 1.14 語意前先確認 scenario 的 `metadata.children` 是完整 runtime dependency whitelist。 |
+最後核對 commit、日期、各 snapshot 版本與 SHA-256 由同步工具自動寫入 `reference/manifest.json`，不在本文件重複保存，以免每次同步後文件立即過期。使用下列命令確認 manifest 與本地 snapshot 的實際現況：
 
-本次核對的 SHA-256：
+```powershell
+uv run --no-sync python scripts/sync_reference.py check
+```
 
-| Snapshot | 本地 `reference/` | Upstream |
-| --- | --- | --- |
-| `core_handler.py` | `F11A390E64C15CD6C02F9065357E6AED112F39AE936581CD72241748C2F763C1` | `7B162D6FFBEF2315AFCFE32C482B5C23CCE8855F3CC07B5C4D323D5522515BAF` |
-| `skill_gatekeeper.py` | `64E265D9B98C45E377076DCE2491A690B18749C57F93E0662B8A361415A506C0` | `64E265D9B98C45E377076DCE2491A690B18749C57F93E0662B8A361415A506C0` |
-| `skills_provider_factory.py` | `D58EFB15B18F09097DFAF491AEA03C45C1BA93077C4DB8AB9397D5C55B1A29F7` | `3394D403145ECF7EA8ED3462B3498A3E03C556382F5166F647116F1D67C00E12` |
-
-版本相同不代表內容一定相同；`core_handler.py` 就是目前的實例。每次核對仍需比較 Git diff 或 SHA-256，並把固定 commit 記在上表；不要只記會移動的 `main`。
+版本相同不代表內容一定相同；`core_handler.py` 曾經在版本仍為 1.11 時改變契約。因此工具以固定 commit 的 Git blob 與 SHA-256 為準，不依賴 `VERSION` 或會移動的 `main`。`.gitattributes` 固定 `reference/*.py` 使用 LF，避免 Windows checkout 轉換換行後產生假 drift。
 
 ---
 
@@ -121,7 +120,7 @@
 | `_TrackingSkillsProvider._load_skill()` 及 tracking attributes | Gatekeeper `skills_referenced`、執行追蹤 | MAF `_load_skill` signature、成功判定、`loaded_skills`/`loaded_resources` shape 或 route-only script guard 改變。 |
 | `invalidate_rls_cache()` | Publish 後立即可見性 | Cache 從全域改 per-principal、reason/signature 或 SQL publish handoff 改變。 |
 
-#### 已知 drift：1.13 → 1.14
+#### 已同步的契約變更：1.13 → 1.14
 
 Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materialize 該 scenario `metadata.children` 列出的 skills。因此 `children` 不再只能理解為「本 scenario 新建的 internal child」，而是：
 
@@ -157,7 +156,7 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 
 ### 4.3 `core_handler.py`
 
-#### 已知未升版 drift：1.11 → 1.11
+#### 已同步但未升版的契約變更：1.11 → 1.11
 
 本地與 upstream 都宣告 1.11，但 SHA-256 不同，diff 約為 231 行新增、13 行刪除。已確認至少包含以下公開 contract 變化：
 
@@ -201,54 +200,166 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 
 ---
 
-## 6. 人工同步流程
+## 6. 自動檢查與同步流程
 
-1. 固定來源版本：
+### 6.1 首次準備
 
-   ```powershell
-   Set-Location C:\dev\code_tool_hosted-async-1.8.0
-   git status --short
-   git rev-parse HEAD
-   git branch --show-current
-   git remote -v
-   ```
+確認 Generator 與 upstream repo 都存在：
 
-2. 比較三個來源檔與本地 snapshot。不要只看 `VERSION`：
+```powershell
+Test-Path C:\dev\foundry-skill-generator-v3
+Test-Path C:\dev\code_tool_hosted-async-1.8.0\.git
+```
 
-   ```powershell
-   Get-FileHash core_handler.py, skill_gatekeeper.py, skills_provider_factory.py -Algorithm SHA256
-   Get-FileHash C:\dev\foundry-skill-generator-v3\reference\core_handler.py, `
-     C:\dev\foundry-skill-generator-v3\reference\skill_gatekeeper.py, `
-     C:\dev\foundry-skill-generator-v3\reference\skills_provider_factory.py -Algorithm SHA256
-   ```
+若 upstream repo 尚未下載：
 
-3. 先閱讀 upstream 同一 commit 的 callers：`main.py`、`mcp_server.py`、`code_agent_hosted.py`。依第 3、4 節判斷 signature、資料 shape 與責任邊界是否一起改變。
-4. 若決定同步，從同一 commit **整檔**更新三個 snapshot；不要只複製變動 function，也不要在 snapshot 內做 generator-specific 修補。
-5. 更新第 1 節的版本、commit、日期與 drift 狀態。
-6. 若變更命中第 5 節的 Generator 契約，逐項檢查對應 backend/DB 檔案；不命中則不要為了版本一致而修改 production code。
-7. 執行既有單向相容性測試：
+```powershell
+git clone https://github.com/agent-accelerators/enterprise-agent-accelerator.git C:\dev\code_tool_hosted-async-1.8.0
+```
 
-   ```powershell
-   Set-Location C:\dev\foundry-skill-generator-v3
-   uv run --no-sync pytest tests/unit/test_topology_differential.py
-   ```
+安裝 Generator 開發環境：
 
-8. 若 `_declares_children()` 消失、改名或無法再由 AST 獨立執行，先更新 differential test 的 extraction 方式；不要改成讓 `backend/` import 整個 reference module。
-9. 最後搜尋 production 邊界，確認沒有意外新增 reference import：
+```powershell
+Set-Location C:\dev\foundry-skill-generator-v3
+uv sync
+```
 
-   ```powershell
-   rg -n "reference|core_handler|skill_gatekeeper|skills_provider_factory" backend tests
-   ```
+若 upstream 不在 manifest 預設的 `C:\dev\code_tool_hosted-async-1.8.0`，每次可傳 `--upstream <path>`，或在目前 PowerShell session 設定：
 
----
+```powershell
+$env:REFERENCE_UPSTREAM_REPO = "D:\repos\enterprise-agent-accelerator"
+```
 
-## 7. 本次結論
+### 6.2 取得最新版並檢查
 
-目前有兩個實際 drift：
+先取得 upstream 最新 Git objects，再固定本次要檢查的 commit：
 
-- `reference/core_handler.py` 仍標 1.11，但 upstream 同版本已增加 `mode`、`scenario` 與 partial `sections` contract。
-- `reference/skills_provider_factory.py` 1.13 → upstream 1.14，改變 scenario dependency 的 runtime materialize 語意。
+```powershell
+git -C C:\dev\code_tool_hosted-async-1.8.0 fetch origin
+$sha = git -C C:\dev\code_tool_hosted-async-1.8.0 rev-parse origin/main
+$sha
+```
 
-日後同步這兩檔時必須取同一 upstream commit，並同時審查 Generator 的 route/execute 測試契約、partial skill fetch，以及 `metadata.children` 產生與修改流程。
+接著在 Generator repo 根目錄檢查該 commit：
 
-`reference/skill_gatekeeper.py` 目前是唯一經 SHA-256 證實與 upstream 完全相同的檔案。Generator production backend 現在不需要手動搬入任何 reference function，應維持既有隔離邊界。
+```powershell
+Set-Location C:\dev\foundry-skill-generator-v3
+uv run --no-sync python scripts/sync_reference.py check --commit $sha
+```
+
+> **務必注意：** 若省略 `--commit $sha`，工具只會檢查 `reference/manifest.json` 目前固定的 commit，不會自動 fetch 或檢查最新 `origin/main`。無參數形式適合確認「本地 snapshot 是否仍符合 manifest」，不適合偵測 upstream 新版。
+
+只確認本地 snapshot 與 manifest 是否一致時，才使用：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check
+```
+
+結果分成三類：
+
+- `[GREEN]`：snapshot、manifest hash 與已知契約皆一致，不需動作。
+- `[YELLOW]`：upstream 檔案有 drift，但 manifest 內列出的已知契約仍相容；可執行同步，不需要先閱讀整份 diff。
+- `[RED]`：已知 function signature 或必要資料欄位改變。報告會列出應檢查的 Generator 檔案；先處理契約，不會覆蓋 snapshot。
+- `[ACTION]`：snapshot 與 signature 都沒問題，但 Generator 與 runtime 的實際接線不完整——已接受的參數沒送出、runtime 會回傳的欄位沒分類或沒讀。報告直接點名要修改的檔案與欄位。
+
+Exit code 為 `0` 表示全綠、`1` 表示 drift、`2` 表示契約不相容、`3` 表示 Git／路徑／測試等執行錯誤、`4` 表示有未使用的 runtime 能力。需要機器可讀輸出時加 `--json`。
+
+### 離線模式（CI 使用）
+
+upstream runtime 屬於另一個 organization，CI 無法 clone，因此 CI 跑的是：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check --offline
+```
+
+`--offline` 不查 upstream，改用**已 commit 的 snapshot** 當作契約來源，狀態顯示為 `[PINNED]`。它能抓到的是 Generator 這一側的退步——必要參數不再送出、`required` 欄位不再被讀、snapshot 被手動改過（sha256 與 manifest 不符）。它**抓不到** upstream 出新版，那必須由開發者在本機跑不帶 `--offline` 的 `check`。`sync` 一定需要 upstream checkout，加 `--offline` 會直接拒絕。
+
+CI 定義在 `.github/workflows/reference-check.yml`：exit `1`、`2`、`3` 讓 build 失敗，exit `4` 只發 warning——因為「Generator 還沒採用某個 runtime 能力」是待辦事項，不是回歸。
+
+報告中另有兩個區塊，用途是把「整份 diff」收斂成「我要改哪裡」：
+
+- `[SURFACE]`（列在各檔案下方）：只比對**對外契約**——function signature、class 欄位、模組層級的字串集合，忽略 function body。一次 231 行的 upstream diff 通常只會留下一兩個符號。
+- `[IMPACT]`：拿上述改變的 token 去掃描 `backend/` 與 `tests/`，列出實際引用位置 `檔案:行號`。若顯示「No Generator file references the changed contract」，代表該變更是 runtime 內部細節，本專案不需要跟進——這是正確答案，不是漏掉。
+
+要細看單一符號的前後原始碼：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check --commit $sha --explain <SYMBOL>
+```
+
+`--explain` 會印出該符號在本地 snapshot（`local`）與 upstream commit（`upstream`）的完整宣告；某一側不存在時顯示 `(absent)`。
+
+### 6.3 同步已檢查的 commit
+
+確認上一個步驟為 `[YELLOW]` 且沒有契約破壞後，使用同一個 `$sha` 執行：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py sync --commit $sha
+```
+
+此命令會：
+
+1. 直接用 `git show <commit>:<path>` 從 manifest 固定的 commit 讀取來源，不受 upstream 工作目錄目前 checkout 或未提交修改影響。
+2. 在寫入前驗證 manifest 中的已知 function signature 與必要欄位。
+3. 從同一 commit 整檔覆蓋三個 `reference/` snapshot。
+4. 自動更新 `reference/manifest.json` 的 commit、日期、版本與 SHA-256。
+5. 自動執行 manifest 中列出的 focused compatibility tests。
+
+要檢查或同步指定的歷史 commit：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check --commit <SHA>
+uv run --no-sync python scripts/sync_reference.py sync --commit <SHA>
+```
+
+本機 upstream checkout 預設取自 manifest。其他機器可傳 `--upstream <path>`，或設定 `REFERENCE_UPSTREAM_REPO`。只有在除錯測試環境時才使用 `--no-tests`；一般同步不得跳過驗證。
+
+同步完成後再確認本地狀態與 manifest 一致：
+
+```powershell
+uv run --no-sync python scripts/sync_reference.py check
+git diff --check
+git status --short
+```
+
+### 6.4 最短日常操作
+
+已完成首次準備後，每次只需：
+
+```powershell
+git -C C:\dev\code_tool_hosted-async-1.8.0 fetch origin
+$sha = git -C C:\dev\code_tool_hosted-async-1.8.0 rev-parse origin/main
+Set-Location C:\dev\foundry-skill-generator-v3
+uv run --no-sync python scripts/sync_reference.py check --commit $sha
+# 只有結果為 YELLOW、沒有 RED 時才執行下一行：
+uv run --no-sync python scripts/sync_reference.py sync --commit $sha
+```
+
+`git fetch origin` **每次都要執行**，不是一次性步驟。只有 `git clone` 與 `uv sync` 屬於首次準備。省略 fetch 時，`rev-parse origin/main` 會回傳本機快取的舊 commit，整個檢查就會對著過期版本進行而且照樣顯示綠燈。
+
+若結果是 `[GREEN]`，不需同步；若結果是 `[RED]`，先依報告點名的 symbol 與 review files 修改 Generator 契約或測試，不要直接覆蓋 snapshot。
+
+### 6.5 契約測試的責任
+
+目前自動檢查涵蓋：
+
+- `core_handler.run_workflow()` 與 `fetch_skill()` 的參數契約。
+- scenario child parser、materialize 與 provider scope 的 signature。
+- `GatekeeperDecision` 中 Generator 關心的必要欄位。
+- Generator 接受的 scenario frontmatter 必須仍被 runtime 視為 parent。
+- `backend/` 不得 import `reference/`。
+- **Wire coverage**：`manifest.json` 的 `wire` 區塊宣告每個 runtime 參數必須由哪個 Generator 檔案送出。`dict_key` 比對 payload 字典鍵，`text` 比對字串常數內是否出現該參數名。
+- **Response coverage**：`manifest.json` 的 `response_wire` 區塊把 `RESPONSE_BOUNDARY_WHITELIST` 的每個欄位分成 `required`（Generator 必須讀）與 `ignored`（附理由，明確宣告本專案不用）。upstream 新增欄位時它會落在兩邊之外而被點名；`required` 卻沒被讀、或 `ignored` 的欄位已被 upstream 刪除，也同樣點名。
+- **Contract surface**：自動抽取 signature、class 欄位與字串集合並做前後比對，不需要在 manifest 逐一宣告，因此 upstream 新增的未知符號也涵蓋得到。
+
+wire coverage 檢查 Generator **送出**什麼，response coverage 檢查它**讀回**什麼。`ignored` 必須寫理由，否則那些永遠不會用到的欄位（`job_id`、`existing_job` 等）會變成長期噪音，`[ACTION]` 就失去意義。
+
+signature 相符只證明 snapshot 仍可解析，**不證明 Generator 真的用到**該參數。wire coverage 就是用來補這個落差；upstream 新增參數時，它會直接指出應該修改的檔案。
+
+同步後若測試失敗，工具會停止並保留已同步檔案供檢查。依錯誤點名的 symbol 與 review files 修正後，重新執行同一個 `sync` 即可。若 `_declares_children()` 新增直接 helper 依賴，應只擴充 differential test 抽取的最小 function closure，不要改成 import 整個 reference module。
+
+如需單獨重跑 focused suite：
+
+```powershell
+uv run --no-sync python -m pytest tests/unit/test_reference_sync.py tests/unit/test_topology_differential.py
+```

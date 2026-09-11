@@ -44,6 +44,20 @@ skills_provider_factory.py — Per-turn, per-user SkillsProvider builder
     - SKILLS_BLOB_CONTAINER      (預設 "skills")
     - SKILLS_MATERIALIZE_BASE    (預設 /tmp/openclaw_skills)
 
+VERSION: 1.14
+2026.09.04 George : v1.14 — scenario 白名單收斂
+                            - `_materialize_skills(scenario=)`:宿主帶入情境層
+                              skill 名稱後,只落地它 metadata.children 列到的
+                              skill。⚠️ 是**白名單**:不分 is_internal,parent
+                              沒指名的一律不落地。
+                            - 因此 children 的語義從「指名的能力層 child」擴大成
+                              「本情境的完整依賴清單」。流程中會用到的通用 skill
+                              也必須列進去。
+                            - 重要性在 N>1:同情境 sibling 彼此高度相似,而後端
+                              只有使用者原話 + 扁平 skill 池兩個訊號(parent 的編排
+                              指引不落地、credentials key 名也不進 prompt),不收斂
+                              就沒有任何依據分辨該用哪一個。
+
 VERSION: 1.13
 2026.08.22 George : v1.13 — 情境層 parent skill 不進 runtime materialize
                             - _materialize_skills() 跳過 frontmatter 宣告了
@@ -300,25 +314,36 @@ class SkillMetadata:
 
 # 2026.08.22 George : v1.13 — 判準是「自己宣告 children」(= 情境層 parent),
 # 不是「被別人列為 child」;寫反會擋掉真正要執行的能力層技能。
-def _declares_children(content: str) -> bool:
+# 2026.09.04 George : v1.14 — 抽出名單版供 scenario 收斂使用。順手對齊
+# core_handler._declared_children() 與 _metadata_list():`children:` 寫成裸字串
+# 時也算 parent(舊版回 False,跟另外兩處不一致)。
+def _declared_child_names(content: str) -> list[str]:
     if not content.startswith("---"):
-        return False
+        return []
     parts = content.split("---", 2)
     if len(parts) < 3:
-        return False
+        return []
     try:
         fm = yaml.safe_load(parts[1])
     except Exception:
         # 解析不出來就當它不是 parent —— 寧可多載一個 skill,也不要因為
         # 一個 YAML 錯字讓能力層技能整個消失。
-        return False
+        return []
     if not isinstance(fm, dict):
-        return False
+        return []
     meta = fm.get("metadata")
     if not isinstance(meta, dict):
-        return False
+        return []
     children = meta.get("children")
-    return isinstance(children, (list, tuple)) and bool(children)
+    if isinstance(children, str):
+        children = [children]
+    if not isinstance(children, (list, tuple)):
+        return []
+    return [str(c) for c in children if c]
+
+
+def _declares_children(content: str) -> bool:
+    return bool(_declared_child_names(content))
 
 
 # 2026.08.14 George : v1.8 — schema v2 下同一個 skill_name 可能同時存在全域版與
@@ -424,12 +449,20 @@ class PrefixTolerantSkillsProvider(SkillsProvider):
 
 
 class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
-    """SkillsProvider 子類:記錄 model 實際 load_skill 的 skill 名稱。"""
+    """SkillsProvider 子類:記錄 model 實際 load_skill / read_skill_resource 的目標。"""
+
+    # 2026.08.31 George : route_only — 由 code_agent_hosted.run() 在進 turn loop 前
+    # 指派。provider 由 factory 建立,拿不到 ConversationState,只能用屬性傳遞。
+    route_only: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # 依載入順序、去重後保留;由 code_agent_hosted 讀取設給 state.skills_referenced
         self.loaded_skills: list[str] = []
+        # 2026.08.31 George : route_only — 記錄實際讀取的 resource,(skill, resource)。
+        # 路由品質評估需要知道模型除了選對 skill,有沒有照 SKILL.md 的指示把附帶
+        # 資源也讀進去 —— 只看 loaded_skills 看不出來。
+        self.loaded_resources: list[tuple[str, str]] = []
 
     async def _load_skill(self, skills, skill_name):  # type: ignore[override]
         # 2026.06.07 George : GA 1.8.0 遷移(語義式) — parent _load_skill 已改為
@@ -449,6 +482,45 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         ):
             self.loaded_skills.append(skill_name)
         return result
+
+    async def _read_skill_resource(self, skills, skill_name, resource_name, **kwargs):  # type: ignore[override]
+        # 2026.08.31 George : route_only — 記錄實際讀到的 resource。
+        # 失敗判斷對齊上面的 _load_skill:MAF 回傳 "Error: ..." 字串而不拋例外,
+        # 所以不能用 try/except 偵測。記的是呼叫端要求的名字(而非父類前綴容錯後的
+        # 實際名字),因為要評估的是模型的行為。
+        result = await super()._read_skill_resource(
+            skills, skill_name, resource_name, **kwargs
+        )
+        # ≠ _load_skill:MAF 的 _read_skill_resource 回傳型別是 Any(callable resource
+        # 可能回 dict/bytes),所以判「不是 Error 字串」而非「是成功的 str」。
+        failed = isinstance(result, str) and result.startswith("Error:")
+        entry = (skill_name, resource_name)
+        if (
+            not failed
+            and skill_name
+            and resource_name
+            and entry not in self.loaded_resources
+        ):
+            self.loaded_resources.append(entry)
+        return result
+
+    async def _run_skill_script(self, skills, skill_name, script_name, args=None, **kwargs):  # type: ignore[override]
+        # 2026.08.31 George : route_only 保險絲 #4
+        # MAF (_skills.py) 無條件註冊 run_skill_script,且 require_script_approval
+        # 預設 False → approval_mode="never_require"。也就是說模型可以在 _call_agent
+        # 內部、也就是 turn loop 短路點「之前」就把腳本跑掉 —— 這是唯一一條繞過
+        # 短路點的副作用路徑。
+        # 現行實質防護是 skills_sync 同步時排除 scripts/ 目錄(檔案不落地),但那是
+        # 內容層約定,會隨 skill 自動產生而漂移。這裡補成結構層。
+        if self.route_only:
+            raise RuntimeError(
+                f"[route_only] blocked run_skill_script(skill={skill_name!r}, "
+                f"script={script_name!r}) — scripts must not execute in "
+                "routing-only mode."
+            )
+        return await super()._run_skill_script(
+            skills, skill_name, script_name, args, **kwargs
+        )
 
 
 # ============================================================================
@@ -937,6 +1009,7 @@ class SkillsProviderFactory:
         self,
         metas: list[SkillMetadata],
         target_dir: Path,
+        scenario: str = "",
     ) -> None:
         """
         並行下載所有 skill 的資料夾內容,寫到 target_dir/{skill_name}/ 底下。
@@ -957,10 +1030,33 @@ class SkillsProviderFactory:
         它描述的是宿主該做的事(讀行事曆、多輪接續),後端沒有那些能力;留在
         <available_skills> 裡只會跟同領域的 child 搶關鍵字。能力層 child 自己
         沒有 children,不受影響。
+
+        2026.09.04 George : v1.14 — scenario 白名單收斂。v1.13 只藏 parent,沒藏
+        「別的情境的 child」。宿主選定情境後,這裡只落地該情境 children 列到的
+        skill。重要性在 N>1:同情境 N 個 sibling 彼此高度相似,而後端只有
+        使用者原話 + 扁平 skill 池兩個訊號(parent 的編排指引不落地、credentials
+        key 名也不進 prompt),不收斂就沒有任何依據分辨該用哪一個。
+
+        ⚠️ 白名單而非「只濾 internal」:parent 沒指名的通用 skill 也不落地。
+        選這個是因為實際上 `children` 本來就是指名宣告,而後端自行拉進一支
+        parent 沒提過的 skill,正是兩層架構要壓制的不受控行為。代價:漏列會
+        fail-closed 且對使用者靜默,線索只有底下那行 skipped log。
+
+        無情境的輪次(scenario 空)不受影響,整池照舊 —— 通用 skill 仍可經由
+        宿主不帶 scenario 的那些 turn 使用。
+        全程 fail-open:scenario 空 / 查無此 skill / 它不是 parent → 維持全載。
         """
         target_dir.mkdir(parents=True, exist_ok=True)
+        scope = await self._resolve_scenario_scope(metas, scenario)
 
         async def write_one(meta: SkillMetadata) -> bool:
+            if scope is not None and meta.skill_name not in scope:
+                logger.info(
+                    "[Skills] %s: outside scenario %r — skipped",
+                    meta.skill_name, scenario,
+                )
+                return False
+
             # SKILL.md 一定要有,且必須先撈 —— 缺它整個 skill 就不成立,
             # 而且要先看過 frontmatter 才知道該不該落地。
             content = await self._fetch_skill_content(meta)
@@ -1013,9 +1109,45 @@ class SkillsProviderFactory:
             written = sum(await asyncio.gather(*[write_one(m) for m in metas]))
 
         logger.info(
-            "[Skills] Materialized %d/%d skills to %s (%d scenario skill(s) skipped)",
+            "[Skills] Materialized %d/%d skills to %s (%d skipped)",
             written, len(metas), target_dir, len(metas) - written,
         )
+
+    async def _resolve_scenario_scope(
+        self, metas: list[SkillMetadata], scenario: str
+    ) -> set[str] | None:
+        """
+        回傳該情境允許落地的 skill 名稱白名單;回 None = 不收斂(維持全載)。
+
+        名單就是 parent 的 metadata.children 原封不動 —— 不額外放行通用 skill。
+        三條 fail-open 路徑都只記 log 不拋錯 —— 宿主打錯字不該讓整個 turn 跑不了。
+        注意此處只讀 Blob 拓樸,不碰 is_internal —— 未跑 v2.2 migration 的環境
+        收斂一樣生效(v1.14 之前則否)。
+        """
+        if not scenario:
+            return None
+
+        target = next((m for m in metas if m.skill_name == scenario), None)
+        if target is None:
+            logger.warning(
+                "[Skills] scenario %r not in this principal's allowed set "
+                "— no scoping applied", scenario,
+            )
+            return None
+
+        children = _declared_child_names(await self._fetch_skill_content(target))
+        if not children:
+            logger.warning(
+                "[Skills] scenario %r declares no children (not a scenario skill?) "
+                "— no scoping applied", scenario,
+            )
+            return None
+
+        logger.info(
+            "[Skills] scenario-scoped materialize: scenario=%s children=%s",
+            scenario, sorted(children),
+        )
+        return set(children)
 
     # ------------------------------------------------------------------
     # Step 4: 主入口 — async context manager
@@ -1026,6 +1158,7 @@ class SkillsProviderFactory:
         sql_token: str,
         session_id: str,
         turn_id: str,
+        scenario: str = "",
     ) -> AsyncIterator[SkillsProvider]:
         """
         為單一 user request 建立 SkillsProvider,scope 結束自動清理。
@@ -1035,6 +1168,8 @@ class SkillsProviderFactory:
                       (從 state.user_data["AZURE_SQL_ACCESS_TOKEN"] 拿)
             session_id: state.session_id
             turn_id: 唯一識別子;建議用 state.job_id 或 uuid
+            scenario: 宿主在 list_skills 選定的情境層 skill 名稱。空字串 = 不收斂;
+                      帶了則只落地該 skill metadata.children 列到的(白名單)。
 
         Yields:
             SkillsProvider 物件,直接餵給 ChatAgent / Agent 的 context_providers
@@ -1085,7 +1220,7 @@ class SkillsProviderFactory:
 
             # Step 2 & 3: 撈 content + materialize
             try:
-                await self._materialize_skills(metas, target_dir)
+                await self._materialize_skills(metas, target_dir, scenario)
                 materialized = True
             except Exception as e:
                 logger.exception(

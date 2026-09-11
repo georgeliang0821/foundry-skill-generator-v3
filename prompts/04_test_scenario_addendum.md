@@ -30,11 +30,12 @@ L1 failure is always a formatting problem in the skill itself -- fix it with
 
 Note what L1 can and cannot catch. A wrong section name fails **loudly**: the
 error lists the child's real section names. A skill MISSING from
-`metadata.children` fails **silently** -- nothing in L1, L2 or L3 detects it,
-because the host simply never gets that capability. P5 catches only the case
-where the body also names the skill. The dependency walk in PREPARE is the real
-gate; if a step's behaviour is inexplicably absent at runtime, suspect an
-omitted entry first.
+`metadata.children` is not an L1 finding at all -- L1 only checks that the
+declared entries resolve, never that the list is complete. P5 catches only the
+case where the body also names the skill. If the omission is for a skill that
+was never conceived in the first place, no layer can see it; the dependency walk
+in PREPARE is the real gate there. An entry that IS expected but was left out of
+the list is caught at L3 -- see below.
 
 ## L2 -- parent absence
 
@@ -61,10 +62,21 @@ environment).
 No request of its own. The `skills_referenced` from L2 is checked again, this
 time to confirm it contains at least one of the declared children.
 
-A failure means the sample never reached a child, and the parent's body cannot
-fix that: either the child is not deployed to the test endpoint, or its own name
-and description do not match the sample. Say which one you suspect and why, and
-do not plan a patch to the parent for it.
+L2 names this scenario when it calls the runtime, so the runtime loads **only**
+the skills listed in `metadata.children` -- the same convergence production
+applies. That makes this layer the one place an omitted entry becomes visible.
+
+A failure means the sample never reached a child. There are three causes:
+
+1. **Omitted from `metadata.children`** -- the child exists and the body relies
+   on it, but it is not on the list, so the runtime never loaded it. This IS
+   fixable by a patch to the parent: add the entry.
+2. **Not deployed** -- the child is not present at the test endpoint.
+3. **Naming** -- the child's own name and description do not match the sample.
+
+Check cause 1 first, because it is the only one you can fix here and the only
+one that would otherwise fail closed and silently in production. For causes 2
+and 3, say which you suspect and why, and do not plan a patch to the parent.
 
 One sample routes to one child, so a scenario with several children only ever
 confirms the one this sample reaches. The others are neither confirmed nor

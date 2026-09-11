@@ -214,6 +214,7 @@ def _post_apim_run(
     delegated_token: str | None,
     *,
     mode: str,
+    scenario: str = "",
     timeout: float = 120,
 ) -> dict[str, Any]:
     endpoint = os.getenv("SKILL_SELECTION_TEST_RUN_URL", "").strip()
@@ -234,6 +235,7 @@ def _post_apim_run(
         "request": request_sent,
         "session_id": f"skill-generator-v2-{uuid4().hex}",
         "mode": mode,
+        "scenario": scenario,
         "credentials": credentials,
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -247,6 +249,7 @@ def _post_apim_run(
         "apim.run.start",
         endpoint=endpoint,
         mode=mode,
+        scenario=scenario,
         has_delegated_token=bool(delegated_token),
         delegated_token=_mask_token(delegated_token),
         token_claims=_token_debug(delegated_token),
@@ -507,11 +510,16 @@ _L2_DIAGNOSIS = (
 )
 
 _L3_DIAGNOSIS = (
-    "The positive sample did not route to any declared child. The parent's body "
-    "cannot fix this: either the child is not deployed to the test endpoint, or "
-    "its own name and description do not match the sample. Check that the child "
-    "exists there before editing this skill. This layer does not verify the "
-    "payload contract -- L1's content lint owns that."
+    "The positive sample did not route to any declared child. The probe named "
+    "this scenario, so the runtime loaded only the skills listed in "
+    "metadata.children. There are three causes: (1) OMITTED -- the child is "
+    "missing from metadata.children, so it was never loaded; this is fixable "
+    "here by adding the entry, and it is the cause to rule out first because it "
+    "fails closed and silently in production; (2) NOT DEPLOYED -- the child is "
+    "absent from the test endpoint; (3) NAMING -- the child's own name and "
+    "description do not match the sample. Causes 2 and 3 cannot be fixed by "
+    "editing this skill. This layer does not verify the payload contract -- "
+    "L1's content lint owns that."
 )
 
 
@@ -608,7 +616,9 @@ def _run_scenario_tests(
         l2.details = ["Skipped: no positive sample to probe with."]
         layers.append(l2)
         return layers
-    output = _post_apim_run(probe, delegated_token, mode=run_mode)
+    # Naming the scenario converges the runtime's pool to its declared children,
+    # which is what production does and what makes an incomplete list observable.
+    output = _post_apim_run(probe, delegated_token, mode=run_mode, scenario=skill_name)
     referenced = output.get("skills_referenced")
     if not isinstance(referenced, list):
         referenced = _extract_skills_referenced(output.get("raw_response"))

@@ -157,6 +157,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainer
 
 > **Runtime 需求：`mode` 欄位**。路由測試在 REST body 頂層送 `mode`（與 `request`、`credentials` 平行），**一律送 `"route_only"`** —— capability 與 scenario 的每一層都是，沒有任何一層會執行技能。runtime **必須把收到的 `mode` 原樣回顯在回應頂層**；缺漏或不符會讓整批測試中止並回 **HTTP 502**（沒有降級開關 —— 未經確認的 mode 無法與「靜默升級成 execute」區分，而那會讓一次路由測試寫進真實資料）。若你的 runtime 版本早於此協定，需先升級才能跑路由測試。
 
+> **Runtime 需求：`scenario` 欄位**。body 頂層同時帶 `scenario`。測 scenario skill 時送它自己的名稱，讓 runtime 只落地該 scenario `metadata.children` 列出的 skills，重現 production 的收斂條件；測 capability skill 時送空字串。Runtime 對此欄位全程 fail-open，舊版 runtime 會直接忽略它，不影響路由測試運作。
+
 #### MCP / ACA 環境變數查詢（選用）
 
 設定後，PREPARE 階段會透過 MCP 讀取目標 Azure Container Apps（ACA）應用**目前已有的環境變數**與 **OBO scope 註冊表**，讓 Agent 在確認 skill 變數時能分辨「ACA 已有（reuse）」或「需新增（add）」。**四個都填才會啟用**；任一留空即停用（功能 no-op，不影響其他流程）。
