@@ -182,6 +182,24 @@ def test_peer_skill_digest_uses_frontmatter_description(backend_main) -> None:
     assert digest["description"] == "frontmatter desc"
     assert digest["when_to_use"] == "Do X."
     assert digest["granted"] is True
+    assert digest["is_internal"] is False
+    assert digest["children"] == []
+
+
+def test_peer_skill_digest_carries_the_candidate_set_signals(backend_main) -> None:
+    md = (
+        "---\nname: leave-workflow\ndescription: Orchestrates leave\nmetadata:\n"
+        "  skill_type: scenario-orchestration\n  children: [hr-leave-system]\n---\n"
+    )
+    digest = backend_main._peer_skill_digest("leave-workflow", md, is_internal=True)
+    assert digest["children"] == ["hr-leave-system"]
+    assert digest["is_internal"] is True
+
+
+def test_peer_skill_digest_rejects_a_scalar_children_value(backend_main) -> None:
+    # Not every parser accepts the scalar form, so topology reads it as no children.
+    md = "---\nname: p\ndescription: d\nmetadata:\n  children: hr-leave-system\n---\n"
+    assert backend_main._peer_skill_digest("p", md)["children"] == []
 
 
 def test_kind_only_tools_reject_the_wrong_skill_kind(backend_main) -> None:

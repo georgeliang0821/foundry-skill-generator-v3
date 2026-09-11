@@ -594,7 +594,6 @@ class Session(BaseModel):
     conversation: list[ChatMessage] = Field(default_factory=list)
     pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
     research_summary: str = ""
-    existing_skills_index: list[dict[str, str]] = Field(default_factory=list)
     aca_env_result: dict[str, Any] | None = None
     aca_env_error: str = ""
     created_at: str = Field(default_factory=utc_now_iso)

@@ -762,6 +762,77 @@ the intent into exactly ONE bucket and emit `request_stage_transition`:
 """
 
 
+PEER_CROSS_LAYER_CAPABILITY_NOTE = (
+    "These declare `metadata.children`, so they are scenario-orchestration parents "
+    "and are never materialized into the backend candidate set a capability skill "
+    "is routed from. They are NOT rivals and cannot be reached from here: do not "
+    "compare boundaries against them, and never write a \"use <skill> instead\" line "
+    "pointing at one. They are listed only so you recognise the names."
+)
+
+PEER_CROSS_LAYER_SCENARIO_NOTE = (
+    "These are internal children of some scenario, so they are never projected into "
+    "the host directory a scenario skill is selected from. They are NOT rivals and "
+    "cannot be reached from here: do not compare boundaries against them, and never "
+    "write a \"use <skill> instead\" line pointing at one. They are listed only so you "
+    "recognise the names."
+)
+
+_PEER_RENDER_CAP = 30
+
+
+def _peer_entry_lines(peer: dict) -> list[str]:
+    name = str(peer.get("name", "")).strip() or "(unnamed)"
+    desc = str(peer.get("description", "")).strip()
+    wtu = str(peer.get("when_to_use", "")).strip()
+    wnot = str(peer.get("when_not_to_use", "")).strip()
+    lines = [f"### {name}"]
+    if desc:
+        lines.append(f"- description: {desc}")
+    if wtu:
+        lines.append(f"- when_to_use: {wtu.splitlines()[0][:300]}")
+        extra = " ".join(s.strip() for s in wtu.splitlines()[1:] if s.strip())
+        if extra:
+            lines.append(f"  {extra[:400]}")
+    if wnot:
+        lines.append(f"- when_not_to_use: {wnot[:300]}")
+    lines.append("")
+    return lines
+
+
+def _partition_peers_by_layer(
+    session: Session, peers: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split peers into (routing rivals, cross-layer bystanders).
+
+    A capability skill competes in the backend candidate set, which excludes
+    parents; a scenario skill competes in the host directory, which excludes
+    internal children. Peers loaded before these signals existed carry neither
+    key and stay rivals, which is the pre-split behaviour.
+    """
+    if SkillKind(session.skill_kind) is SkillKind.SCENARIO:
+        # `is_internal` is only stamped once some parent claims the child, so a
+        # child that is merely named by a peer is cross-layer too.
+        claimed = {
+            str(c).strip()
+            for peer in peers
+            for c in (peer.get("children") or [])
+            if str(c).strip()
+        }
+
+        def is_cross_layer(peer: dict) -> bool:
+            return bool(peer.get("is_internal")) or str(peer.get("name", "")).strip() in claimed
+
+    else:
+
+        def is_cross_layer(peer: dict) -> bool:
+            return bool(peer.get("children"))
+
+    rivals = [p for p in peers if not is_cross_layer(p)]
+    cross = [p for p in peers if is_cross_layer(p)]
+    return rivals, cross
+
+
 def _format_peer_skills(session: Session) -> str | None:
     """Render the boundary digest of the user's accessible skills.
 
@@ -801,6 +872,7 @@ def _format_peer_skills(session: Session) -> str | None:
             "(none -- you currently have no other granted skills)"
         )
         return f"{empty}\n\n{delegated_note}" if delegated_note else empty
+    rivals, cross_layer = _partition_peers_by_layer(session, peers)
     lines = [
         "## Peer Skills (your accessible skills)",
         "",
@@ -810,7 +882,7 @@ def _format_peer_skills(session: Session) -> str | None:
         "`## When NOT to Use This Skill` -- for each adjacent/confusable need, name",
         "the peer skill to use instead; (3) suggest concrete edits to the affected",
         "old skills in your chat message when the new skill shifts their boundary.",
-        f"(status: {status}; {len(peers)} skill(s))",
+        f"(status: {status}; {len(rivals)} rival(s), {len(cross_layer)} cross-layer)",
         "",
     ]
     if delegated_note:
@@ -822,22 +894,20 @@ def _format_peer_skills(session: Session) -> str | None:
             "before comparing against it.",
             "",
         ])
-    for peer in peers[:30]:
-        name = str(peer.get("name", "")).strip() or "(unnamed)"
-        desc = str(peer.get("description", "")).strip()
-        wtu = str(peer.get("when_to_use", "")).strip()
-        wnot = str(peer.get("when_not_to_use", "")).strip()
-        lines.append(f"### {name}")
-        if desc:
-            lines.append(f"- description: {desc}")
-        if wtu:
-            lines.append(f"- when_to_use: {wtu.splitlines()[0][:300] if wtu else ''}")
-            extra = " ".join(s.strip() for s in wtu.splitlines()[1:] if s.strip())
-            if extra:
-                lines.append(f"  {extra[:400]}")
-        if wnot:
-            lines.append(f"- when_not_to_use: {wnot[:300]}")
-        lines.append("")
+    shown = rivals[:_PEER_RENDER_CAP]
+    for peer in shown:
+        lines.extend(_peer_entry_lines(peer))
+    if cross_layer:
+        lines.extend([
+            "## Cross-layer skills (NOT routing rivals)",
+            "",
+            PEER_CROSS_LAYER_SCENARIO_NOTE
+            if SkillKind(session.skill_kind) is SkillKind.SCENARIO
+            else PEER_CROSS_LAYER_CAPABILITY_NOTE,
+            "",
+        ])
+        for peer in cross_layer[: max(0, _PEER_RENDER_CAP - len(shown))]:
+            lines.extend(_peer_entry_lines(peer))
     if error:
         lines.append(f"INCOMPLETE -- {error}")
     return "\n".join(lines).rstrip()
@@ -1027,14 +1097,6 @@ def build_system_prompt(session: Session) -> str:
         parts.append(IMPORT_MODE_ADDENDUM)
     if mode == Mode.MODIFY:
         parts.append(MODIFY_MODE_ADDENDUM)
-    if session.existing_skills_index:
-        lines = ["## Existing Skills Index"]
-        for item in session.existing_skills_index:
-            if isinstance(item, dict):
-                lines.append(f"- `{item.get('name', '')}`: {item.get('description', '')}")
-            else:
-                lines.append(f"- {item}")
-        parts.append("\n".join(lines))
     if session.materials:
         materials_section = _format_materials(session)
         if materials_section:

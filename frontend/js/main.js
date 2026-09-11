@@ -3163,7 +3163,6 @@ function dynamicPromptContextForStage(stage) {
 
   add("DONE Re-entry Guidance", "DONE", "Classifies reopen requests into refine, prepare, or test.", selected === "DONE");
   add("Mode Addendum", "Mode", "Additional import or modify guidance.", ["import", "modify"].includes(String(session?.mode || "")));
-  add("Existing Skills Index", "Skill store", "Candidate skills used for overlap awareness.", Boolean(session?.existing_skills_index?.length));
   add("Materials Count", "User", "Number of attached source materials.", Boolean(session?.materials?.length));
   add("Prepare Brief", "PREPARE", "Confirmed definition, research, routing samples, variables, and checklist.", hasPrepareBrief);
   add("Peer Skills", "PREPARE", "Accessible peer-skill boundaries used for differentiation.", ["PREPARE", "DRAFT", "REFINE"].includes(selected) && Boolean(research.peer_skills?.length));

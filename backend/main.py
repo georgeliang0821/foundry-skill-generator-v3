@@ -86,7 +86,13 @@ from .models import (
 )
 from .patch import PatchError, apply_v4a_to_content, version_hash
 from .session_store import LocalSessionStore, make_session_store
-from .topology import Severity, TopologyIssue, validate_topology
+from .topology import (
+    Severity,
+    TopologyIssue,
+    parse_frontmatter_block,
+    validate_topology,
+)
+from .topology import declared_children as declared_children_of
 from . import acl as acl_mod
 from . import skills_repo
 from . import db
@@ -157,17 +163,23 @@ def _blob_access_hint(error_text: str) -> str:
     return ""
 
 
-def _peer_skill_digest(name: str, skill_md: str) -> dict[str, Any]:
+def _peer_skill_digest(name: str, skill_md: str, *, is_internal: bool = False) -> dict[str, Any]:
     # Schema v2 dropped dbo.skills.description, so the frontmatter on Blob is
     # the only source for a peer's description.
     _fm_name, fm_desc = parse_frontmatter(skill_md or "")
     description = (fm_desc or "").strip()
+    _block, frontmatter = parse_frontmatter_block(skill_md or "")
     return {
         "name": name,
         "description": description[:500],
         "when_to_use": _extract_section(skill_md, ("when to use",), 500),
         "when_not_to_use": _extract_section(skill_md, ("when not to use", "do not use", "not to use"), 400),
         "granted": True,
+        # Which candidate set this peer belongs to. A parent declaring children
+        # is never materialized for the backend; an internal child is never
+        # projected into the host directory.
+        "is_internal": bool(is_internal),
+        "children": declared_children_of(frontmatter or {}),
     }
 
 
@@ -198,6 +210,7 @@ def _load_peer_skill_boundaries(session, *, max_skills: int = 30, max_workers: i
     self_name = (session.remote_skill_id or session.target_skill_id or "").strip()
     # A declared child is delegated to, not routed against, so it is not a peer.
     excluded = {self_name} | {c for c in (safe_skill_name(x) for x in (session.children or [])) if c}
+    internal_by_name = {r.skill_name: bool(r.is_internal) for r in rows if r.skill_name}
     names = [r.skill_name for r in rows if r.skill_name and r.skill_name not in excluded][:max_skills]
     if not names:
         research.peer_skills = []
@@ -210,7 +223,7 @@ def _load_peer_skill_boundaries(session, *, max_skills: int = 30, max_workers: i
     def _load_one(name: str) -> dict[str, Any] | None:
         try:
             files = store.load_skill(name)
-            return _peer_skill_digest(name, files.skill_md)
+            return _peer_skill_digest(name, files.skill_md, is_internal=internal_by_name.get(name, False))
         except Exception as exc:  # noqa: BLE001 - one missing blob must not fail the batch.
             log_event("prepare_entry.peer_skills.load_missing", level="warning", session_id=session.id, skill_name=name, error=str(exc)[:200])
             failures.append(f"`{name}` -> {type(exc).__name__}: {str(exc)[:200]}")
@@ -1999,11 +2012,6 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
             blob_store_id=session.blob_store_id,
             version_hash=files.version_hash,
         )
-    else:
-        # Do not block new/import session creation on Blob list latency. The
-        # existing skill index is helpful context, but the chat flow can start
-        # without it and fetch specific skills later when needed.
-        session.existing_skills_index = []
     sessions[session.id] = session
     persist_session(session)
     # New sessions start in PREPARE without a stage transition, so the

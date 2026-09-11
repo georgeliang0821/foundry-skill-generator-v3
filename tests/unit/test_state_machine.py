@@ -350,6 +350,112 @@ def test_peer_skills_are_untouched_without_children() -> None:
     assert "Excluded as delegated children" not in rendered
 
 
+def _peer(name: str, **extra) -> dict:
+    return {"name": name, "description": f"{name} does things", **extra}
+
+
+def test_capability_peers_split_parents_into_the_cross_layer_section() -> None:
+    from backend.state_machine import _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.CAPABILITY)
+    session.prepare_brief.research.peer_skills = [
+        _peer("leave-workflow", children=["hr-leave-system"]),
+        _peer("ms-graph-calendar"),
+    ]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+    rivals, cross = rendered.split("## Cross-layer skills (NOT routing rivals)")
+
+    assert "### ms-graph-calendar" in rivals
+    assert "### leave-workflow" not in rivals
+    assert "### leave-workflow" in cross
+    assert "backend candidate set" in cross
+
+
+def test_scenario_peers_split_internal_children_into_the_cross_layer_section() -> None:
+    from backend.state_machine import _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO)
+    session.prepare_brief.research.peer_skills = [
+        _peer("hr-leave-system", is_internal=True),
+        _peer("ms-graph-calendar"),
+    ]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+    rivals, cross = rendered.split("## Cross-layer skills (NOT routing rivals)")
+
+    assert "### ms-graph-calendar" in rivals
+    assert "### hr-leave-system" not in rivals
+    assert "### hr-leave-system" in cross
+    assert "host directory" in cross
+
+
+def test_scenario_peers_treat_an_unclaimed_child_as_cross_layer() -> None:
+    """is_internal is only stamped once a parent is saved, so the peer's own
+    children list is the earlier signal."""
+    from backend.state_machine import _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO)
+    session.prepare_brief.research.peer_skills = [
+        _peer("leave-workflow", children=["hr-leave-system"]),
+        _peer("hr-leave-system", is_internal=False),
+    ]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+    rivals, cross = rendered.split("## Cross-layer skills (NOT routing rivals)")
+
+    assert "### leave-workflow" in rivals
+    assert "### hr-leave-system" in cross
+
+
+def test_scenario_peers_keep_standalone_capabilities_as_rivals() -> None:
+    """Both layers share the host directory, so a scenario really does compete
+    with a standalone capability skill."""
+    from backend.state_machine import _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO)
+    session.prepare_brief.research.peer_skills = [_peer("ms-graph-calendar")]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+
+    assert "### ms-graph-calendar" in rendered
+    assert "## Cross-layer skills" not in rendered
+
+
+def test_peers_loaded_before_the_layer_split_stay_rivals() -> None:
+    from backend.state_machine import _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.CAPABILITY)
+    session.prepare_brief.research.peer_skills = [
+        {"name": "leave-workflow", "description": "Orchestrates leave"},
+    ]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+
+    assert "### leave-workflow" in rendered
+    assert "## Cross-layer skills" not in rendered
+
+
+def test_cross_layer_peers_share_the_render_cap() -> None:
+    from backend.state_machine import _PEER_RENDER_CAP, _format_peer_skills
+
+    session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.CAPABILITY)
+    session.prepare_brief.research.peer_skills = [
+        _peer(f"rival-{i}") for i in range(_PEER_RENDER_CAP)
+    ] + [_peer("leave-workflow", children=["hr-leave-system"])]
+    session.prepare_brief.research.peer_skills_status = "ok"
+
+    rendered = _format_peer_skills(session)
+
+    assert rendered.count("### rival-") == _PEER_RENDER_CAP
+    assert "### leave-workflow" not in rendered
+
+
 def test_revising_definition_resets_the_scenario_delegation_checkpoint(backend_main) -> None:
     session = Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO)
     session.prepare_brief.verify_checklist["delegation_ok"] = True

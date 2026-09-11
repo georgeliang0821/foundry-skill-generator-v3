@@ -100,7 +100,7 @@ PREPARE 採取**單題追問**機制，杜絕一次塞給使用者一整條填�
 | 順序 | 執行子步驟 | 注入 Input (來源) | 主要 Output 寫入 | 子步意義與前後依賴關係說明 |
 | --- | --- | --- | --- | --- |
 | **0a** | 載入 ACA 變數 (異步背景) | MCP 端點 / 環境配置 | `aca_env_result` (OBO registry) | 進入 PREPARE 即觸發，載入既有容器環境。不依賴意圖。 |
-| **0b** | 讀取 Peer Skills (異步背景) | Azure SQL 權限過濾名單 | `research.peer_skills` | 進入 PREPARE 即觸發，載入當前使用者所有可及 Skill 清單。不依賴意圖。 |
+| **0b** | 讀取 Peer Skills (異步背景) | Azure SQL 權限過濾名單 | `research.peer_skills` | 進入 PREPARE 即觸發，載入當前使用者所有可及 Skill 清單。不依賴意圖。渲染時依候選集分成競爭者／跨層兩區，見 [3.1.4](#314-peer-skills-的候選集分層)。 |
 | **1** | **definition_clear** (關卡 1) | 使用者最初意圖、附加素材 | `skill_goal` / `input_sources` / `key_capabilities` | **最核心：問清定義**。Agent 逐一確認三者並不斷 `record_understanding`。此步未完，後續 2、3 步直接掛起。 |
 | **2** | 運算既有重疊 (背景觸發) | 第一步確認的 `skill_goal` 等 | `existing_skills_overlap` | **依賴第 1 步**。定義填入後，背景執行緒會自動拿目標和能力比對索引 (Top N)，比出撞車的既有 Skill。一開始是空的。 |
 | **3** | 背景網路研究 (Agent 異步) | 第一步確立的 `skill_goal` | `ResearchBrief` (`record_research`) | **依賴第 1 步**。大腦會實施 Search 並總結坑點與 APIs。 |
@@ -137,6 +137,27 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 - **`aca_env`**：判斷哪些現存 ACA 變數可直接 `Reuse`，哪些需透過 Patch 設計新增 `Add`。
 - **`obo_token`**：註冊 OBO Token 授權範圍。
 - **`runtime`**：非固定系統變數。如未傳入，需生成 `[NEEDS_INFO]` 的 stderr 引流保護（Exit 0 契約）。
+
+#### 3.1.4 Peer Skills 的候選集分層
+
+「相鄰」不是一個全域概念：scenario 與 capability 各自在**不同的候選集**裡競爭，跨層的兩支 skill 永遠不會互相搶。EAA runtime 有兩道方向相反的過濾：
+
+| 候選集 | 誰被排除 | runtime 機制 |
+| --- | --- | --- |
+| **宿主目錄**（host agent 選誰） | `is_internal = 1` 的 child | `core_handler._project_scenario_skills()` |
+| **後端候選集**（coding agent 路由） | 宣告 `metadata.children` 的 parent | `skills_provider_factory._materialize_skills()` |
+
+因此：
+
+- **scenario 的競爭者** = 其他 scenario **＋ 非 internal 的獨立 capability**（兩者同在宿主目錄，是真競爭，不可一併排除）。
+- **capability 的競爭者** = 其他未宣告 `children` 的 skill（**包含別人的 internal child**——`is_internal` 只擋宿主目錄投影，不擋後端）。
+
+這個分層在兩處各自實作：
+
+- `skills_index.keyword_topn()`（[skills_index.py](../backend/skills_index.py)）依 `kind` 過濾 `existing_skills_overlap` 的候選。
+- `_partition_peers_by_layer()`（[state_machine.py](../backend/state_machine.py)）把 `## Peer Skills` 拆成「競爭者」與 `## Cross-layer skills (NOT routing rivals)` 兩區。**跨層項目仍然印出來**（scenario 作者需要看得到候選 child），只是明令不得拿來比對邊界、也不得寫成 `use <skill> instead` 的目標。兩區共用 30 筆的渲染上限。
+
+> ⚠️ **`is_internal` 是延遲設定的**：只有當某支 scenario 存檔並宣告它時才變 `1`。所以判斷 scenario 的跨層項目時，除了 `is_internal`，還要看**該名字是否出現在任一 peer 的 `children` 裡**——後者直讀 frontmatter，在 child 被認領之前就已經正確。`children` 的解析一律走 `topology.declared_children()`（只接受非空 list of str），不另立第四份 parser。
 
 ---
 
@@ -276,13 +297,12 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Blob Skill Binding** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_remote_skill_state`，載入與雲端儲存體 (Blob/SQL) 關聯狀態 |
 | **Allowed Stage Transitions** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_allowed_exits`。限縮當前合法的轉移出口，防堵隨意跳關 |
 | **DONE Re-entry Guidance** | **B** | | | | | ✓ | 僅在 DONE 階段裝配。引導使用者採取不同意圖重新開啟會話 |
-| **Peer Skills** | **B** | ✓ | ✓ | ✓ | | | 呼叫 `_format_peer_skills`。載入使用者具權限的現有技能名冊 |
+| **Peer Skills** | **B** | ✓ | ✓ | ✓ | | | 呼叫 `_format_peer_skills`。載入使用者具權限的現有技能名冊，並依候選集分成「競爭者」與「跨層」兩區。詳見[第 3.1.4 節](#314-peer-skills-的候選集分層) |
 | **Selected Neighbor Skills** | **B** | ✓ | ✓ | ✓ | | | 呼叫 `_format_selected_neighbor_skills`。欲編輯鄰近技能時，載入鄰居全文代碼 |
 | **ACA Environment** | **B** | ✓ | ✓ | ✓ | ✓ | ✓ | 自 MCP 實體讀取之現有 ACA 變數快照，供 Reuse 比對參考 |
 | **Latest Test Run** | **B** | | | ✓ | ✓ | ✓ | 盲測所得的實測報表日誌，為精修 (Patch) 調整的科學依據 |
 | **Import Mode Addendum** | **C** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前的 mode 為 `import` 代碼入庫。 |
 | **Modify Mode Addendum** | **C** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前正在修改已經在 DB 掛號使用者現有 Skill。 |
-| **Existing Skills Index** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 資料庫內所有已登記的現存技能索引表 |
 | **Materials** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_materials`，把使用者附加的素材**全文**依可信度分層（Tier 1/2/3）注入，並附上各層的引用邊界。詳見[第 7 節](#7-素材materials的三層可信度合約) |
 | **Prepare Brief** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 準備期已確認的 Goal / Sources / Capabilities 等 Brief 歸檔結構 |
 | **Iteration Log** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 局部 Patch 補丁歷史、以及 TEST 回合所保存的反思資訊 |

@@ -89,3 +89,34 @@ def test_keyword_topn_excludes_declared_children(monkeypatch) -> None:
     }
 
     assert names == {"calendar-capability"}
+
+
+def test_keyword_topn_drops_a_child_no_parent_has_claimed_yet(monkeypatch) -> None:
+    """is_internal is only stamped when the parent is saved, so the parent's own
+    children list has to carry the exclusion until then."""
+    parent = SkillFiles(
+        name="calendar-parent",
+        skill_md=(
+            "---\nname: calendar-parent\ndescription: Calendar workflow\nmetadata:\n"
+            "  skill_type: scenario-orchestration\n  children: [calendar-child]\n---\n"
+        ),
+    )
+    child = SkillFiles(
+        name="calendar-child",
+        skill_md="---\nname: calendar-child\ndescription: Calendar workflow\n---\n",
+    )
+    capability = SkillFiles(
+        name="calendar-capability",
+        skill_md="---\nname: calendar-capability\ndescription: Calendar workflow\n---\n",
+    )
+    rows = [_row("calendar-parent"), _row("calendar-child"), _row("calendar-capability")]
+    monkeypatch.setattr("backend.skills_repo.list_skills_for_user", lambda upn: rows)
+    index = SkillsIndex(FakeBlobStore([parent, child, capability]), ttl_seconds=0)
+
+    names = {
+        card.name for card, _ in index.keyword_topn(
+            "calendar workflow", [], upn="user@x", kind=SkillKind.SCENARIO
+        )
+    }
+
+    assert names == {"calendar-parent", "calendar-capability"}

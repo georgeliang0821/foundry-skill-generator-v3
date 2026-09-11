@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import skills_repo
-from .blob_store import parse_frontmatter_meta
 from .models import SkillKind
+from .topology import declared_children, parse_frontmatter_block
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +60,11 @@ class SkillCard:
     path: str = ""
     keywords: set[str] = field(default_factory=set)
     is_internal: bool = False
-    declares_children: bool = False
+    children: list[str] = field(default_factory=list)
+
+    @property
+    def declares_children(self) -> bool:
+        return bool(self.children)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -112,16 +116,13 @@ class SkillsIndex:
                     # SQL row without blob content -- skip (consistent with /api/skills).
                     continue
                 description = blob_descriptions.get(name, "").strip()
-                declares_children = False
+                children: list[str] = []
                 if self._blob_store is not None:
                     try:
-                        metadata = parse_frontmatter_meta(self._blob_store.load_skill(name).skill_md)
-                        children = metadata.get("children")
-                        declares_children = bool(
-                            isinstance(children, list)
-                            and children
-                            and all(isinstance(child, str) and child.strip() for child in children)
+                        _block, frontmatter = parse_frontmatter_block(
+                            self._blob_store.load_skill(name).skill_md
                         )
+                        children = declared_children(frontmatter or {})
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.warning("skills_index.blob_load_failed name=%s: %s", name, str(exc)[:200])
                 keywords = _tokenize(f"{name} {description}")
@@ -133,7 +134,7 @@ class SkillsIndex:
                         path=f"sql:{name}",
                         keywords=keywords,
                         is_internal=bool(row.is_internal),
-                        declares_children=declares_children,
+                        children=children,
                     )
                 )
         except Exception as exc:  # noqa: BLE001
@@ -159,12 +160,14 @@ class SkillsIndex:
         if kind is not None:
             resolved_kind = SkillKind(kind)
             if resolved_kind is SkillKind.SCENARIO:
-                cards = [card for card in cards if not card.is_internal]
+                # `is_internal` is only stamped once a scenario declaring the
+                # child has been saved, so a child merely named by some parent
+                # is out of the host directory too.
+                claimed = {c for card in cards for c in card.children}
+                cards = [c for c in cards if not c.is_internal and c.name not in claimed]
             else:
                 cards = [card for card in cards if not card.declares_children]
         if exclude:
-            # `is_internal` only lands once a scenario declaring the child has been
-            # saved, so a freshly authored child is still caught by the kind filter.
             cards = [card for card in cards if card.name not in exclude]
         query = _tokenize(topic + " " + " ".join(capabilities))
         scored = [(card, _jaccard(query, card.keywords)) for card in cards]
