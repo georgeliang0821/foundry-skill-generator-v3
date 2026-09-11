@@ -216,11 +216,11 @@ def _post_apim_run(
     mode: str,
     timeout: float = 120,
 ) -> dict[str, Any]:
-    endpoint = os.getenv("SKILL_SELECTION_TEST_APIM_RUN_URL", "").strip()
+    endpoint = os.getenv("SKILL_SELECTION_TEST_RUN_URL", "").strip()
     request_sent = _test_request(query, mode=mode)
     if not endpoint:
         log_event("apim.run.skipped", level="warning", reason="endpoint_not_configured")
-        raise RuntimeError("SKILL_SELECTION_TEST_APIM_RUN_URL is not configured.")
+        raise RuntimeError("SKILL_SELECTION_TEST_RUN_URL is not configured.")
     if not delegated_token:
         log_event("apim.run.skipped", level="warning", reason="missing_delegated_token")
         return {"request_sent": request_sent, "error": "Microsoft login token is missing. Sign in before running selection tests.", "duration_ms": 0}

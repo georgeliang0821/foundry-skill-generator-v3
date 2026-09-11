@@ -15,7 +15,7 @@
 | **Microsoft Entra ID App Registration** | 使用者登入（OAuth2 授權碼 + PKCE），核發 access token | 是 |
 | **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 是 |
 | **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 是 |
-| **APIM 端點（Router / Sync）** | 路由測試（TEST）與儲存後同步 Skill 清單 | 選用（TEST 功能需要） |
+| **APIM 端點（Router / Sync）** | 路由測試（TEST）與儲存後同步 Skill 清單；也可改指向任何實作 `/run` 契約的 runtime（例如 ACA） | 選用（TEST 功能需要） |
 
 ---
 
@@ -132,18 +132,24 @@ SGV2_AUTH_STORE=blob
 
 > **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
 
-#### APIM 路由測試（選用，TEST 功能需要）
+#### 路由測試端點（選用，TEST 功能需要）
 
 這是 TEST 階段「路由測試」的端點。不設時，其他流程照常運作，只是無法跑路由測試。
 
 | 變數 | 說明 |
 | --- | --- |
-| `SKILL_SELECTION_TEST_APIM_RUN_URL` | APIM Router 的 `/run` 端點；TEST 把正 / 負面範例送去，看 Router 是否路由到本 skill（讀取位置：`backend/testing.py`） |
+| `SKILL_SELECTION_TEST_RUN_URL` | runtime 的 `/run` 端點；TEST 把正 / 負面範例送去，看 Router 是否路由到本 skill（讀取位置：`backend/testing.py`） |
+
+**不限定 APIM**。程式只做一次一般 HTTP POST，不檢查主機名稱，因此任何實作下方契約的端點都可以，例如直接指向 Azure Container Apps。走 APIM 只是多了 subscription key、rate limit 與 policy；繞過 APIM 直接打 ACA 時，請確認原本是否有 policy 負責 token 轉換。
 
 ```dotenv
-# APIM router test
-SKILL_SELECTION_TEST_APIM_RUN_URL=https://kurt-apim.azure-api.net/coding-tool-contoso-apis/run
+# APIM 閘道
+#SKILL_SELECTION_TEST_RUN_URL=https://kurt-apim.azure-api.net/coding-tool-contoso-apis/run
+# 或直接指向 ACA
+ SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainerapps.io/run
 ```
+
+端點必須符合的契約：接受 POST JSON（`request` / `session_id` / `mode` / `credentials`），回應 JSON 頂層要有 `response`，並原樣回顯 `mode`；同時能驗證 `Authorization: Bearer` 帶的使用者委派 token，且在 120 秒內回應。
 
 > 已移除：舊版的 `SKILL_SYNC_APIM_URL`（儲存後同步 skill 清單給 Router）。本產生器現在只支援「動態載入」（Mode B）：runtime 每次請求都直接從 SQL + Blob 解析 skill，雙寫完成即生效，不需要任何 sync 步驟。若你的 runtime 仍採靜態快照（Mode A），需自行在外部呼叫 `sync_skills`。
 

@@ -197,7 +197,7 @@ def test_route_only_sends_the_query_verbatim() -> None:
 
 
 def test_post_apim_run_without_token_returns_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SKILL_SELECTION_TEST_APIM_RUN_URL", "https://apim.example.test/run")
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
 
     output = _post_apim_run("Help me use demo", delegated_token=None, mode=ROUTE_ONLY)
 
@@ -432,7 +432,7 @@ def test_each_sample_gets_a_fresh_apim_session_id(monkeypatch: pytest.MonkeyPatc
       3. recent_full_outputs injects the previous turn's stdout into the prompt,
          which contaminates the routing signal we are trying to measure.
     """
-    monkeypatch.setenv("SKILL_SELECTION_TEST_APIM_RUN_URL", "https://apim.example.test/run")
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
     seen: list[str] = []
 
     class _FakeResponse:
@@ -490,7 +490,7 @@ def test_batch_runs_samples_one_at_a_time(monkeypatch: pytest.MonkeyPatch) -> No
 
 def _stub_apim(monkeypatch: pytest.MonkeyPatch, body: dict) -> list[dict]:
     """Capture what we POST and reply with a caller-supplied body."""
-    monkeypatch.setenv("SKILL_SELECTION_TEST_APIM_RUN_URL", "https://apim.example.test/run")
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
     sent: list[dict] = []
 
     class _FakeResponse:
@@ -552,7 +552,7 @@ def test_mismatched_mode_echo_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_non_json_response_aborts_rather_than_assuming_the_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SKILL_SELECTION_TEST_APIM_RUN_URL", "https://apim.example.test/run")
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
 
     class _FakeResponse:
         def read(self) -> bytes:
