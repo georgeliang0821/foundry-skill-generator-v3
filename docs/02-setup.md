@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | **Python** | 3.10 – 3.13 | 見 `pyproject.toml` 的 `requires-python` |
 | **uv** | 最新 | 套件管理與執行（`uv run ...`）。若公司網路封鎖公開 PyPI，需另外指定內部套件來源，見 [6. 疑難排解](#6-疑難排解公司網路擋住公開-pypi) |
-| **Azure CLI（az）** | 最新 | 本機執行時用 `az login` 提供 Blob 驗證身分；該登入帳號必須具備 Blob 資料權限。Foundry 與 SQL 使用 App Registration 服務主體 |
+| **Azure CLI（az）** | 最新 | 本機執行時用 `az login` 提供 Blob 驗證身分；該登入帳號必須具備 Blob 資料權限。Foundry 與 SQL 則使用 `.env` 裡 `AZURE_CLIENT_ID` 那組 service principal（App Registration） |
 | **Node.js / npm** | 最新 LTS | 必要；執行 `npm ci` 安裝 Cytoscape、Markdown 與語法上色等前端執行期套件。未安裝時 Agent Graph 無法繪製 |
 
 ---
@@ -48,18 +48,20 @@ Copy-Item .env.example .env
 
 | 服務 | 本機執行 | 部署至 Azure | Credential 實作 |
 | --- | --- | --- | --- |
-| **Microsoft Foundry Project** | `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 對應的服務主體 | 同一個服務主體；目前不會因部署至 Azure 而自動改用 Managed Identity | `DefaultAzureCredential()`；完整的 `AZURE_*` 三件套會由 `EnvironmentCredential` 優先採用 |
-| **Azure SQL Database** | 同一個 `.env` 服務主體 | 同一個服務主體 | `Authentication=ActiveDirectoryServicePrincipal`，沒有 Managed Identity 或 `az login` fallback |
-| **Azure Blob Storage** | 目前 `az login` 的使用者帳號 | 應用程式的 Managed Identity | `DefaultAzureCredential(exclude_environment_credential=True)`，刻意不採用上述服務主體 |
+| **Microsoft Foundry Project** | `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 這組 service principal | 同一組 `.env` service principal；目前不會因部署至 Azure 而自動改用 Managed Identity | `DefaultAzureCredential()`；完整的 `AZURE_*` 三件套會由 `EnvironmentCredential` 優先採用 |
+| **Azure SQL Database** | 與 Foundry 相同，即 `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 這組 service principal | 同一組 `.env` service principal | `Authentication=ActiveDirectoryServicePrincipal`，沒有 Managed Identity 或 `az login` fallback |
+| **Azure Blob Storage** | 目前 `az login` 的使用者帳號 | 應用程式的 Managed Identity | `DefaultAzureCredential(exclude_environment_credential=True)`，刻意不採用上述 service principal |
 | **MCP（ACA 環境變數查詢）** | `MICROSOFT_*` App Registration 的 app-only token | 同一支 App Registration | client credentials 對自己換 `api://<app-id>/.default`；詳見下方 MCP 章節 |
 
-> 瀏覽器的 Microsoft 登入只用來識別目前網頁使用者、套用 Skill ACL，以及取得需要的 delegated/OBO token；該使用者 token **不會**被轉送給 Foundry、SQL 或 Blob。由於 Foundry 與 SQL 共用 `AZURE_*` 服務主體，該服務主體必須分別取得兩邊的權限。
+> 瀏覽器的 Microsoft 登入只用來識別目前網頁使用者、套用 Skill ACL，以及取得需要的 delegated/OBO token；該使用者 token **不會**被轉送給 Foundry、SQL 或 Blob。由於 Foundry 與 SQL 共用 `AZURE_*` 這組 service principal，它必須分別取得兩邊的權限。
+
+> **上表「部署至 Azure」欄尚未實測**。那一欄是依程式碼推導的預期行為，並非驗證結果；實際搬上去前請先看 [4.1 部署至 Azure：尚未實測](#41-部署至-azure尚未實測)。
 
 #### Foundry（AI 大腦）
 
 請注意幫此 agent 在 AI foundry 上加入 Web Search 的 tool 方便他進行網頁搜尋來研究
 
-Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET`，因此這三個值也會組成 Foundry 實際使用的 `EnvironmentCredential`；本機的 `az login` 帳號通常不會被選到。請將該 `AZURE_CLIENT_ID` 對應的服務主體加入目標 Foundry project，僅呼叫既有 agent 時至少授予 **Foundry Agent Consumer**；需要 project data actions 時授予 **Foundry User**。
+Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET`，因此這三個值也會組成 Foundry 實際使用的 `EnvironmentCredential`；本機的 `az login` 帳號通常不會被選到。請將該 `AZURE_CLIENT_ID` 對應的 service principal 加入目標 Foundry project，僅呼叫既有 agent 時至少授予 **Foundry Agent Consumer**；需要 project data actions 時授予 **Foundry User**。
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
@@ -82,8 +84,8 @@ Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的
 | --- | --- | --- |
 | `AZURE_SQL_SERVER` | 是 | 例如 `your-server.database.windows.net` |
 | `AZURE_SQL_DATABASE` | 是 | 資料庫名稱 |
-| `AZURE_TENANT_ID` | 是 | Foundry 與 SQL 共用的服務主體（App Registration）驗證用；三個一組必填 |
-| `AZURE_CLIENT_ID` | 是 | 同上；此 client id 對應的服務主體也必須取得 Foundry project/agent 權限 |
+| `AZURE_TENANT_ID` | 是 | Foundry 與 SQL 共用的 service principal（App Registration）驗證用；三個一組必填 |
+| `AZURE_CLIENT_ID` | 是 | 同上；此 client id 對應的 service principal 也必須取得 Foundry project/agent 權限 |
 | `AZURE_CLIENT_SECRET` | 是 | 同上 |
 
 #### Azure Blob（SKILL.md 儲存）
@@ -94,7 +96,7 @@ Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的
 | `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `skills` |
 | `AZURE_BLOB_PREFIX` | 否 | blob 前綴；**只能是 `skills`**（或留空，預設即為 `skills`）。`dbo.skills.blob_path` 是寫死 `skills/` 的計算欄位，填其他值會使 SQL 指向應用程式從未寫入的位置，因此服務會在啟動時直接拋錯 |
 
-> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，會刻意忽略 `.env` 中供 Foundry 與 SQL 使用的 `AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET` 等服務主體設定。本機執行時，實際使用目前 `az login` 的個人帳號，因此必須將 **Storage Blob Data Contributor** 指派給該帳號；一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。部署至 Azure 時，則將 **Storage Blob Data Contributor** 指派給應用程式的 Managed Identity。
+> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，會刻意忽略 `.env` 中供 Foundry 與 SQL 使用的 `AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET` 等 service principal 設定。本機執行時，實際使用目前 `az login` 的個人帳號，因此必須將 **Storage Blob Data Contributor** 指派給該帳號；一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。部署至 Azure 時，則將 **Storage Blob Data Contributor** 指派給應用程式的 Managed Identity。
 
 #### 本機開發 / 測試選項
 
@@ -128,7 +130,7 @@ SGV2_AUTH_STORE=blob
 
 實際寫入的位置分別是 `<container>/sessions/<owner_upn>/<session_id>.json` 與 `<container>/auth/<kind>/<key>.json`，與 skill 的 `skills/` 前綴互不重疊。
 
-> **驗證身分與 skill 儲存不同**。skill 用 `DefaultAzureCredential(exclude_environment_credential=True)`；session 與 auth 的 Blob 用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，兩者一樣都**不會**採用 `.env` 的 `AZURE_CLIENT_*` 服務主體，所以同樣需要把 **Storage Blob Data Contributor** 指派給本機 `az login` 帳號或 Azure 上的 Managed Identity。
+> **驗證身分與 skill 儲存不同**。skill 用 `DefaultAzureCredential(exclude_environment_credential=True)`；session 與 auth 的 Blob 用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，兩者一樣都**不會**採用 `.env` 的 `AZURE_CLIENT_*` service principal，所以同樣需要把 **Storage Blob Data Contributor** 指派給本機 `az login` 帳號或 Azure 上的 Managed Identity。
 
 > **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
 
@@ -184,11 +186,11 @@ SGV2_AUTH_STORE=blob
 
 #### A. 連線身分（誰打開 SQL 連線）
 
-整個應用**共用一個固定身分**連線——**只支援服務主體（App Registration）**，由 `backend/db.py` 組裝連線字串：
+整個應用**共用一個固定身分**連線——**只支援 service principal（App Registration）**，而且就是 Foundry 用的那一組，由 `backend/db.py` 組裝連線字串：
 
 | 連線身分 | 必要環境變數 | 驗證方式 |
 | --- | --- | --- |
-| **服務主體（App Registration）** | `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`（三個都必填） | `ActiveDirectoryServicePrincipal` |
+| **service principal（App Registration）** | `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`（三個都必填） | `ActiveDirectoryServicePrincipal` |
 
 > 這個連線身分只決定「**能不能連、能不能讀寫資料表**」，它**不代表**當下在用網頁的人，也不會自動帶入登入者資訊。
 
@@ -241,11 +243,11 @@ SGV2_AUTH_STORE=blob
 
 ## 4. 指派身分權限
 
-Foundry 與 SQL 共用 `.env` 的 App Registration 服務主體；Blob 會排除該服務主體，本機使用 `az login` 帳號，部署至 Azure 時使用 Managed Identity。這些權限彼此獨立，請分別授權：
+Foundry 與 SQL 共用 `.env` 的 App Registration service principal；Blob 會排除它，本機使用 `az login` 帳號，部署至 Azure 時使用 Managed Identity。這些權限彼此獨立，請分別授權：
 
-- **Foundry Project / Agent**：將 `AZURE_CLIENT_ID` 對應的服務主體加入目標 Foundry project。只需呼叫既有 agent endpoint 時授予 **Foundry Agent Consumer**；若還需要 project data actions，授予 **Foundry User**。一般 Azure **Owner**、**Contributor** 或 **Reader** 不等同於 Foundry agent 的 data-plane 呼叫權限。
+- **Foundry Project / Agent**：將 `AZURE_CLIENT_ID` 對應的 service principal 加入目標 Foundry project。只需呼叫既有 agent endpoint 時授予 **Foundry Agent Consumer**；若還需要 project data actions，授予 **Foundry User**。一般 Azure **Owner**、**Contributor** 或 **Reader** 不等同於 Foundry agent 的 data-plane 呼叫權限。
 
-- **SQL（連線身分）**：把這個服務主體加入資料庫並授予讀寫權限，例如：
+- **SQL（連線身分）**：把同一個 service principal 加入資料庫並授予讀寫權限，例如：
 
   ```sql
   CREATE USER [<app-registration-name>] FROM EXTERNAL PROVIDER;
@@ -256,6 +258,53 @@ Foundry 與 SQL 共用 `.env` 的 App Registration 服務主體；Blob 會排除
 - **Blob（本機）**：先執行 `az login`，再於儲存體帳號上將 **Storage Blob Data Contributor** 指派給該登入帳號。一般 **Contributor** 不包含 Blob data-plane 權限。`AZURE_CLIENT_*` 供 Foundry 與 SQL 使用，不會被 Blob credential 採用。
 
 - **Blob（Azure）**：將 **Storage Blob Data Contributor** 指派給執行應用程式的 Managed Identity。
+
+### 4.1 部署至 Azure：尚未實測
+
+> **本專案只在本機驗證過。** 未曾實際部署到 Azure Container Apps、App Service 或任何雲端執行環境，也沒有對應的 Dockerfile / IaC / CI。下面列的是**審視程式碼後已知會擋住部署的問題**，供日後要推上雲的人參考；清單未必完整。
+
+**架構上本來就可行的部分**：前端是純靜態 HTML/CSS/ES module（無 build step），由 `backend/main.py` 自己掛載後提供：`/` → `frontend/index.html`、`/assets` → `frontend/`、`/vendor` → `node_modules/`。因此**不需要另一個前端主機服務**，一個容器同時 serve 前端與 API 即可。
+
+#### 已知問題
+
+**1. Blob 的 Managed Identity 拿不到 token（需改程式，無法用設定繞過）**
+
+容器裡沒有 `az login`，`backend/blob_store.py` 的 `DefaultAzureCredential(exclude_environment_credential=True)` 只能落到 `ManagedIdentityCredential`。但 azure-identity 的 `DefaultAzureCredential` 會把 `AZURE_CLIENT_ID` 當成 **user-assigned MI 的 client id**：
+
+```python
+# azure/identity/_credentials/default.py
+managed_identity_client_id = kwargs.pop(
+    "managed_identity_client_id", os.environ.get(EnvironmentVariables.AZURE_CLIENT_ID)
+)
+```
+
+而本專案的 `AZURE_CLIENT_ID` 是 SQL / Foundry 那支 **App Registration**，不是任何 UAMI，所以 MI 端點會被要求發一個不存在的身分的 token 而失敗，導致所有 `SKILL.md` 讀寫壞掉。這**不能靠調整環境變數解決**（App Registration 與 UAMI 是不同物件，client id 不可能相同），必須改程式明確指定要用哪個 MI。
+
+附帶一個不一致：`backend/session_store.py` 與 `backend/auth_store.py` 用的是明寫的 `ManagedIdentityCredential()`（不帶 client id），走 **system-assigned**，與 skill store 的行為不同。
+
+**2. uvicorn 綁定位址**
+
+[5. 啟動](#5-啟動) 的指令是 `--host 127.0.0.1`。容器內這樣綁，ingress 從外面連不進來，健康檢查直接失敗。需改 `--host 0.0.0.0` 並與 ingress 的 `targetPort` 對齊。
+
+**3. Redirect URI 與反向代理**
+
+App Registration 要加上正式網域的 `https://<fqdn>/api/auth/callback`。另外 `public_url_for()` 直接用 `request.url_for` 組 redirect_uri；TLS 在 ingress 終止，若未處理 `X-Forwarded-Proto` 會組出 `http://…` 而與 Entra 註冊值不符——啟動時需帶 `--proxy-headers --forwarded-allow-ips=…`。
+
+**4. 登入 cookie 的 `secure` 旗標**
+
+`set_cookie` 目前寫死 `secure=False`（本機 http 專用），HTTPS 上應改為 `True`。
+
+**5. 映像檔內容**
+
+必須包含 `frontend/` 與**完整的 `node_modules/`**（`/vendor` 掛的是 node_modules 本身，不是打包產物）。兩個掛載都是條件式的，**缺了不會報錯**：`frontend/` 缺 → `/` 回 404 `Frontend not built`；`node_modules/` 缺 → `/vendor` 靜默不掛載，頁面出得來但 Agent Graph 不畫圖。
+
+**6. session 與登入狀態**
+
+容器檔案系統是 ephemeral，且登入 token 預設只在行程記憶體，需依 [多實例部署](#多實例部署session-與登入狀態改存-blob選用) 改成 Blob——但那一段本身也只在本機跑過。
+
+**7. 確認 `SGV2_E2E_MODE` 沒設**
+
+預設就是關的，但別跟著本機 `.env` 一起帶進正式環境——`POST /api/e2e/reset` 會清資料。
 
 ---
 

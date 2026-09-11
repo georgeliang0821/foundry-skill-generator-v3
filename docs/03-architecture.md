@@ -57,9 +57,9 @@ flowchart LR
 
 | 服務 | 實際呼叫身分 | 選擇方式 |
 | --- | --- | --- |
-| **Microsoft Foundry Project** | `.env` 中 `AZURE_CLIENT_ID` 對應的服務主體 | `DefaultAzureCredential()` 優先採用完整的 `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`；需另授予 Foundry project 或 agent data-plane 權限 |
-| **Azure SQL Database** | 同一個服務主體 | `ActiveDirectoryServicePrincipal`；沒有 Managed Identity 或 `az login` fallback |
-| **Azure Blob Storage** | 本機為 `az login` 使用者；Azure 上為應用程式 Managed Identity | Blob credential 刻意排除 EnvironmentCredential，因此不使用上述服務主體 |
+| **Microsoft Foundry Project** | `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `DefaultAzureCredential()` 優先採用完整的 `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`；需另授予 Foundry project 或 agent data-plane 權限 |
+| **Azure SQL Database** | 與 Foundry 相同，即 `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `ActiveDirectoryServicePrincipal`；沒有 Managed Identity 或 `az login` fallback |
+| **Azure Blob Storage** | 本機為 `az login` 使用者；Azure 上為應用程式 Managed Identity | Blob credential 刻意排除 EnvironmentCredential，因此不使用上述 service principal |
 
 瀏覽器經 OAuth2 登入的使用者只負責網頁身分、Skill ACL 與 delegated/OBO token。這個使用者身分不會成為 Foundry、SQL 或 Blob 的連線身分。完整設定與角色需求見 [02-setup.md](02-setup.md)。
 
