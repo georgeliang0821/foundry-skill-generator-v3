@@ -102,8 +102,35 @@ Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的
 
 | 變數 | 預設值 | 說明 |
 | --- | --- | --- |
-| `SGV2_SESSION_DIR` | `./.sessions` | 撰寫中的 session JSON 檔案存放目錄 |
+| `SGV2_SESSION_DIR` | `./.sessions` | 撰寫中的 session JSON 檔案存放目錄（只在 `SGV2_SESSION_STORE=local` 時有作用） |
 | `SGV2_SESSION_STORE` | `local`（檔案） | session 儲存方式：`local`＝存本機 JSON 檔；`blob`＝改存 Azure Blob（多實例共用才需要） |
+
+#### 多實例部署：session 與登入狀態改存 Blob（選用）
+
+單機執行時 session 存本機檔案、登入 token 只存在**行程記憶體**，兩者都不跨實例共享。若要跑多個後端實例（例如 ACA 多副本），需要把這兩份狀態改存 Blob，否則使用者會隨著被路由到不同實例而看不到自己的 session 或被登出。
+
+| 變數 | 預設值 | 說明 |
+| --- | --- | --- |
+| `SGV2_SESSION_BLOB_CONTAINER` | 沿用 `AZURE_BLOB_CONTAINER` | session 專用容器；想與 `SKILL.md` 分開存放時才設 |
+| `SGV2_SESSION_BLOB_PREFIX` | `sessions` | session blob 前綴。**不像 `AZURE_BLOB_PREFIX` 受 SQL 計算欄位限制**，可自由改名 |
+| `SGV2_AUTH_STORE` | `local`（行程記憶體） | 登入 token 與 OAuth state 的儲存方式；`blob`＝改存 Azure Blob |
+| `SGV2_AUTH_STORAGE_ACCOUNT_URL` | 沿用 `AZURE_STORAGE_ACCOUNT_URL` | auth 專用儲存體帳號 |
+| `SGV2_AUTH_STORAGE_CONNECTION_STRING` | 沿用 `AZURE_STORAGE_CONNECTION_STRING` | 改用連線字串驗證時才設；設了就優先於帳號 URL |
+| `SGV2_AUTH_BLOB_CONTAINER` | 依序沿用 `SGV2_SESSION_BLOB_CONTAINER`、`AZURE_BLOB_CONTAINER` | auth 專用容器 |
+| `SGV2_AUTH_BLOB_PREFIX` | `auth` | auth blob 前綴 |
+
+以現有 `.env` 為例，只要加一行就會沿用同一個儲存體帳號與容器：
+
+```dotenv
+SGV2_SESSION_STORE=blob
+SGV2_AUTH_STORE=blob
+```
+
+實際寫入的位置分別是 `<container>/sessions/<owner_upn>/<session_id>.json` 與 `<container>/auth/<kind>/<key>.json`，與 skill 的 `skills/` 前綴互不重疊。
+
+> **驗證身分與 skill 儲存不同**。skill 用 `DefaultAzureCredential(exclude_environment_credential=True)`；session 與 auth 的 Blob 用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，兩者一樣都**不會**採用 `.env` 的 `AZURE_CLIENT_*` 服務主體，所以同樣需要把 **Storage Blob Data Contributor** 指派給本機 `az login` 帳號或 Azure 上的 Managed Identity。
+
+> **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
 
 #### APIM 路由測試（選用，TEST 功能需要）
 

@@ -12,7 +12,7 @@ def test_add_material_appends_with_generated_id(client) -> None:
 
     response = client.post(
         f"/api/sessions/{session_id}/materials",
-        json={"kind": "text", "content": "Some context", "metadata": {"label": "ctx"}},
+        json={"kind": "text", "content": "Some context"},
     )
 
     body = response.json()
@@ -23,7 +23,6 @@ def test_add_material_appends_with_generated_id(client) -> None:
     assert item["id"]
     assert item["kind"] == "text"
     assert item["content"] == "Some context"
-    assert item["metadata"]["label"] == "ctx"
 
     # Persistence: re-read the session and confirm.
     read = client.get(f"/api/sessions/{session_id}")
@@ -43,7 +42,7 @@ def test_update_material_preserves_id_and_created_at(client) -> None:
 
     response = client.put(
         f"/api/sessions/{session_id}/materials/{material_id}",
-        json={"kind": "code", "content": "print('hi')", "metadata": {"lang": "py"}},
+        json={"kind": "code", "content": "print('hi')"},
     )
 
     body = response.json()
@@ -51,7 +50,6 @@ def test_update_material_preserves_id_and_created_at(client) -> None:
     updated = next(m for m in body["materials"] if m["id"] == material_id)
     assert updated["kind"] == "code"
     assert updated["content"] == "print('hi')"
-    assert updated["metadata"]["lang"] == "py"
     assert updated["created_at"] == created_at
 
 

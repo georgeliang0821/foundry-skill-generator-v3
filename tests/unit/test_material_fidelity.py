@@ -203,7 +203,7 @@ def main():
 
 def test_a_check_constraint_the_contract_never_lists_is_reported() -> None:
     issues = scan_material_fidelity(
-        _draft("必填 `leave_type`（字串）。"), [_material(DDL_MATERIAL, MaterialKind.FILE)]
+        _draft("必填 `leave_type`（字串）。"), [_material(DDL_MATERIAL, MaterialKind.API_SPEC)]
     )
 
     assert _details(issues, "undocumented_enum") == {
@@ -224,7 +224,7 @@ def test_a_contract_that_lists_the_values_is_clean() -> None:
     contract = "必填 `leave_type`（`annual`、`welfare`、`sick`）。"
 
     issues = scan_material_fidelity(
-        _draft(contract), [_material(DDL_MATERIAL, MaterialKind.FILE)]
+        _draft(contract), [_material(DDL_MATERIAL, MaterialKind.API_SPEC)]
     )
 
     assert "undocumented_enum" not in _rules(issues)
@@ -236,7 +236,15 @@ def test_an_enum_on_a_column_the_skill_never_reads_is_not_reported() -> None:
     )
 
     issues = scan_material_fidelity(
-        _draft("必填 `leave_type`（字串）。"), [_material(other, MaterialKind.FILE)]
+        _draft("必填 `leave_type`（字串）。"), [_material(other, MaterialKind.API_SPEC)]
     )
 
     assert "undocumented_enum" not in _rules(issues)
+
+
+def test_a_retired_file_kind_is_still_scanned_as_tier_2() -> None:
+    issues = scan_material_fidelity(
+        _draft("必填 `leave_type`（字串）。"), [_material(DDL_MATERIAL, MaterialKind.FILE)]
+    )
+
+    assert "undocumented_enum" in _rules(issues)

@@ -19,11 +19,11 @@ nothing is written.** That changes what the results can tell you:
   of `main()`, which never runs here, so its absence proves nothing about the
   payload contract.
 - The code sits under `### Prepared code` inside `## Latest Test Run`, and each
-  script is there **in full** -- the name comparison below depends on that.
-  Only samples that routed to this skill appear; a sample that routed elsewhere
-  has no code shown because that code implements another skill. If a script was
-  omitted for context budget the section says so by name; do not review that one
-  from memory.
+  script is there **in full**, followed by the static findings already computed
+  against it. Only samples that routed to this skill appear; a sample that
+  routed elsewhere has no code shown because that code implements another skill.
+  If a script was omitted for context budget the section says so by name; do not
+  review that one from memory.
 
 ## The two axes
 
@@ -65,13 +65,27 @@ nothing is written.** That changes what the results can tell you:
     recall fixes (positive misses) from precision fixes (negative false
     positives) and keep a precise 2-3 sentence description rather than keyword
     stuffing. Never copy failed sample queries verbatim into the skill text.
-  - **Usage:** review each script under `### Prepared code` against the checks
-    below.
+  - **Usage:** for each script under `### Prepared code`, carry over every
+    static finding printed with it, then apply the checks below.
   - `record_reflection` fields: `what_went_wrong`, `what_to_change`,
     `confidence_delta` (optional float -1..1), `raw`.
-- `record_reflection` automatically transitions you back to REFINE. In the next
-  turn, propose the narrow patch (metadata for discoverability, content for
-  usage) or wait for the user's review decision when human judgment is required.
+  - **`what_to_change` is the fix list the whole REFINE round runs on**, so make
+    every entry ONE atomic fix that a single `propose_patch` can close. Never
+    bundle two fixes into one string and never leave a finding out of the array
+    because it "belongs to the same area".
+- When you ask the user to accept the correction direction, the `ask_user_input`
+  options MUST let them choose the batch in one click -- the user cannot be
+  expected to know they may ask for several patches in a row. With N > 1 fix
+  items, offer options that spell out the count, e.g. 「一次修完全部 N 項（建議）」
+  (recommended default), 「只修第 1 項，其餘先擱置」, 「先不修，維持現狀」. State in
+  the surrounding text that fixing all N takes N patch cards to Accept and no
+  test run in between.
+- `record_reflection` automatically transitions you back to REFINE, where your
+  `what_to_change` array appears as the `## Open Fix List`. Work it top-down:
+  one narrow patch per item (metadata for discoverability, content for usage)
+  with `addresses` naming the item it closes, proposing the next one as soon as
+  the previous is accepted, and NO test run until the list is empty. Wait for
+  the user's review decision instead when human judgment is required.
 - For test-run failures unrelated to the skill content (env, transport, or a
   batch aborted because the runtime did not echo the requested `mode`), surface
   the error and ask the user how to proceed. Those are deployment findings and
@@ -79,48 +93,43 @@ nothing is written.** That changes what the results can tell you:
 
 ## Usage axis: what to check in the code
 
-### 1. Declared variable names vs the names the code reads (primary check)
+Every script under `### Prepared code` is followed by its own **Static findings**
+list. The same content lint that runs over the SKILL.md body now also runs over
+the script the runtime wrote, and it already decided everything that can be
+decided from code SHAPE: declared vs. read variable names (A2), `[NEEDS_INFO]`
+codes and their documentation (A4, A11), the entry point and the caller's
+channel (A9, A10), deployment configuration misfiled as a caller input (D1-D3),
+the identity read shape and its recovery path (I1-I3), leaking the verified
+actor (I4), and an external call whose result is never inspected (A12).
 
-Collect two sets and compare them.
+**Do not re-derive those.** Re-reading the two variable lists and announcing a
+diff the tool already printed costs a turn and produces a second opinion that can
+only disagree with the first. Copy each printed finding into `what_to_change` as
+its own atomic entry, then spend your reading on the four checks below -- the
+ones that depend on what the code MEANS and that no static rule can settle.
 
-- **Declared** -- every variable name in `## Required Inputs`, and the same for
-  `## Environment Variables` and `## OBO Token Scopes`. `EAA_VERIFIED_USER_UPN`
-  counts as declared whenever `## Skill 身分使用規範` is present; it is governed
-  by check 4 below, not by this diff.
-- **Read** -- every name passed to `os.environ[...]`, `os.environ.get(...)` or
-  `os.getenv(...)` anywhere in the code, helpers included.
+When the same rule fires on both the body lint and the prepared-code findings,
+the body is the root cause and the place to patch. When it fires only on the
+prepared code, the body's prose is what misled the runtime -- the sample code
+being correct is not a defense, because the runtime writes its own script from
+the prose.
 
-Compare **case-insensitively**, and treat a chain of alternatives as a single
-read: `os.environ.get("hr_leave_json") or os.environ.get("HR_LEAVE_JSON")`
-satisfies the one declared name `hr_leave_json`. That is correct code -- neither
-a duplicate nor a mismatch -- so report nothing for that shape. A declared name
-is satisfied when **at least one** read matches it case-insensitively. Report
-only:
+### 1. Every external identifier must trace back to the body
 
-- a declared name with **no** case-insensitive match among the reads -- the
-  caller will set a variable that nothing ever looks at; or
-- a read name that matches **no** declared name -- the code depends on something
-  the contract never asked the caller to supply.
+Take each endpoint, SQL object (table, view, procedure, column), payload field,
+CLI subcommand and CLI flag the code uses, and find it in the SKILL.md body. A
+name that appears only in the prepared code means the body does not pin it down,
+so the next run is free to pick a different one. State which of the two you are
+looking at: the body is out of date, or the body never specified it at all.
 
-This is the one check that is strictly better than what an executing test could
-do. A `runtime` input declared under one name and read under another prints
-`[NEEDS_INFO]` when executed, which is byte-for-byte what a correct skill prints
-when the caller simply omits that input; the two cases were indistinguishable.
-Here it is a plain text diff.
+Do not claim the model "invented" a name -- you cannot tell that from here, and
+the fix is the same either way: write the name into the body.
 
-`skills/hr-leave-system/SKILL.md` is the reference for the correct shape.
+### 2. Security shapes the body already forbids
 
-Run the same comparison on the sample code inside the SKILL.md body. That needs
-no test run at all, and when both disagree with the declarations, the body is
-the root cause and the place to patch.
-
-### 2. Names that must trace back to the body
-
-Every endpoint, SQL object (table, view, procedure, column) and payload field in
-the code must also appear somewhere in the SKILL.md body. A name that exists
-only in the response was either invented or the body is out of date -- say which.
-
-### 3. Security shapes the body already forbids
+Skip this check entirely unless the body mentions RLS, row-level security, OBO,
+or a required end-user connection identity. With none of those present there is
+no declared rule to break, and looking for one produces speculation.
 
 - An ownership filter stacked on top of server-side row security (for example a
   `WHERE upn = ?` in a skill whose body says RLS is active). The redundant
@@ -130,61 +139,40 @@ only in the response was either invented or the body is out of date -- say which
 - A guard the body declares -- order of security gates, error taxonomy,
   validation of caller-supplied data -- that the code drops.
 
-### 4. The verified actor contract (when the body has `## Skill 身分使用規範`)
+### 3. Identity as meaning: R3 and the reasoning half of R4
 
-Check the prepared code against the four rules. This is a static read; nothing
-executed, so the only evidence is the code shape.
+The lint covers the shape of the identity read (R1, R2, R4's leak). These two
+depend on what the code means, so they are yours -- and they are the highest
+severity finding available here.
 
-- **R1** -- the actor comes from `os.environ["EAA_VERIFIED_USER_UPN"]` by index.
-  Any `.get()`, `os.getenv`, `or "..."` fallback, or a default parameter carrying
-  the identity is a violation: it converts "never verified" into a value that is
-  then used as the authorization subject.
-- **R2** -- the read is not inside a `try` whose handler recovers, and the
-  absence path is a non-zero exit, never a `[NEEDS_INFO]` line and never a
-  question to the user. The caller cannot supply this variable, so asking for it
-  is asking to be lied to.
-- **R3** -- this is the one a routing test is most likely to expose. Read the
-  sample query, then read the code: if the query names a person and that name
-  (or anything derived from it) ends up in the field that identifies the
-  EXECUTOR, the skill has let conversation content become identity. The named
-  person may only appear as the OBJECT of the operation, carried by a `runtime`
-  input.
-- **R4** -- the verified value is not passed to `print`, a logger, or the
-  success-path summary, and the code nowhere reasons that the caller is
-  authorized merely because the skill loaded.
+- **R3** -- read the sample query, then read the code: if the query names a
+  person and that name (or anything derived from it) ends up in the field that
+  identifies the EXECUTOR, the skill has let conversation content become
+  identity. The named person may only appear as the OBJECT of the operation,
+  carried by a `runtime` input.
+- **R4 (reasoning)** -- the code nowhere concludes that the caller is authorized
+  merely because the skill loaded, or because a value was present.
 
-R3 and the reasoning half of R4 cannot be caught by the automatic lint -- they
-depend on what the code means, not on its shape -- so they are yours to check
-here. Report a violation as a USAGE (content) finding and fix it in REFINE.
+Report either as a USAGE (content) finding and fix it in REFINE.
 
-### 5. Deployment configuration misfiled as a caller input
+### 4. What the code claims happened
 
-Every name declared in `## Environment Variables` or `## OBO Token Scopes` must
-appear in the prepared code as `os.environ["NAME"]` and nowhere else. Report a
-violation when such a name is:
+A12 catches the mechanical half: a call whose result is never looked at. The
+other half is yours -- read every string the code prints on its way out and ask
+whether the code KNOWS it is true. A line like "已成功送出" printed from a branch
+that only knows the call returned is a claim about a system nobody queried. The
+host shows a completed response to the user verbatim, so an unverified claim
+reaches them as fact, and a create/submit the user believes failed gets sent
+twice.
 
-- read with `os.environ.get(...)`, `os.getenv(...)`, an `or "..."` fallback, or
-  a default parameter; or
-- listed in a `[NEEDS_INFO] missing=` line, or otherwise turned into a question
-  to the caller or the user; or
-- read inside a `try` whose handler recovers, or replaced by a service
-  principal / managed identity / any substitute credential.
-
-All three make a broken deployment or a broken OBO chain exit 0 and look like a
-missing caller input, which the host will retry forever against a deployment
-nobody was told is misconfigured. `[NEEDS_INFO]` is only for values a caller can
-actually supply.
-
-This is a USAGE (content) finding, and the fix is in the BODY, not the sample
-code: check that `## 部署設定使用規範` exists and carries the verbatim `D1`-`D3`
-rules. The sample code being correct is not enough -- the runtime writes its own
-script from the prose, so a missing or paraphrased rule block is the root cause.
+The fix is almost never a bigger success message. It is to print what the tool
+actually returned, or to check the outcome before saying anything about it.
 
 ### Classifying what you find
 
 - **Objective error** you can fix by editing SKILL.md content (wrong endpoint,
-  wrong parameter, missing required step, a mismatch from check 1) -> say so and
-  plan a content patch.
+  wrong parameter, missing required step, any printed static finding) -> say so
+  and plan a content patch.
 - **Subjective / needs domain judgment** you cannot verify from the materials ->
   do NOT silently "fix" it. Tell the user plainly that this case needs **human
   review**, state exactly what to check, and ask them to confirm the expected

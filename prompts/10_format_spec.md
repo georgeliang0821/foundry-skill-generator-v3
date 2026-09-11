@@ -79,7 +79,14 @@ routing -- routing is the frontmatter `description`):
   declared variable: read each `aca_env` via `os.environ["NAME"]`, consume
   each `obo_token`, and read each `runtime` input. Keep it consistent with the
   Environment Variables / OBO Token Scopes / Required Inputs sections; never
-  hard-code a value that is declared as a variable. On the success path, the
+  hard-code a value that is declared as a variable. `main()` takes NO
+  parameters: the host runs this block verbatim as a script, so no caller ever
+  hands it a dict. Every value the caller supplies arrives as a serialized JSON
+  string in a `credentials` entry and is read back with `os.environ` inside
+  `main()`. Give the envelope variable its own `[NEEDS_INFO]` code -- a payload
+  sent in the free-text `request` parameter instead of `credentials` is the
+  commonest caller error, and a field-level code cannot report it. On the
+  success path, the
   final primary output of `main()` (the last `print`) must be a natural-language
   summary written for a general end user -- plain prose stating the result and
   its key points, NOT a raw dict/list/JSON or structured `result` dump. Print

@@ -119,6 +119,122 @@ def test_a4_reports_a_needs_info_code_missing_from_required_inputs() -> None:
     assert [i.detail for i in issues] == ["TIME_RANGE"]
 
 
+def test_a4_sees_a_code_passed_to_a_needs_info_helper() -> None:
+    """The helper idiom reaches the line as an f-string placeholder, not as text."""
+    md = CLEAN_CAPABILITY.replace(
+        '        print("[NEEDS_INFO] missing=QUERY_JSON")\n'
+        '        print("Provide the request payload.")\n'
+        "        raise SystemExit(0)",
+        '        needs_info("TIME_RANGE", "Provide the range.")',
+    ).replace(
+        "def main() -> None:",
+        "def needs_info(code: str, explanation: str) -> None:\n"
+        '    print(f"[NEEDS_INFO] missing={code}")\n'
+        "    print(explanation)\n"
+        "    raise SystemExit(0)\n"
+        "\n"
+        "\n"
+        "def main() -> None:",
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A4"]
+    assert [i.detail for i in issues] == ["TIME_RANGE"]
+
+
+def test_env_keys_see_the_getenv_spelling() -> None:
+    """`os.getenv` is a documented read form; A2/A10/A11 all sit on this set."""
+    md = CLEAN_CAPABILITY.replace(
+        'host = os.environ["API_HOST"]',
+        'host = os.getenv("API_REGION")',
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A2"]
+    assert {i.detail for i in issues} == {"API_HOST", "API_REGION"}
+
+
+# --- The entry point and the caller's channel (A9-A11) ---------------------
+
+
+def test_a9_reports_a_main_that_takes_a_parameter() -> None:
+    md = CLEAN_CAPABILITY.replace("def main() -> None:", "def main(payload: dict) -> None:")
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A9"]
+    assert [i.detail for i in issues] == ["payload"]
+
+
+def test_a9_is_silent_for_a_zero_argument_main() -> None:
+    assert "A9" not in _rules(lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY))
+
+
+A10_CAPABILITY = """---
+name: no-channel-skill
+description: "A capability skill with no way to receive caller data."
+metadata:
+  author: a@b.c
+---
+
+## Overview
+Does one thing.
+
+## When NOT to Use This Skill
+Anything else -> use `other-skill`
+
+## Required Inputs
+
+- `department_code` (required): the department, free text.
+
+## API Reference / Sample Code
+
+```python
+from typing import Any
+
+
+def main(payload: dict[str, Any]) -> None:
+    print(payload.get("department_code"))
+```
+"""
+
+
+def test_a10_reports_caller_fields_with_no_environment_channel() -> None:
+    issues = [i for i in lint_skill(A10_CAPABILITY, SkillKind.CAPABILITY) if i.rule == "A10"]
+    assert [i.detail for i in issues] == ["department_code"]
+
+
+def test_a10_is_silent_when_a_runtime_input_is_read() -> None:
+    """The clean skill reads QUERY_JSON, so its caller has a channel."""
+    assert "A10" not in _rules(lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY))
+
+
+def test_a11_reports_a_runtime_input_with_no_envelope_code() -> None:
+    """Field-level codes do not cover the payload never arriving at all."""
+    md = CLEAN_CAPABILITY.replace(
+        'print("[NEEDS_INFO] missing=QUERY_JSON")',
+        'print("[NEEDS_INFO] missing=TIME_RANGE")',
+    ).replace(
+        "- `QUERY_JSON` (required): the serialized request. "
+        "Missing -> `[NEEDS_INFO] missing=QUERY_JSON`.",
+        "- `QUERY_JSON` (required): the serialized request.\n"
+        "- `TIME_RANGE` (required): a field inside it.",
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A11"]
+    assert [i.detail for i in issues] == ["QUERY_JSON"]
+
+
+def test_a11_is_silent_when_the_envelope_has_its_own_code() -> None:
+    assert "A11" not in _rules(lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY))
+
+
+def test_a11_treats_the_case_folded_read_pair_as_one_key() -> None:
+    md = CLEAN_CAPABILITY.replace(
+        'raw = os.environ.get("QUERY_JSON")',
+        'raw = os.environ.get("query_json") or os.environ.get("QUERY_JSON")',
+    )
+    assert "A11" not in _rules(lint_skill(md, SkillKind.CAPABILITY))
+
+
+def test_a11_ignores_deployment_variables_and_the_identity() -> None:
+    """API_HOST and API_ACCESS_TOKEN are absent-means-non-zero, never `[NEEDS_INFO]`."""
+    issues = [i for i in lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY) if i.rule == "A11"]
+    assert issues == []
+
+
 def test_a5_is_silent_when_the_throwing_batch_is_guarded() -> None:
     guarded = CLEAN_CAPABILITY.replace(
         '    print(f"Asked {host} with {len(token)} chars of token for {raw}.")',
@@ -529,3 +645,178 @@ def test_capability_rules_never_run_against_a_scenario(scenario_md: str) -> None
 
 def test_empty_skill_md_is_not_linted() -> None:
     assert lint_skill("   ", SkillKind.CAPABILITY) == []
+
+
+# --- Deployment configuration (D1-D3) --------------------------------------
+
+
+DEPLOYMENT_SECTION_MD = """## 部署設定使用規範
+
+- D1: 一律以 `os.environ[...]` 讀取。
+- D2: 缺少時不得走 `[NEEDS_INFO]`。
+- D3: 缺少時必須以非 0 結束。
+
+"""
+
+DEPLOYMENT_CAPABILITY = CLEAN_CAPABILITY.replace(
+    "## API Reference / Sample Code", DEPLOYMENT_SECTION_MD + "## API Reference / Sample Code"
+)
+
+
+def test_d1_reports_a_deployment_variable_read_with_a_default() -> None:
+    md = DEPLOYMENT_CAPABILITY.replace(
+        'host = os.environ["API_HOST"]',
+        'host = os.environ.get("API_HOST", "https://localhost")',
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D1"]
+    assert [i.detail for i in issues] == ["API_HOST"]
+
+
+def test_d1_covers_the_obo_token_too() -> None:
+    md = DEPLOYMENT_CAPABILITY.replace(
+        'token = os.environ["API_ACCESS_TOKEN"]',
+        'token = os.getenv("API_ACCESS_TOKEN", "")',
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D1"]
+    assert [i.detail for i in issues] == ["API_ACCESS_TOKEN"]
+
+
+def test_d2_reports_a_deployment_variable_routed_to_needs_info() -> None:
+    md = DEPLOYMENT_CAPABILITY.replace(
+        'host = os.environ["API_HOST"]',
+        'host = os.environ.get("API_HOST")\n'
+        "    if not host:\n"
+        '        print("[NEEDS_INFO] missing=API_HOST")\n'
+        "        raise SystemExit(0)",
+    )
+    rules = {i.rule for i in lint_skill(md, SkillKind.CAPABILITY)}
+    assert {"D1", "D2"} <= rules
+
+
+def test_d3_reports_a_try_that_recovers_from_absent_configuration() -> None:
+    md = DEPLOYMENT_CAPABILITY.replace(
+        '    host = os.environ["API_HOST"]',
+        "    try:\n"
+        '        host = os.environ["API_HOST"]\n'
+        "    except KeyError:\n"
+        '        host = "https://localhost"',
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D3"]
+    assert len(issues) == 1
+
+
+def test_a_deployment_finding_also_asks_for_the_missing_section() -> None:
+    """Patching only the sample code leaves the runtime writing the same script again."""
+    md = CLEAN_CAPABILITY.replace(
+        'host = os.environ["API_HOST"]',
+        'host = os.environ.get("API_HOST", "https://localhost")',
+    )
+    details = [i.detail for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D1"]
+    assert details == ["API_HOST", "部署設定使用規範"]
+
+
+def test_the_deployment_rules_stay_quiet_for_a_compliant_skill() -> None:
+    assert not [
+        i for i in lint_skill(DEPLOYMENT_CAPABILITY, SkillKind.CAPABILITY) if i.rule.startswith("D")
+    ]
+
+
+def test_the_deployment_rules_stay_quiet_without_declared_configuration() -> None:
+    md = CLEAN_CAPABILITY
+    for section in ("## Environment Variables", "## OBO Token Scopes"):
+        head, _, tail = md.partition(section)
+        md = head + tail.partition("\n## ")[1] + tail.partition("\n## ")[2]
+    assert not [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule.startswith("D")]
+
+
+# --- The unchecked external call (A12) -------------------------------------
+
+
+def _with_call(body: str) -> str:
+    return CLEAN_CAPABILITY.replace(
+        '    print(f"Asked {host} with {len(token)} chars of token for {raw}.")',
+        body,
+    ).replace("import os\n", "import os\nimport subprocess\n\nimport requests\n")
+
+
+def test_a12_reports_a_subprocess_result_nobody_looks_at() -> None:
+    md = _with_call(
+        '    done = subprocess.run([host, raw], capture_output=True, text=True)\n'
+        '    print("已送出。")'
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A12"]
+    assert [i.detail for i in issues] == ["subprocess.run"]
+
+
+def test_a12_reports_a_subprocess_result_nobody_even_assigns() -> None:
+    md = _with_call(
+        '    subprocess.run([host, raw], capture_output=True)\n    print("已送出。")'
+    )
+    assert [i.rule for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A12"] == ["A12"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        '    done = subprocess.run([host, raw], check=True)\n    print(done)',
+        '    done = subprocess.run([host, raw])\n'
+        "    if done.returncode != 0:\n"
+        "        raise SystemExit(1)",
+        '    done = subprocess.run([host, raw])\n    done.check_returncode()',
+    ],
+)
+def test_a12_is_silent_once_the_exit_status_is_handled(call: str) -> None:
+    assert not [i for i in lint_skill(_with_call(call), SkillKind.CAPABILITY) if i.rule == "A12"]
+
+
+def test_a12_reports_an_http_response_nobody_inspects() -> None:
+    md = _with_call(
+        '    resp = requests.post(host, json={"q": raw}, headers={"a": token})\n'
+        '    print("已建立。")'
+    )
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "A12"]
+    assert [i.detail for i in issues] == ["requests.post"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        '    resp = requests.post(host, json={"q": raw})\n    resp.raise_for_status()',
+        '    resp = requests.post(host, json={"q": raw})\n'
+        "    if resp.status_code != 201:\n"
+        "        raise SystemExit(1)",
+    ],
+)
+def test_a12_is_silent_once_the_response_is_inspected(call: str) -> None:
+    assert not [i for i in lint_skill(_with_call(call), SkillKind.CAPABILITY) if i.rule == "A12"]
+
+
+# --- Linting the code the runtime prepared ---------------------------------
+
+
+def test_code_override_lints_the_prepared_script_instead_of_the_sample() -> None:
+    prepared = (
+        "import os\n"
+        "\n"
+        "\n"
+        "def main(payload: dict) -> None:\n"
+        '    host = os.environ.get("API_HOST", "https://localhost")\n'
+        '    print(f"asked {host}")\n'
+    )
+    rules = {
+        i.rule
+        for i in lint_skill(DEPLOYMENT_CAPABILITY, SkillKind.CAPABILITY, code_override=prepared)
+    }
+    assert {"A9", "D1"} <= rules
+    assert not [i for i in lint_skill(DEPLOYMENT_CAPABILITY, SkillKind.CAPABILITY)]
+
+
+def test_code_override_still_reconciles_against_the_authored_declarations() -> None:
+    """The prepared script is a different artifact; the contract it must meet is not."""
+    prepared = 'import os\n\n\ndef main() -> None:\n    print(os.environ["API_REGION"])\n'
+    issues = [
+        i
+        for i in lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY, code_override=prepared)
+        if i.rule == "A2"
+    ]
+    assert {i.detail for i in issues} == {"API_HOST", "API_ACCESS_TOKEN", "QUERY_JSON", "API_REGION"}

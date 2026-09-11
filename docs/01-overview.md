@@ -7,7 +7,7 @@
 
 ## 一句話定位
 
-**POC Skill Generator** 是一套「對話式 Skill 產生器」：使用者透過聊天，與 AI 一步步把一個想法淬煉成一份**可被 AI Router 正確路由、可被 Agent 正確執行的 `SKILL.md`**，並在過程中即時測試與修正，最後存進共用的 Skill 知識庫（Azure SQL + Azure Blob）。
+**Foundry Skill Generator** 是一套「對話式 Skill 產生器」：使用者透過聊天，與 AI 一步步把一個想法淬煉成一份**可被 AI Router 正確路由、可被 Agent 正確執行的 `SKILL.md`**，並在過程中即時測試與修正，最後存進共用的 Skill 知識庫（Azure SQL + Azure Blob）。
 
 技術上是一個在**本機執行**的 Web 應用：
 

@@ -5,10 +5,12 @@ import pytest
 from backend.models import (
     ChatMessage,
     Delegation,
+    IterationReflection,
     Material,
     MaterialKind,
     Mode,
     MessageRole,
+    PatchRecord,
     Session,
     SkillKind,
     Stage,
@@ -21,6 +23,7 @@ from backend.state_machine import (
     _format_latest_test_run,
     build_system_prompt,
     check_quality_gates,
+    open_fix_items,
     transition,
 )
 
@@ -455,3 +458,74 @@ def test_no_materials_means_no_materials_block() -> None:
 
     assert "<<<BEGIN MATERIAL" not in prompt
     assert "Tier 1 -- REPRODUCE, DO NOT PARAPHRASE" not in prompt
+
+
+def _reflected_session(*items: str) -> Session:
+    session = Session(current_stage=Stage.REFINE)
+    session.iteration_reflections.append(
+        IterationReflection(what_to_change=list(items), raw="reflection")
+    )
+    return session
+
+
+def _record_patch(session: Session, *addresses: str, applied_at: str | None = None) -> None:
+    record = PatchRecord(target_file="SKILL.md", v4a_patch="", addresses=list(addresses))
+    if applied_at:
+        record.applied_at = applied_at
+    session.patch_history.append(record)
+
+
+def test_open_fix_items_are_empty_without_a_reflection() -> None:
+    assert open_fix_items(Session(current_stage=Stage.REFINE)) == ([], [])
+
+
+def test_open_fix_items_close_only_what_a_patch_addresses() -> None:
+    session = _reflected_session("fix one", "fix two", "fix three")
+    _record_patch(session, "fix two")
+
+    closed, still_open = open_fix_items(session)
+
+    assert closed == ["fix two"]
+    assert still_open == ["fix one", "fix three"]
+
+
+def test_open_fix_items_match_on_normalized_whitespace_and_case() -> None:
+    session = _reflected_session("Fix   one")
+    _record_patch(session, "fix one")
+
+    assert open_fix_items(session) == (["Fix   one"], [])
+
+
+def test_open_fix_items_ignore_patches_applied_before_the_reflection() -> None:
+    session = _reflected_session("fix one")
+    _record_patch(session, "fix one", applied_at="2000-01-01T00:00:00+00:00")
+
+    assert open_fix_items(session) == ([], ["fix one"])
+
+
+def test_open_fix_items_only_track_the_latest_reflection() -> None:
+    session = _reflected_session("old fix")
+    session.iteration_reflections.append(
+        IterationReflection(what_to_change=["new fix"], raw="second")
+    )
+
+    assert open_fix_items(session) == ([], ["new fix"])
+
+
+def test_prompt_carries_the_open_fix_list_in_refine() -> None:
+    session = _reflected_session("fix one", "fix two")
+    _record_patch(session, "fix one")
+
+    prompt = build_system_prompt(session)
+
+    assert "## Open Fix List" in prompt
+    assert "1 of 2 fix item(s)" in prompt
+    assert "- [x] fix one" in prompt
+    assert "- [ ] fix two" in prompt
+
+
+def test_prompt_omits_the_open_fix_list_outside_refine_and_test() -> None:
+    session = _reflected_session("fix one")
+    session.current_stage = Stage.DONE
+
+    assert "## Open Fix List" not in build_system_prompt(session)

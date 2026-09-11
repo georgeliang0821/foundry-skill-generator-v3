@@ -489,13 +489,99 @@ test.describe("UI refresh — warm palette, icons, clarity", () => {
       win.__sgv2.renderSession();
     });
     await openTab(page, "materials");
+    await page.getByTestId("add-material-row-button").click();
+
+    // Only the three kinds that actually differ are offered, and the tier hint tracks them.
+    const kindSelect = page.getByTestId("material-kind");
+    await expect(kindSelect.locator("option")).toHaveCount(3);
+    await expect(page.getByTestId("material-kind-hint")).toContainText("Tier 3");
+    await kindSelect.selectOption("code");
+    await expect(page.getByTestId("material-kind-hint")).toContainText("Tier 1");
+    await kindSelect.selectOption("text");
+
     await page.getByTestId("material-input").fill("Hello from spec");
-    await page.locator("#addMaterialBtn").click();
+    await page.getByTestId("attach-material-button").click();
 
     const item = page.locator('[data-testid="saved-material-item"]').first();
     await expect(item).toBeVisible();
     await expect(item).toContainText("Hello from spec");
     expect(postedBody).toMatchObject({ kind: "text", content: "Hello from spec" });
+  });
+
+  // Regression: startSession() clears the pending list, so sending the very first
+  // message used to drop a material attached before the session existed.
+  test("Materials CRUD — a material attached before the session survives the first chat turn", async ({ page }) => {
+    const sessionBody = (materials: unknown[]) => ({
+      id: "spec-pending-session",
+      mode: "new",
+      current_stage: "INTAKE",
+      conversation: [],
+      pending_tool_calls: [],
+      verify_checklist: {},
+      materials,
+      current_skill: { skill_md: "", version_hash: "" },
+      patch_history: [],
+      test_runs: [],
+    });
+    const savedMaterial = {
+      id: "mat-pending",
+      kind: "code",
+      content: "print('pending')",
+      created_at: "2026-05-27T09:00:00Z",
+    };
+    let chatBody: { materials?: unknown[] } | null = null;
+
+    await page.route("**/api/sessions", (route) => {
+      const method = route.request().method();
+      if (method === "GET") {
+        return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      }
+      if (method !== "POST") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(sessionBody([])),
+      });
+    });
+    await page.route("**/api/sessions/spec-pending-session/chat", (route) => {
+      chatBody = JSON.parse(route.request().postData() || "{}");
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ events: [{ event: "text_delta", data: { delta: "ok" } }] }),
+      });
+    });
+    await page.route("**/api/sessions/spec-pending-session", (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(sessionBody([savedMaterial])),
+      });
+    });
+
+    await openApp(page);
+    await page.evaluate(() => {
+      const win = window;
+      win.__sgv2.session = null;
+      win.__sgv2.attachedMaterials = [];
+      win.__sgv2.renderSession();
+    });
+    await openTab(page, "materials");
+    await page.getByTestId("add-material-row-button").click();
+    await page.getByTestId("material-kind").selectOption("code");
+    await page.getByTestId("material-input").fill("print('pending')");
+    await page.getByTestId("attach-material-button").click();
+    await expect(page.locator('.material-item-pending')).toHaveCount(1);
+
+    await page.getByTestId("message-input").fill("Build a skill from this.");
+    await page.getByTestId("send-button").click();
+    await expect(page.getByTestId("send-button")).toHaveText("Send");
+
+    expect(chatBody?.materials).toMatchObject([{ kind: "code", content: "print('pending')" }]);
+    await openTab(page, "materials");
+    await expect(page.locator('[data-testid="saved-material-item"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="saved-material-item"]').first()).toContainText("pending");
   });
 
   test("Materials CRUD — edit mode replaces preview with form and PUT updates the item", async ({ page }) => {

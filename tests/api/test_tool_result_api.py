@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.models import PendingToolCall
+from backend.models import IterationReflection, PendingToolCall
 
 
 def test_accept_propose_patch_updates_content_and_patch_history(client, backend_main) -> None:
@@ -37,6 +37,79 @@ def test_accept_propose_patch_updates_content_and_patch_history(client, backend_
     assert body["patch_history"][0]["content_before"] == "hello"
     assert body["patch_history"][0]["content_after"] == "hi"
     assert body["pending_tool_calls"] == []
+
+
+def _accept_patch(client, session, *, call_id, old, new, addresses):
+    session.pending_tool_calls.append(
+        PendingToolCall(
+            call_id=call_id,
+            tool="propose_patch",
+            args={
+                "target_file": "SKILL.md",
+                "patch": f"""*** Begin Patch
+*** Update File: SKILL.md
+@@ {old}
+-{old}
++{new}
+*** End Patch""",
+                "reason": "fix",
+                "addresses": addresses,
+            },
+        )
+    )
+    return client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": call_id, "result": {"action": "accept"}},
+    )
+
+
+def test_accepted_patch_reports_remaining_open_fix_items(client, backend_main) -> None:
+    session = backend_main.Session()
+    session.current_skill.skill_md = "one"
+    session.iteration_reflections.append(
+        IterationReflection(
+            what_went_wrong=["a", "b", "c"],
+            what_to_change=["fix one", "fix two", "fix three"],
+            raw="reflection",
+        )
+    )
+    backend_main.sessions[session.id] = session
+
+    body = _accept_patch(
+        client, session,
+        call_id="p1", old="one", new="two", addresses=["fix one"],
+    ).json()
+
+    assert body["patch_history"][0]["addresses"] == ["fix one"]
+    notes = [m for m in body["conversation"] if m["role"] == "system" and "fix item(s)" in m["content"]]
+    assert notes, body["conversation"]
+    assert "2 of 3 fix item(s)" in notes[-1]["content"]
+    assert notes[-1]["metadata"]["open_fixes"] == ["fix two", "fix three"]
+
+    _accept_patch(
+        client, session,
+        call_id="p2", old="two", new="three", addresses=["fix two"],
+    )
+    body = _accept_patch(
+        client, session,
+        call_id="p3", old="three", new="four", addresses=["fix three"],
+    ).json()
+
+    notes = [m for m in body["conversation"] if m["role"] == "system" and "fix item(s)" in m["content"]]
+    assert "All 3 fix item(s) from the latest reflection are addressed" in notes[-1]["content"]
+
+
+def test_accepted_patch_without_reflection_adds_no_open_fix_note(client, backend_main) -> None:
+    session = backend_main.Session()
+    session.current_skill.skill_md = "one"
+    backend_main.sessions[session.id] = session
+
+    body = _accept_patch(
+        client, session,
+        call_id="p1", old="one", new="two", addresses=[],
+    ).json()
+
+    assert not [m for m in body["conversation"] if "fix item(s)" in m["content"]]
 
 
 def test_tool_result_missing_call_returns_404(client, backend_main) -> None:

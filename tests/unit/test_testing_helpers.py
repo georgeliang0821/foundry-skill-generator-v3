@@ -109,6 +109,80 @@ def test_run_selection_tests_calculates_hit_rates(monkeypatch: pytest.MonkeyPatc
     assert len(run.negative_results) == 1
 
 
+_PREPARED_SKILL_MD = """---
+name: demo-skill
+description: Demo
+---
+
+## Environment Variables
+
+- `API_HOST` (required): the host.
+
+## API Reference
+
+```python
+import os
+
+
+def main() -> None:
+    print(os.environ["API_HOST"])
+```
+"""
+
+
+def test_run_selection_tests_lints_the_code_the_runtime_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prepared script is a different artifact from the sample code block."""
+    prepared = 'import os\n\n\ndef main() -> None:\n    print(os.environ.get("API_HOST", ""))\n'
+
+    def fake_runner(positive_samples, negative_samples, skill_name, delegated_token, run_mode=ROUTE_ONLY):
+        positive = [
+            _evaluate_apim_result(
+                query,
+                {"skills_referenced": [skill_name], "response_text": prepared},
+                skill_name,
+                skill_name,
+                run_mode=run_mode,
+            )
+            for query in positive_samples
+        ]
+        return positive, []
+
+    monkeypatch.setattr("backend.testing._run_apim_tests_sequential_sync", fake_runner)
+
+    run = run_selection_tests(_PREPARED_SKILL_MD, ["use demo"], [], version_hash="v1")
+
+    result = run.positive_results[0]
+    assert result.apim_response == prepared
+    assert [issue["rule"] for issue in result.prepared_code_lint] == ["D1", "D1"]
+
+
+def test_prepared_code_lint_is_empty_without_a_prepared_script(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_runner(positive_samples, negative_samples, skill_name, delegated_token, run_mode=ROUTE_ONLY):
+        return (
+            [
+                _evaluate_apim_result(
+                    query,
+                    {"skills_referenced": [skill_name]},
+                    skill_name,
+                    skill_name,
+                    run_mode=run_mode,
+                )
+                for query in positive_samples
+            ],
+            [],
+        )
+
+    monkeypatch.setattr("backend.testing._run_apim_tests_sequential_sync", fake_runner)
+
+    run = run_selection_tests(_PREPARED_SKILL_MD, ["use demo"], [], version_hash="v1")
+
+    assert run.positive_results[0].prepared_code_lint == []
+
+
 def test_test_request_appends_audit_instruction() -> None:
     request = _test_request("Help me use demo", mode=EXECUTE)
 
