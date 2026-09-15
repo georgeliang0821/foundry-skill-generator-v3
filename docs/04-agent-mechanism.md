@@ -78,6 +78,22 @@ Scenario 讀取 child 的契約並記錄 delegation `input_bindings`；不可覆
 重建欄位 schema。Host 先收集缺值，再依 child 契約送出資料；child 仍需再次驗證。
 沒有明確來源契約的舊 child 維持既有 credentials 行為，不能由 parent 單方面改成 request。
 
+#### Host 呼叫 Child 時的差異
+
+| Child 宣告 | Host 準備輸入 | Child Coding Agent／Python 如何取值 |
+| --- | --- | --- |
+| `source: request` | 把 `operation: READ` 放進 request 的明確資料區。 | Coding Agent 從當次 request 取得值，填入 `request_inputs` 樣板；Python 再讀取它。 |
+| `source: credentials` | 把值放入指定 credentials key；若指定 `payload_field`，則放入該 key 的 JSON 字串中對應的頂層成員。 | Python 從對應環境變數讀取；有指定 JSON member 才依該映射解析成員。 |
+
+同一個 child 可以混合來源，但每個欄位都必須依自己的宣告放置，不能因為 `operation`
+走 request 就把其他欄位一起移入 request。缺值時遵循 child 的 `[NEEDS_INFO]` 契約，
+不得自行切換來源補值。
+
+這張表描述 scenario 指示 Host 與 Child 應遵循的行為，不是 runtime 看到 `source`
+就自動搬移資料。來源宣告、scenario 呼叫指示及 child 的取值／驗證程式必須一致。
+
+#### 契約檢查與驗證範圍
+
 Lint `A13` 拒絕無效契約，`A14` 拒絕缺少樣板、宣告與樣板綁定不符、缺少對應缺值代碼，
 以及可直接執行的 request 範例值。這些是靜態結構檢查，**不是完整控制流程或無副作用證明**。
 既有 `A12` 外部呼叫結果檢查仍為 advisory。
