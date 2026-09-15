@@ -44,9 +44,21 @@ Copy-Item .env.example .env
 
 #### 選用功能：request 業務輸入
 
-`SGV2_ENABLE_REQUEST_INPUTS` 預設關閉。需要使用逐欄位的 request / credentials
-混合來源時，在 `.env` 設定 `SGV2_ENABLE_REQUEST_INPUTS=true`，重新啟動後端並重新整理頁面。
-`1`、`true`、`yes` 均可啟用；`GET /api/features` 回報目前的有效設定。
+`SGV2_ENABLE_REQUEST_INPUTS` **預設開啟，未設定時也會啟用**。它控制是否允許 request
+來源，不是替所有欄位二選一；使用者仍可逐欄位選 credentials、request 或混合來源。
+這是本專案自訂設定，不會自動出現在 Windows 環境變數清單中。
+
+設定位置是專案根目錄的 `.env`；`.env.example` 已列出預設值：
+
+```dotenv
+SGV2_ENABLE_REQUEST_INPUTS=true
+```
+
+需要暫停 request 來源的撰寫與確認時（例如目標 runtime 相容性待處理），改成 `false`。
+`1`、`true`、`yes` 均可啟用。更改後重新啟動後端並重新整理頁面；
+`GET /api/features` 回報目前的有效設定。本機預設網址為
+<http://localhost:6274/api/features>，啟用時回傳 `{"request_inputs_enabled": true}`。
+此開關不會停用已發布 Skill 在外部 runtime 的執行。
 
 關閉時仍可保存待討論的來源設定，但不能確認或儲存使用 request 的 Skill。
 現有未宣告 `input-bindings` 的 Skill 不會自動遷移；真正的認證、OBO token、平台身分

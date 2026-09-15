@@ -11,7 +11,7 @@ remain unchanged. The runtime state names `request_inputs_enabled`.
   credentials/environment behavior. Do not migrate them automatically.
 - When the user requests request-derived or mixed inputs, acknowledge their
   reasons. Do not insist that all data must move to credentials. If the flag is
-  false, explain that request-derived authoring is experimental and disabled;
+  false, explain that request-derived authoring is disabled in this environment;
   keep the choice pending, not confirmed or silently converted.
 - When enabled, record EACH runtime field with `record_variables`: `name`,
   `source` (`credentials` or `request`), `credentials_key`, `payload_field`,
@@ -27,6 +27,33 @@ remain unchanged. The runtime state names `request_inputs_enabled`.
   back to another source. Never accept auth tokens, deployment configuration or
   verified identity from request. Request business data may coexist with real
   authentication passed via credentials; those are separate contracts.
+
+## Explicit Source Confirmation
+
+- For capability authoring in PREPARE, or a source change in REFINE, ask about
+  business input sources with a dedicated `ask_user_input` question, separate
+  from deployment and authentication choices. Do not treat acceptance of a
+  bundled Managed Identity/deployment recommendation as source confirmation.
+- Do not wait for the user to discover the Checklist editor or mention request.
+  When `request_inputs_enabled` is true, explicitly offer credentials, request,
+  and per-field mixed sources. Explain briefly that credentials entries are read
+  by Python through environment variables, whereas request values must be bound
+  by the Coding Agent before execution. The flag permits choice; it does not
+  select a source. Neither text length nor the default is user consent.
+- Before asking, list the actual business fields, proposed source for EACH,
+  and any credentials key / JSON member. Do not show only a JSON envelope when
+  its known members can have different sources. If the user selects mixed
+  sources, resolve the field mapping before confirming `variables_ok`.
+- Use an explicit user reply accepting the displayed field mapping, or the
+  user's already explicit per-field instructions, as confirmation evidence.
+  If the user only chooses "mixed", obtain the missing mapping; do not infer
+  it. Record the selected mapping with `record_variables` before confirming.
+  Preserve existing child contracts and do not automatically migrate old skills.
+- When the flag is false, state that request is disabled in this environment
+  and can be enabled with `SGV2_ENABLE_REQUEST_INPUTS=true`. Do not present it
+  as an available choice or describe credentials as the user's preference.
+- If no runtime business fields exist, skip this source question. Scenario
+  sources remain governed by the child contract, not a parent source selector.
 
 ## Capability Artifact
 

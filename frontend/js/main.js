@@ -1939,8 +1939,8 @@ function variableRowHtml(kind, v = null) {
         <button type="button" class="icon-button spl-del" data-var-del title="Remove">\u00d7</button>
         <div class="var-source-fields">
           <label>Input source <select class="var-input var-source" aria-label="Input source">
-            <option value="credentials"${source === "credentials" ? " selected" : ""}>Program-readable input</option>
-            <option value="request"${source === "request" ? " selected" : ""}${!requestInputsEnabled ? " disabled" : ""}>Request (experimental)</option>
+            <option value="credentials"${source === "credentials" ? " selected" : ""}>Credentials (key/value)</option>
+            <option value="request"${source === "request" ? " selected" : ""}${!requestInputsEnabled ? " disabled" : ""}>${requestInputsEnabled ? "Request" : "Request (disabled)"}</option>
           </select></label>
           <label class="var-binding-field"${source === "request" ? " hidden" : ""}>Input data field <input class="var-input var-credentials-key" aria-label="Input data field" value="${escapeHtml(v?.credentials_key || "")}" placeholder="Same as variable name" /></label>
           <label class="var-binding-field"${source === "request" ? " hidden" : ""}>JSON member <input class="var-input var-payload-field" aria-label="JSON member" value="${escapeHtml(v?.payload_field || "")}" placeholder="Empty for raw text" /></label>

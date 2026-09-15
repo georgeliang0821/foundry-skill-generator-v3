@@ -21,7 +21,7 @@ class _BindingLoader(yaml.SafeLoader):
 
 
 def request_inputs_enabled() -> bool:
-    return os.getenv("SGV2_ENABLE_REQUEST_INPUTS", "").strip().lower() in {"1", "true", "yes"}
+    return os.getenv("SGV2_ENABLE_REQUEST_INPUTS", "true").strip().lower() in {"1", "true", "yes"}
 
 
 def parse_input_bindings(skill_md: str) -> list[InputBinding] | None:
@@ -78,7 +78,7 @@ def input_contract_errors(session: Session, skill_md: str | None = None) -> list
         if len({binding.name for binding in bindings}) != len(bindings):
             errors.append("Each runtime input must have exactly one source.")
         if any(binding.source == "request" for binding in bindings) and not request_inputs_enabled():
-            errors.append("Request-derived business inputs are experimental; enable SGV2_ENABLE_REQUEST_INPUTS for validation first.")
+            errors.append("Request-derived business inputs are disabled in this environment; set SGV2_ENABLE_REQUEST_INPUTS=true to enable them.")
     else:
         for delegation in session.prepare_brief.delegation:
             child_md = session.child_full_md.get(delegation.child_skill, "")

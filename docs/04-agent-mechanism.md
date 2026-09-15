@@ -39,10 +39,15 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 
 ### 業務輸入來源：credentials / request
 
-啟用 `SGV2_ENABLE_REQUEST_INPUTS` 後，runtime 業務欄位可各自指定 `source`。
+`SGV2_ENABLE_REQUEST_INPUTS` 預設開啟，runtime 業務欄位可各自指定 `source`。
 例如 operation 來自 credentials，而原始 description 來自 request；每個欄位只有一個來源，
 不合併衝突副本，也不從另一來源 fallback。設定在 PREPARE 中記錄，來源變更會清除確認。
 `aca_env`、`obo_token` 與 `platform_identity` 不能指定 request 來源。
+
+對話指示要求 Agent 將業務輸入來源與部署／身分設定分開詢問，先列出每個業務欄位及
+來源建議，再提供 credentials、request 或逐欄位混合的選擇。不得把接受整套 Managed
+Identity 建議當成來源確認。若只選了「混合」但未確定欄位對應，必須先補問再確認。
+這是 Agent 的對話規則；靜態 prompt 測試不等於已驗證每次真實模型回覆都遵守。
 
 Capability 在既有 `## Required Inputs` 中保存唯一的機器可讀來源清單：
 

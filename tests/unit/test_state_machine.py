@@ -529,9 +529,29 @@ def test_request_inputs_gate_preserves_pending_state(monkeypatch) -> None:
     session = _fully_prepared_session()
     session.prepare_brief.variables = [SkillVariable(name="description", source="request")]
     monkeypatch.delenv("SGV2_ENABLE_REQUEST_INPUTS", raising=False)
+    assert check_quality_gates(session) == []
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "false")
     assert any("SGV2_ENABLE_REQUEST_INPUTS" in error for error in check_quality_gates(session))
     monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
     assert check_quality_gates(session) == []
+
+
+@pytest.mark.parametrize("setting, enabled", [(None, True), ("true", True), ("1", True), ("yes", True), ("false", False), ("0", False)])
+def test_request_input_availability_and_source_confirmation(setting, enabled, monkeypatch) -> None:
+    from backend.input_contract import request_inputs_enabled
+
+    if setting is None:
+        monkeypatch.delenv("SGV2_ENABLE_REQUEST_INPUTS", raising=False)
+    else:
+        monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", setting)
+    assert request_inputs_enabled() is enabled
+    prompt = build_system_prompt(Session(current_stage=Stage.PREPARE))
+    assert f"request_inputs_enabled: {str(enabled).lower()}" in prompt
+    assert "dedicated `ask_user_input` question" in prompt
+    assert "explicitly offer credentials, request," in prompt
+    assert "Do not show only a JSON envelope" in prompt
+    assert "Record the selected mapping with `record_variables` before confirming" in prompt
+    assert "Neither text length nor the default is user consent" in prompt
 
 
 @pytest.mark.parametrize("kind", [SkillKind.CAPABILITY, SkillKind.SCENARIO])

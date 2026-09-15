@@ -295,7 +295,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "description": {"type": "string", "description": "What the variable is and, for runtime, how to obtain it from the user."},
                             "example": {"type": "string", "description": "An example value (mainly for runtime). Never copied verbatim into SKILL.md."},
                             "required": {"type": "boolean"},
-                            "source": {"type": "string", "enum": ["credentials", "request"], "description": "Runtime business input source. Default credentials. Request requires the experimental flag; never use it for auth or deployment variables."},
+                            "source": {"type": "string", "enum": ["credentials", "request"], "description": "Runtime business input source. Default credentials is not user confirmation. Explicitly confirm per-field sources separately from auth/deployment. Request is available when request_inputs_enabled is true; never use it for auth or deployment variables."},
                             "credentials_key": {"type": "string", "description": "Runtime only: entry under credentials; defaults to name. Empty for request."},
                             "payload_field": {"type": "string", "description": "Runtime only: top-level JSON member within that entry, or empty for its raw string. Empty for request."},
                         },

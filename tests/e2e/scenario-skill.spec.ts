@@ -73,6 +73,8 @@ test("runtime input sources persist without changing authentication fields", asy
     await checkpoint.locator(":scope > summary").click();
   }
   const row = page.locator('[data-var-kind="runtime"]').first();
+  await expect(row.locator('.var-source option[value="credentials"]')).toHaveText("Credentials (key/value)");
+  await expect(row.locator('.var-source option[value="request"]')).toHaveText("Request");
   await row.locator(".var-name").fill("description");
   await row.locator(".var-desc").fill("Complete original report text");
   await row.locator(".var-source").selectOption("request");
@@ -103,4 +105,17 @@ test("runtime input sources persist without changing authentication fields", asy
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
   await page.screenshot({ path: "test-results/input-sources-mobile.png", fullPage: true });
+});
+
+test("disabled request source is labelled and cannot be selected", async ({ page }) => {
+  await page.route("**/api/features", (route) => route.fulfill({
+    json: { request_inputs_enabled: false },
+  }));
+  await openApp(page);
+  await openTab(page, "checklist");
+  const source = page.locator('[data-var-kind="runtime"] .var-source').first();
+  await expect(source).toHaveValue("credentials");
+  await expect(source.locator('option[value="request"]')).toHaveText("Request (disabled)");
+  await expect(source.locator('option[value="request"]')).toHaveJSProperty("disabled", true);
+  await expect(source.locator('option[value="credentials"]')).toHaveJSProperty("disabled", false);
 });
