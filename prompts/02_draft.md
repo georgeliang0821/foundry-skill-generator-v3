@@ -54,6 +54,10 @@ user's accept/reject.
      whose downstream accepts an OBO resource token must NOT carry it, because
      an identity rule with nothing to govern trains the reader to skip it.
   9. `## API Reference / Sample Code` - the sample code MUST stay consistent
+      with the Business Input Sources rules for explicit input-bindings. The
+      environment-only recipe below is for legacy inputs without a binding map,
+      not a requirement to move request-sourced fields into credentials. For
+      legacy inputs the sample must stay consistent
      with the variable sections above: read every `## Environment Variables`
      value and every `## OBO Token Scopes` token via `os.environ["NAME"]` by
      index - never `.get()`, `os.getenv`, a fallback or a default, and never

@@ -76,6 +76,10 @@ routing -- routing is the frontmatter `description`):
 - `## Skill 身分使用規範` -- present if and only if the skill declares a
   `platform_identity` variable. Reproduce the four rules verbatim (see below).
 - `## API Reference / Sample Code` -- the sample code must actually USE every
+  declared input according to the Business Input Sources contract. Explicit
+  `input-bindings` may use request, credentials, or mixed business sources; the
+  following environment-only recipe applies to LEGACY inputs without bindings.
+  For those legacy inputs, read every
   declared variable: read each `aca_env` via `os.environ["NAME"]`, consume
   each `obo_token`, and read each `runtime` input. Keep it consistent with the
   Environment Variables / OBO Token Scopes / Required Inputs sections; never

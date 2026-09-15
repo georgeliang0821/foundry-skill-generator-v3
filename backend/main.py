@@ -51,6 +51,7 @@ from .e2e import (
 )
 from .material_fidelity import fidelity_warning_count, scan_material_fidelity
 from .skill_lint import lint_skill, lint_warning_count
+from .input_contract import input_contract_errors, request_inputs_enabled
 from .models import (
     ApplyPatchRequest,
     ApplyPatchResponse,
@@ -928,6 +929,12 @@ def save_skill_dual_write(
         detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in errors)
         raise HTTPException(status_code=400, detail=f"Topology validation failed:\n{detail}")
 
+    if kind is SkillKind.SCENARIO:
+        _load_child_full_md(session)
+    contract_errors = input_contract_errors(session, session.current_skill.skill_md)
+    if contract_errors:
+        raise HTTPException(status_code=400, detail="\n".join(contract_errors))
+
     # The host executes the sample code verbatim, so a block that does not parse
     # is never shippable. Every other lint rule stays advisory.
     lint_errors = [issue for issue in _session_lint(session, session.current_skill.skill_md) if issue.severity == "error"]
@@ -1670,6 +1677,12 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         confirmed = bool(args.get("confirmed", False))
         evidence = (args.get("evidence") or "").strip()
         if item and item in session.prepare_brief.verify_checklist:
+            if confirmed and item in {"variables_ok", "delegation_ok"}:
+                if item == "delegation_ok":
+                    _load_child_full_md(session)
+                contract_errors = input_contract_errors(session)
+                if contract_errors:
+                    raise ValueError("\n".join(contract_errors))
             _assert_children_before_routing(session, item, confirmed)
             session.prepare_brief.verify_checklist[item] = confirmed
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1821,6 +1834,9 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
                 payload = dict(item)
                 payload["name"] = name
                 parsed_vars.append(SkillVariable.model_validate(payload))
+            if _variable_content_signature(session.prepare_brief.variables) != _variable_content_signature(parsed_vars):
+                session.prepare_brief.verify_checklist["variables_ok"] = False
+                session.prepare_brief.verify_evidence.pop("variables_ok", None)
             session.prepare_brief.variables = parsed_vars
         session.prepare_brief.last_updated = now_ms()
         session.touch()
@@ -1840,6 +1856,9 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
                 payload = dict(item)
                 payload["child_skill"] = child
                 parsed_delegation.append(Delegation.model_validate(payload))
+            if session.prepare_brief.delegation != parsed_delegation:
+                session.prepare_brief.verify_checklist["delegation_ok"] = False
+                session.prepare_brief.verify_evidence.pop("delegation_ok", None)
             session.prepare_brief.delegation = parsed_delegation
             # children is the whitelist of every skill the flow may use, so it
             # is the delegation set plus the dependencies the scenario merely
@@ -2278,6 +2297,11 @@ def delete_session_material(session_id: str, material_id: str, upn: str = Depend
         material_count=len(session.materials),
     )
     return session
+
+
+@app.get("/api/features")
+def feature_flags() -> dict[str, bool]:
+    return {"request_inputs_enabled": request_inputs_enabled()}
 
 
 def required_env(name: str) -> str:
@@ -3165,6 +3189,9 @@ def _variable_content_signature(variables: list) -> list[tuple]:
                 str(d.get("description", "")).strip(),
                 str(d.get("example", "")).strip(),
                 bool(d.get("required", True)),
+                str(d.get("source", "credentials")),
+                str(d.get("credentials_key", "")),
+                str(d.get("payload_field", "")),
             )
         )
     return sorted(sig)
@@ -3410,7 +3437,8 @@ def update_session_variables(session_id: str, req: VariablesUpdateRequest, upn: 
                 content=(
                     "The user edited the PREPARE variables and a draft already exists. "
                     "Propose ONE narrow patch to sync the '## Prerequisites' (env variables) "
-                    "and '## Required Inputs' (runtime variables) sections of SKILL.md with the "
+                    "and '## Required Inputs' (runtime variables and input-bindings), the "
+                    "'[NEEDS_INFO]' contract and sample code binding/validation with the "
                     "updated variables. A reuse/add (in_aca) status flip is NOT a content change "
                     "and needs no patch."
                 ),

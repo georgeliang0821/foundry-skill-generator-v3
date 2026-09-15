@@ -314,6 +314,24 @@ class NegativeSample(BaseModel):
     why_not_this: str = ""  # why it must NOT select the current skill
 
 
+class InputBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    source: Literal["credentials", "request"] = "credentials"
+    credentials_key: str = ""
+    payload_field: str = ""
+    required: bool = True
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "InputBinding":
+        if self.source == "request" and (self.credentials_key or self.payload_field):
+            raise ValueError("A request input cannot also declare a credentials key or payload field.")
+        if self.name.upper().startswith("EAA_VERIFIED_") or self.credentials_key.upper().startswith("EAA_VERIFIED_"):
+            raise ValueError("Verified identity cannot be declared as caller input.")
+        return self
+
+
 class SkillVariable(BaseModel):
     """A variable the skill depends on, confirmed in the variables_ok checkpoint.
 
@@ -345,6 +363,21 @@ class SkillVariable(BaseModel):
     description: str = ""  # what it is and, for runtime, how to obtain it
     example: str = ""  # example value (mainly runtime); never copied into SKILL.md
     required: bool = True
+
+    source: Literal["credentials", "request"] = "credentials"
+    credentials_key: str = ""
+    payload_field: str = ""
+
+    @model_validator(mode="after")
+    def validate_input_source(self) -> "SkillVariable":
+        if self.kind == "runtime":
+            if self.name:
+                InputBinding.model_validate(self.model_dump(include={
+                    "name", "source", "credentials_key", "payload_field", "required",
+                }))
+        elif self.source != "credentials" or self.credentials_key or self.payload_field:
+            raise ValueError("Only runtime business inputs can declare an input source.")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -384,6 +417,7 @@ class Delegation(BaseModel):
     # The single `credentials` key the host puts the serialized payload under.
     credentials_key: str = ""
     # The child's `##` section names this scenario points at with `fetch_skill`.
+    input_bindings: list[InputBinding] = Field(default_factory=list)
     # The field contract lives in those sections and is never copied here.
     sections: list[str] = Field(default_factory=list)
     # Things the HOST must do itself because the child cannot (e.g. read the

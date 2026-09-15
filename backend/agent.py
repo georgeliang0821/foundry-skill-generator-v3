@@ -12,7 +12,7 @@ from typing import Any
 
 from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
 from .material_fidelity import materials_prompt_chars
-from .models import PendingToolCall, Session
+from .models import InputBinding, PendingToolCall, Session
 from .state_machine import build_system_prompt, load_prompt
 
 
@@ -295,6 +295,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "description": {"type": "string", "description": "What the variable is and, for runtime, how to obtain it from the user."},
                             "example": {"type": "string", "description": "An example value (mainly for runtime). Never copied verbatim into SKILL.md."},
                             "required": {"type": "boolean"},
+                            "source": {"type": "string", "enum": ["credentials", "request"], "description": "Runtime business input source. Default credentials. Request requires the experimental flag; never use it for auth or deployment variables."},
+                            "credentials_key": {"type": "string", "description": "Runtime only: entry under credentials; defaults to name. Empty for request."},
+                            "payload_field": {"type": "string", "description": "Runtime only: top-level JSON member within that entry, or empty for its raw string. Empty for request."},
                         },
                         "required": ["name", "kind"],
                         "additionalProperties": False,
@@ -332,6 +335,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "properties": {
                             "child_skill": {"type": "string", "description": "The existing capability skill that performs the work. It must already exist and be accessible; a scenario session never creates its child."},
                             "credentials_key": {"type": "string", "description": "The single key under `credentials` that the host puts the serialized payload under, e.g. hr_leave_json."},
+                            "input_bindings": {"type": "array", "items": InputBinding.model_json_schema(), "description": "Copy the child's explicit input-bindings contract exactly. Supports credentials, request, or mixed sources. When used, leave the legacy credentials_key empty. Never invent or override child sources."},
                             "sections": {
                                 "type": "array",
                                 "items": {"type": "string"},

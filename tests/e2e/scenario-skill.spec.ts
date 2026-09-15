@@ -61,3 +61,46 @@ test("creates, validates, saves, and tests a scenario skill", async ({ page, req
   expect(session.test_runs[0].scenario_layers.map((layer: { layer: string }) => layer.layer)).toEqual(["L1", "L2", "L3"]);
   expect(session.test_runs[0].scenario_layers.every((layer: { passed: boolean }) => layer.passed)).toBe(true);
 });
+
+test("runtime input sources persist without changing authentication fields", async ({ page, request }) => {
+  await page.route("**/api/features", (route) => route.fulfill({
+    json: { request_inputs_enabled: true },
+  }));
+  await openApp(page);
+  await openTab(page, "checklist");
+  const checkpoint = page.locator('[data-checkpoint="variables_ok"]');
+  if (await checkpoint.getAttribute("open") === null) {
+    await checkpoint.locator(":scope > summary").click();
+  }
+  const row = page.locator('[data-var-kind="runtime"]').first();
+  await row.locator(".var-name").fill("description");
+  await row.locator(".var-desc").fill("Complete original report text");
+  await row.locator(".var-source").selectOption("request");
+  await expect(row.locator(".var-credentials-key")).toBeHidden();
+  const savedResponse = page.waitForResponse((response) => response.url().endsWith("/variables") && response.request().method() === "POST");
+  await page.locator("[data-var-save]").click();
+  expect((await savedResponse).ok()).toBe(true);
+  await expect(row.locator(".var-source")).toHaveValue("request");
+  const sessionId = await currentSessionId(page);
+  const session = await readSession(request, sessionId);
+  expect(session.prepare_brief.variables).toContainEqual(expect.objectContaining({
+    name: "description", source: "request", credentials_key: "", payload_field: "",
+  }));
+  const withAuth = await request.post(`/api/sessions/${sessionId}/variables`, { data: {
+    variables: [...session.prepare_brief.variables, { name: "API_TOKEN", kind: "obo_token", description: "Service authentication" }],
+  } });
+  expect(withAuth.ok()).toBe(true);
+  await page.reload();
+  await page.getByRole("combobox", { name: "Session", exact: true }).selectOption(sessionId);
+  await openTab(page, "checklist");
+  await expect(page.locator('[data-var-kind="runtime"] .var-source').first()).toHaveValue("request");
+  await expect(page.locator('[data-var-kind="obo_token"] .var-source')).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const source = page.locator('[data-var-kind="runtime"] .var-source').first();
+  await source.evaluate((element) => element.scrollIntoView({ block: "center" }));
+  const bounds = await source.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "test-results/input-sources-mobile.png", fullPage: true });
+});

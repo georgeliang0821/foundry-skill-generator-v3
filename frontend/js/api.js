@@ -53,6 +53,12 @@ export async function fetchAuthStatus() {
   return res.json();
 }
 
+export async function fetchFeatures() {
+  const res = await apiFetch("/api/features");
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
 export function startMicrosoftLogin() {
   window.location.href = apiUrl("/api/auth/login");
 }

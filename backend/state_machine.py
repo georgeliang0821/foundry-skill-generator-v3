@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from .input_contract import input_contract_errors, request_inputs_enabled
 
 from .material_fidelity import (
     CONTEXT_ONLY_KINDS,
@@ -222,6 +223,7 @@ def check_quality_gates(session: Session) -> list[str]:
     missing: list[str] = []
     brief: PrepareBrief = session.prepare_brief
     kind = SkillKind(session.skill_kind)
+    missing.extend(input_contract_errors(session))
 
     if not brief.understanding.skill_goal.strip():
         missing.append("understanding.skill_goal")
@@ -442,10 +444,12 @@ def _format_prepare_brief(session: Session) -> str | None:
             elif v.kind == "platform_identity":
                 tag = "platform_identity/injected"
             else:
-                tag = "runtime"
+                tag = f"runtime/{v.source}"
             desc = f" -- {v.description}" if v.description else ""
             ex = f" (e.g. {v.example})" if v.example else ""
             lines.append(f"- ({tag}) `{v.name}` ({req}){desc}{ex}")
+            if v.kind == "runtime" and v.source == "credentials":
+                lines.append(f"  - input data field: `{v.credentials_key or v.name}`; JSON member: `{v.payload_field or '(raw string)'}`")
     # Delegation (scenario skills; stands in for Variables)
     if brief.delegation:
         lines.append("")
@@ -454,6 +458,8 @@ def _format_prepare_brief(session: Session) -> str | None:
             lines.append(f"- child_skill: `{d.child_skill}`")
             if d.credentials_key:
                 lines.append(f"  - credentials_key: `{d.credentials_key}`")
+            for binding in d.input_bindings:
+                lines.append(f"  - input_binding: {binding.model_dump_json()}")
             for cap in d.host_capabilities:
                 lines.append(f"  - host_capability: {cap}")
             for hs in d.handshakes:
@@ -1076,6 +1082,7 @@ def build_system_prompt(session: Session) -> str:
     if addendum:
         parts.append(load_prompt(addendum))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
+    runtime_state += f"\nrequest_inputs_enabled: {str(request_inputs_enabled()).lower()}"
     if kind is SkillKind.SCENARIO:
         declared = [str(c).strip() for c in (getattr(session, "children", None) or []) if str(c).strip()]
         runtime_state += "\nchildren: " + (
@@ -1141,5 +1148,6 @@ def build_system_prompt(session: Session) -> str:
         )
     # Keep transition guidance last so the Agent ends the system message with
     # the exact outgoing edges it may choose from for this stage.
+    parts.append(load_prompt("12_input_sources.md"))
     parts.append(_format_allowed_exits(stage))
     return "\n\n".join(p for p in parts if p.strip())

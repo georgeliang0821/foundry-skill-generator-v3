@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Collection, Iterable, Mapping, Sequence
 
 from .models import SkillKind
+from .input_contract import parse_input_bindings
 from .sections import h2_sections, normalize_section
 
 ENV_SECTION = "Environment Variables"
@@ -597,8 +598,14 @@ def _is_string_shaped(annotation: str) -> bool:
 
 def _lint_capability(skill_md: str, code_override: str | None = None) -> list[LintIssue]:
     issues: list[LintIssue] = []
+    try:
+        bindings = parse_input_bindings(skill_md)
+    except ValueError as exc:
+        return [LintIssue(rule="A13", severity="error", message=str(exc))]
     code = _python_code(skill_md) if code_override is None else code_override
     if not code.strip():
+        if bindings is not None:
+            return [LintIssue(rule="A14", severity="error", message="An explicit input-bindings contract requires a Python sample that binds and validates its inputs.")]
         return issues
 
     try:
@@ -617,6 +624,8 @@ def _lint_capability(skill_md: str, code_override: str | None = None) -> list[Li
         ]
 
     issues.extend(_check_variable_closure(skill_md, tree))
+    if bindings is not None:
+        issues.extend(_check_input_bindings(skill_md, tree, code, template=code_override is None))
     issues.extend(_check_explicit_raises(tree))
     issues.extend(_check_needs_info_documented(skill_md, code, tree))
     issues.extend(_check_main_signature(tree))
@@ -632,10 +641,15 @@ def _lint_capability(skill_md: str, code_override: str | None = None) -> list[Li
 
 def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
     """A2 -- declared variables and the keys the code reads must be the same set."""
+    bindings = parse_input_bindings(skill_md)
+    runtime_names = (
+        [binding.credentials_key or binding.name for binding in bindings if binding.source == "credentials"]
+        if bindings is not None else _declared_names(_section_body(skill_md, INPUTS_SECTION))
+    )
     declared = _unique(
         _declared_names(_section_body(skill_md, ENV_SECTION))
         + _declared_names(_section_body(skill_md, OBO_SECTION))
-        + _declared_names(_section_body(skill_md, INPUTS_SECTION))
+        + runtime_names
         + _declared_names(_section_body(skill_md, IDENTITY_SECTION))
     )
     used = _env_keys(tree)
@@ -773,7 +787,7 @@ def _check_runtime_input_channel(skill_md: str, tree: ast.AST) -> list[LintIssue
     script the host runs to no effect. That is worse than the drift A2 catches
     and nothing else looked at it.
     """
-    if _runtime_env_reads(skill_md, tree):
+    if parse_input_bindings(skill_md) is not None or _runtime_env_reads(skill_md, tree):
         return []
     fields = list(_payload_field_reads(tree))
     if not fields:
@@ -791,6 +805,46 @@ def _check_runtime_input_channel(skill_md: str, tree: ast.AST) -> list[LintIssue
             detail=", ".join(fields),
         )
     ]
+
+
+def _check_input_bindings(
+    skill_md: str, tree: ast.AST, code: str, *, template: bool,
+) -> list[LintIssue]:
+    bindings = parse_input_bindings(skill_md) or []
+    request_fields = {binding.name for binding in bindings if binding.source == "request"}
+    mappings = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "request_inputs" for target in node.targets)
+        and isinstance(node.value, ast.Dict)
+    ]
+    supplied = {
+        key.value: value for mapping in mappings for key, value in zip(mapping.keys, mapping.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    reads = {
+        node.args[0].value for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name) and node.func.value.id == "request_inputs"
+        and node.func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant)
+    }
+    codes = {item.upper() for item in _needs_info_codes(tree, code)}
+    issues: list[LintIssue] = []
+    for binding in bindings:
+        if binding.source != "request":
+            if binding.payload_field and binding.payload_field not in _payload_field_reads(tree):
+                issues.append(LintIssue(rule="A14", severity="error", message=f"The code never reads the declared payload field `{binding.payload_field}`.", detail=binding.name))
+            continue
+        value = supplied.get(binding.name)
+        if binding.name not in supplied or binding.name not in reads:
+            issues.append(LintIssue(rule="A14", severity="error", message=f"Bind `{binding.name}` in `request_inputs` and read it with `.get()` before validation. Request is not an automatic Python variable.", detail=binding.name))
+        elif template and not (isinstance(value, ast.Constant) and value.value is None):
+            issues.append(LintIssue(rule="A14", severity="error", message=f"The sample template must leave `{binding.name}` as None, not an executable example value. The Coding Agent binds it from the current request.", detail=binding.name))
+        if binding.required and binding.name.upper() not in codes:
+            issues.append(LintIssue(rule="A14", severity="error", message=f"Validate `{binding.name}` before external calls and emit `[NEEDS_INFO] missing={binding.name.upper()}` when required but absent. A request source does not remove missing-data handling.", detail=binding.name))
+    for name in supplied.keys() - request_fields:
+        issues.append(LintIssue(rule="A14", severity="error", message=f"`request_inputs` contains `{name}` without a request-source binding. Do not duplicate credential inputs or invent a fallback.", detail=name))
+    return issues
 
 
 def _check_runtime_needs_info_codes(

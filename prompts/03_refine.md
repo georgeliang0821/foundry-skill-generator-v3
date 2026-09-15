@@ -28,6 +28,10 @@ content and the metadata always stay consistent.
   in the same turn so the code reads it via `os.environ[...]` / the token / the
   input and no stale or hard-coded value remains. Never edit the variable
   section alone.
+- For explicit input-bindings, apply the Business Input Sources contract:
+  preserve each field's source, update its binding and missing-data handling
+  together, and never convert request fields to environment reads merely to
+  satisfy the legacy recipe. A source change requires confirmation.
 - **Keep the success-path output reader-friendly.** When patching
   `## API Reference / Sample Code`, the final primary output of `main()` must
   stay a natural-language summary for a general end user (plain prose, not a raw

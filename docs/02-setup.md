@@ -42,6 +42,20 @@ Copy-Item .env.example .env
 
 ### 3.1 環境變數完整清單
 
+#### 選用功能：request 業務輸入
+
+`SGV2_ENABLE_REQUEST_INPUTS` 預設關閉。需要使用逐欄位的 request / credentials
+混合來源時，在 `.env` 設定 `SGV2_ENABLE_REQUEST_INPUTS=true`，重新啟動後端並重新整理頁面。
+`1`、`true`、`yes` 均可啟用；`GET /api/features` 回報目前的有效設定。
+
+關閉時仍可保存待討論的來源設定，但不能確認或儲存使用 request 的 Skill。
+現有未宣告 `input-bindings` 的 Skill 不會自動遷移；真正的認證、OBO token、平台身分
+及部署設定也不改成 request。契約與限制見 [04-agent-mechanism.md](04-agent-mechanism.md#業務輸入來源credentials--request)。
+
+這是產生器的 authoring 開關，不是 Foundry runtime 的新參數。上線前仍需在目標 runtime
+驗證實際模型綁定、長文原樣傳遞、缺值回應及失敗重試行為；本機 lint 與 route-only
+測試不代表這些工作已驗證。
+
 #### 雲端服務使用的身分
 
 網頁登入者與後端存取雲端服務的身分彼此獨立。依目前實作，各服務實際使用的身分如下：

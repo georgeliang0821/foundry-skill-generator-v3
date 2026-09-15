@@ -513,6 +513,52 @@ def test_scenario_prompt_uses_scenario_draft_and_format_spec() -> None:
     assert "scenario-orchestration" not in capability_prompt
 
 
+def test_scenario_prepare_uses_plain_language_for_child_input_fields() -> None:
+    prompt = build_system_prompt(Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO))
+
+    assert "child input data field name" in prompt
+    assert "not a password, API key or token" in prompt
+    assert "prefill that exact" in prompt
+    assert "Keep `credentials_key` in tool arguments" in prompt
+    assert "or make a missing contract optional" in prompt
+
+
+def test_request_inputs_gate_preserves_pending_state(monkeypatch) -> None:
+    from backend.models import SkillVariable
+
+    session = _fully_prepared_session()
+    session.prepare_brief.variables = [SkillVariable(name="description", source="request")]
+    monkeypatch.delenv("SGV2_ENABLE_REQUEST_INPUTS", raising=False)
+    assert any("SGV2_ENABLE_REQUEST_INPUTS" in error for error in check_quality_gates(session))
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
+    assert check_quality_gates(session) == []
+
+
+@pytest.mark.parametrize("kind", [SkillKind.CAPABILITY, SkillKind.SCENARIO])
+@pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT, Stage.REFINE, Stage.TEST])
+def test_all_authoring_stages_receive_input_source_contract(kind, stage, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
+    prompt = build_system_prompt(Session(skill_kind=kind, current_stage=stage))
+    assert "request_inputs_enabled: true" in prompt
+    assert "Every field has exactly one source" in prompt
+    assert "all-request child needs no business credentials key" in prompt
+    assert "does NOT guarantee valid tool arguments" in prompt
+
+
+def test_scenario_binding_must_match_child(monkeypatch) -> None:
+    from backend.input_contract import input_contract_errors
+    from backend.models import InputBinding
+
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
+    session = _fully_prepared_scenario()
+    child = session.prepare_brief.delegation[0]
+    session.child_full_md[child.child_skill] += "\n## Required Inputs\n```input-bindings\n- name: description\n  source: request\n```\n"
+    assert input_contract_errors(session)
+    child.credentials_key = ""
+    child.input_bindings = [InputBinding(name="description", source="request")]
+    assert input_contract_errors(session) == []
+
+
 def test_runtime_state_says_children_are_still_undeclared() -> None:
     prompt = build_system_prompt(Session(skill_kind=SkillKind.SCENARIO))
 

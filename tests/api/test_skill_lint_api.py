@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.models import MessageRole, PendingToolCall
 
 
@@ -45,6 +47,87 @@ def main() -> None:
     print(raw)
 ```
 """
+
+
+REQUEST_SKILL = '''---
+name: request-skill
+description: Process original report text.
+---
+## Required Inputs
+```input-bindings
+- name: description
+  source: request
+```
+- `description`: required free text.
+## `[NEEDS_INFO]` contract
+DESCRIPTION: host asks for the original text and resends.
+## API Reference / Sample Code
+```python
+def main():
+    request_inputs = {"description": None}
+    description = request_inputs.get("description")
+    if description is None:
+        print("[NEEDS_INFO] missing=DESCRIPTION")
+        raise SystemExit(0)
+    print(description)
+```
+'''
+
+
+@pytest.mark.parametrize("enabled, expected", [(False, 400), (True, 200)])
+def test_request_skill_save_requires_opt_in(client, monkeypatch, enabled, expected) -> None:
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", str(enabled))
+    assert client.get("/api/features").json() == {"request_inputs_enabled": enabled}
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": REQUEST_SKILL})
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "request-skill"})
+    assert response.status_code == expected
+    if not enabled:
+        assert "SGV2_ENABLE_REQUEST_INPUTS" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("code", ['    print("example")', ""])
+def test_request_skill_cannot_save_without_binding_validation(client, monkeypatch, code) -> None:
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "true")
+    skill_md = REQUEST_SKILL.split("## API Reference / Sample Code")[0]
+    if code:
+        skill_md += f"## API Reference / Sample Code\n```python\ndef main():\n{code}\n```\n"
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": skill_md})
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "request-skill"})
+    assert response.status_code == 400
+    assert "A14" in response.json()["detail"]
+
+
+def test_source_change_is_pending_and_invalidates_confirmation(client, backend_main, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "false")
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    session = backend_main.sessions[session_id]
+    session.prepare_brief.verify_checklist["variables_ok"] = True
+    session.prepare_brief.verify_evidence["variables_ok"] = "Previous confirmation"
+    response = client.post(f"/api/sessions/{session_id}/variables", json={"variables": [
+        {"name": "description", "source": "request"},
+        {"name": "TOKEN", "kind": "obo_token"},
+    ]})
+    assert response.status_code == 200
+    body = client.get(f"/api/sessions/{session_id}").json()
+    assert body["prepare_brief"]["variables"][0]["source"] == "request"
+    assert body["prepare_brief"]["variables"][1]["kind"] == "obo_token"
+    assert body["prepare_brief"]["variables"][1]["source"] == "credentials"
+    assert not body["prepare_brief"]["verify_checklist"]["variables_ok"]
+    assert "variables_ok" not in body["prepare_brief"]["verify_evidence"]
+    with pytest.raises(ValueError, match="SGV2_ENABLE_REQUEST_INPUTS"):
+        backend_main.apply_tool_effect(session, "update_prepare_checklist", {"item": "variables_ok", "confirmed": True})
+
+
+def test_save_rejects_draft_that_changes_prepared_source(client, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "true")
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.post(f"/api/sessions/{session_id}/variables", json={"variables": [{"name": "description"}]})
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": REQUEST_SKILL})
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "request-skill"})
+    assert response.status_code == 400
+    assert "do not match" in response.json()["detail"]
 
 
 def test_save_is_blocked_when_the_sample_code_does_not_parse(client) -> None:

@@ -37,6 +37,52 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 - **規則一：** 注入大腦的系統上下文 (Input) 依 Stage 實施 **按需載入 (Pay-as-you-go)**，避免干擾 Agent 判斷。
 - **規則二：** 工具調用設有 Stage 白名單防護，杜絕越權或跨階段調用。
 
+### 業務輸入來源：credentials / request
+
+啟用 `SGV2_ENABLE_REQUEST_INPUTS` 後，runtime 業務欄位可各自指定 `source`。
+例如 operation 來自 credentials，而原始 description 來自 request；每個欄位只有一個來源，
+不合併衝突副本，也不從另一來源 fallback。設定在 PREPARE 中記錄，來源變更會清除確認。
+`aca_env`、`obo_token` 與 `platform_identity` 不能指定 request 來源。
+
+Capability 在既有 `## Required Inputs` 中保存唯一的機器可讀來源清單：
+
+````markdown
+## Required Inputs
+```input-bindings
+- name: operation
+  source: credentials
+  credentials_key: TASK_JSON
+  payload_field: operation
+  required: true
+- name: description
+  source: request
+  required: true
+```
+````
+
+`credentials_key` 未填時等同 `name`。`payload_field` 未填表示 entry 的原始字串，
+有填則表示該 entry 內 JSON object 的頂層成員，不是巢狀路徑。欄位型別、合法值、條件式
+必填及缺值代碼仍寫在 child 的既有輸入契約中。重複來源、重複 YAML 鍵或無效宣告會被拒絕。
+
+Request 不會自動變成 Python 參數或環境變數。產生的無參數 `main()` 使用
+`request_inputs = {"description": None}` 樣板，Coding Agent 在執行前從當次 request
+綁定 Python literal，再以 `.get("description")` 讀取。未綁定樣板必須在外部動作前
+輸出 `[NEEDS_INFO] missing=DESCRIPTION` 並結束，不能執行範例資料。
+
+Scenario 讀取 child 的契約並記錄 delegation `input_bindings`；不可覆寫來源或在 parent
+重建欄位 schema。Host 先收集缺值，再依 child 契約送出資料；child 仍需再次驗證。
+沒有明確來源契約的舊 child 維持既有 credentials 行為，不能由 parent 單方面改成 request。
+
+Lint `A13` 拒絕無效契約，`A14` 拒絕缺少樣板、宣告與樣板綁定不符、缺少對應缺值代碼，
+以及可直接執行的 request 範例值。這些是靜態結構檢查，**不是完整控制流程或無副作用證明**。
+既有 `A12` 外部呼叫結果檢查仍為 advisory。
+
+Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層文字 JSON envelope，
+但不保證外層序列化、模型抽取或 Python 編碼正確。本機測試只證明受控 literal 綁定
+與缺值樣板行為；尚無真實 Foundry 失敗 trace 或端到端長文保真驗證。L2/L3 路由測試
+不執行 child 業務流程，不可用來宣稱已驗證資料傳遞或寫入。提交後逾時可能已完成寫入，
+不能盲目自動重試。
+
 ---
 
 ## 2. 工具清單 (Agent Tools)

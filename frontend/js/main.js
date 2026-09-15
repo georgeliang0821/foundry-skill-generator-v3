@@ -6,6 +6,7 @@ import {
   setSkillVisibility,
   createSession,
   fetchAuthStatus,
+  fetchFeatures,
   fetchInspect,
   fetchSessionTopology,
   getSession,
@@ -44,6 +45,7 @@ const mdRenderer = createMarkdownRenderer();
 // rejection, mapped onto the checkpoint cards so the user sees exactly what
 // blocks DRAFT (the gate checks more than the four checkboxes).
 let lastGateMissing = [];
+let requestInputsEnabled = false;
 
 function gateCheckpointFor(missingKey) {
   const k = String(missingKey || "");
@@ -1427,7 +1429,7 @@ const PREPARE_CHECKPOINT_LABELS = {
   definition_clear:     { title: "Skill definition",     hint: "Goal, input/data sources, key capabilities, and neighbor skills (asked one at a time)." },
   routing_uniqueness_confirmed: { title: "Routing & uniqueness", hint: "Neighbor skills, description contrast, mutual-exclusion check, When NOT to Use, and routing samples." },
   variables_ok:         { title: "Variables verified",   hint: "ACA environment variables, OBO token scopes, per-query runtime inputs, and the verified actor identity." },
-  delegation_ok:        { title: "Delegation confirmed", hint: "Child skills, host capabilities, credentials payloads, and handshakes." },
+  delegation_ok:        { title: "Delegation confirmed", hint: "Child skills, host capabilities, child input data, and handshakes." },
 };
 
 function prepareCheckpointKeys() {
@@ -1928,12 +1930,21 @@ function briefVariables() {
 function variableRowHtml(kind, v = null) {
   const required = v ? (v.required !== false) : true;
   if (kind === "runtime") {
+    const source = v?.source || "credentials";
     return `<div class="var-row var-row-runtime" data-var-kind="runtime">
         <input class="var-input var-name" type="text" value="${escapeHtml(String(v?.name || ""))}" placeholder="parameter_name" />
         <input class="var-input var-desc" type="text" value="${escapeHtml(String(v?.description || ""))}" placeholder="What it is / how to ask the user for it" />
         <input class="var-input var-example" type="text" value="${escapeHtml(String(v?.example || ""))}" placeholder="example value" />
         <label class="var-required"><input type="checkbox" class="var-req"${required ? " checked" : ""} /> required</label>
         <button type="button" class="icon-button spl-del" data-var-del title="Remove">\u00d7</button>
+        <div class="var-source-fields">
+          <label>Input source <select class="var-input var-source" aria-label="Input source">
+            <option value="credentials"${source === "credentials" ? " selected" : ""}>Program-readable input</option>
+            <option value="request"${source === "request" ? " selected" : ""}${!requestInputsEnabled ? " disabled" : ""}>Request (experimental)</option>
+          </select></label>
+          <label class="var-binding-field"${source === "request" ? " hidden" : ""}>Input data field <input class="var-input var-credentials-key" aria-label="Input data field" value="${escapeHtml(v?.credentials_key || "")}" placeholder="Same as variable name" /></label>
+          <label class="var-binding-field"${source === "request" ? " hidden" : ""}>JSON member <input class="var-input var-payload-field" aria-label="JSON member" value="${escapeHtml(v?.payload_field || "")}" placeholder="Empty for raw text" /></label>
+        </div>
       </div>`;
   }
   if (kind === "platform_identity") {
@@ -2034,7 +2045,10 @@ function renderDelegationPanel() {
     : [];
   const contracts = delegation.length
     ? `<dl class="delegation-contracts">${delegation.map((item) => {
-        const key = item.credentials_key || "No credentials key recorded";
+        const bindings = Array.isArray(item.input_bindings) ? item.input_bindings : [];
+        const key = bindings.length
+          ? bindings.map((binding) => `${binding.name}: ${binding.source === "request" ? "Request" : `Program input ${binding.credentials_key || binding.name}${binding.payload_field ? ` / ${binding.payload_field}` : ""}`}`).join("; ")
+          : item.credentials_key ? `Child input data field: ${item.credentials_key}` : "No child input data field recorded";
         const sections = Array.isArray(item.sections) ? item.sections.filter(Boolean) : [];
         const pointer = sections.length
           ? `<div class="delegation-sections">Fetches: ${sections.map((s) => `<code>${escapeHtml(s)}</code>`).join(", ")}</div>`
@@ -2045,7 +2059,7 @@ function renderDelegationPanel() {
           : "";
         return `<div><dt><code>${escapeHtml(item.child_skill || "(unnamed)")}</code></dt><dd>${escapeHtml(key)}${pointer}${ops}</dd></div>`;
       }).join("")}</dl>`
-    : `<p class="spl-hint">The agent records credentials keys, section pointers, host capabilities, and handshakes after children are selected.</p>`;
+    : `<p class="spl-hint">The agent records child input data field names, section pointers, host capabilities, and handshakes after children are selected.</p>`;
   const delegated = new Set(delegation.map((item) => item.child_skill).filter(Boolean));
   const plain = children.filter((child) => child && !delegated.has(child));
   const internalNote = delegation.length
@@ -2117,6 +2131,9 @@ function collectVariablesFromUI() {
           in_aca: false,
           description: row.querySelector(".var-desc")?.value.trim() || "",
           example: row.querySelector(".var-example")?.value.trim() || "",
+          source: row.querySelector(".var-source")?.value || "credentials",
+          credentials_key: row.querySelector(".var-source")?.value === "request" ? "" : row.querySelector(".var-credentials-key")?.value.trim() || "",
+          payload_field: row.querySelector(".var-source")?.value === "request" ? "" : row.querySelector(".var-payload-field")?.value.trim() || "",
           required,
         });
       } else {
@@ -2175,6 +2192,9 @@ function variableContentSig(v) {
     String(v?.description || "").trim(),
     String(v?.example || "").trim(),
     v?.required !== false,
+    String(v?.source || "credentials"),
+    String(v?.credentials_key || ""),
+    String(v?.payload_field || ""),
   ]);
 }
 
@@ -5812,6 +5832,14 @@ document.addEventListener("click", async (event) => {
 // deployment-only change: it never alters the skill text and never notifies the
 // agent (the backend treats an in_aca flip as content-unchanged).
 document.addEventListener("change", async (event) => {
+  const sourceSelect = event.target.closest(".var-source");
+  if (sourceSelect) {
+    const row = sourceSelect.closest(".var-row");
+    row.querySelectorAll(".var-binding-field").forEach((field) => {
+      field.hidden = sourceSelect.value === "request";
+    });
+    return;
+  }
   const nbeditSel = event.target.closest("[data-nbedit-select]");
   if (nbeditSel) {
     // Blur so the checklist focus-guard does not skip the re-render that swaps
@@ -6175,6 +6203,11 @@ async function refreshAuthStatus() {
 
 async function initializePage() {
   restoreUiState();
+  try {
+    requestInputsEnabled = (await fetchFeatures()).request_inputs_enabled === true;
+  } catch {
+    requestInputsEnabled = false;
+  }
   el("chatStream").innerHTML = `<div class="empty-state chat-empty">Choose a mode, then start a session. For new/import workflows, paste the requirements or attach materials before sending.</div>`;
   el("toolCalls").innerHTML = "";
   setActiveContextTab(activeContextTab);

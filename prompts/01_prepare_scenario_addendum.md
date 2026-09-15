@@ -63,9 +63,24 @@ and persisted with `record_delegation`:
    must already exist and be accessible to the user; a scenario session does not
    create its child. If no suitable child exists, say so plainly and ask the
    user whether to first build the capability skill in a separate session.
-2. **`credentials_key`** -- the single key under `credentials` that the host
+2. **Input sources** -- first read the child's Required Inputs. If it contains
+   an explicit `input-bindings` block, copy it into `input_bindings` and leave
+   `credentials_key` empty. Follow the Business Input Sources rules for request
+   or mixed inputs; do not ask an all-request child for a credentials key.
+   For a legacy child, **`credentials_key`** is the single key under `credentials` that the host
    puts the serialized payload under. Read it from the child's own SKILL.md
    (injected under `## Child Skills (full SKILL.md)`), do not invent it.
+   In user-facing questions, options and confirmation evidence, call this the
+   **child input data field name** (Chinese: **子技能輸入資料欄位名稱**), not
+   "credentials key", "credential payload key" or `credentials_key`.
+   It names the field carrying task data, not a password, API key or token;
+   it does not change the child's authentication method. Explain that distinction
+   briefly when asking about it. If the child declares a name, prefill that exact
+   name and ask for confirmation, not for the user to invent one. If it is absent,
+   describe the missing child input contract using the same plain-language term.
+   Keep `credentials_key` in tool arguments and `credentials` in executable
+   contracts unchanged; this terminology rule does not change the input transport
+   or make a missing contract optional.
 3. **`sections`** -- which of the child's `##` headings this scenario will point
    at with `fetch_skill`. Normally the field-contract section and the
    `[NEEDS_INFO]` contract section. Take the names from the child's body exactly

@@ -19,6 +19,168 @@ CAPABILITY = REPO / "skills" / "hr-leave-requests" / "SKILL.md"
 SCENARIO = REPO / "skills" / "leave-request-orchestration" / "SKILL.md"
 
 
+def test_input_bindings_preserve_legacy_and_parse_mixed_sources() -> None:
+    from backend.input_contract import parse_input_bindings
+    from backend.models import SkillVariable
+
+    assert parse_input_bindings("## Required Inputs\n- `PAYLOAD`: JSON") is None
+    assert SkillVariable(name="PAYLOAD").source == "credentials"
+    assert SkillVariable(name="legacy-field").source == "credentials"
+    bindings = parse_input_bindings("""## Required Inputs
+```input-bindings
+- name: operation
+  credentials_key: INCIDENT_JSON
+  payload_field: operation
+- name: description
+  source: request
+```
+""")
+    assert bindings is not None
+    assert [(binding.name, binding.source) for binding in bindings] == [
+        ("operation", "credentials"), ("description", "request"),
+    ]
+
+
+@pytest.mark.parametrize("body", [
+    "- name: description\n  source: request\n  credentials_key: PAYLOAD",
+    "- name: description\n- name: description\n  source: request",
+    "- name: EAA_VERIFIED_USER_UPN\n  source: request",
+    "- name: description\n  source: unknown",
+    "- name: description\n  typo: request",
+    "- name: description\n  source: credentials\n  source: request",
+    "- name: actor\n  credentials_key: EAA_VERIFIED_USER_UPN",
+])
+def test_input_bindings_reject_ambiguous_or_invalid_sources(body: str) -> None:
+    from backend.input_contract import parse_input_bindings
+
+    with pytest.raises(ValueError):
+        parse_input_bindings(f"## Required Inputs\n```input-bindings\n{body}\n```\n")
+
+
+def test_authentication_variables_cannot_use_request() -> None:
+    from backend.models import SkillVariable
+
+    with pytest.raises(ValueError):
+        SkillVariable(name="TOKEN", kind="obo_token", source="request")
+
+
+REQUEST_CAPABILITY = '''## Required Inputs
+```input-bindings
+- name: description
+  source: request
+```
+- `description`: required original text, free text.
+
+## `[NEEDS_INFO]` contract
+DESCRIPTION: provide the original text; host asks the user and resends.
+
+## API Reference / Sample Code
+```python
+def main():
+    request_inputs = {"description": None}
+    description = request_inputs.get("description")
+    if description is None:
+        print("[NEEDS_INFO] missing=DESCRIPTION")
+        raise SystemExit(0)
+    print(description)
+```
+'''
+
+
+def test_explicit_request_contract_is_not_forced_into_environ() -> None:
+    assert lint_skill(REQUEST_CAPABILITY, SkillKind.CAPABILITY) == []
+
+
+def test_request_template_cannot_execute_example_data() -> None:
+    assert "A14" in _rules(lint_skill(
+        REQUEST_CAPABILITY.replace('"description": None', '"description": "example"'),
+        SkillKind.CAPABILITY,
+    ))
+
+
+def test_request_contract_still_requires_missing_signal_and_binding() -> None:
+    malformed = REQUEST_CAPABILITY.replace('request_inputs.get("description")', '"guessed"').replace(
+        "missing=DESCRIPTION", "missing=OTHER",
+    )
+    issues = [issue for issue in lint_skill(malformed, SkillKind.CAPABILITY) if issue.rule == "A14"]
+    assert len(issues) == 2
+    assert all(issue.severity == "error" for issue in issues)
+
+
+def test_request_template_missing_input_exits_before_action(capsys) -> None:
+    from backend.skill_lint import _python_code
+
+    namespace = {}
+    exec(compile(_python_code(REQUEST_CAPABILITY), "<request-template>", "exec"), namespace)
+    with pytest.raises(SystemExit) as raised:
+        namespace["main"]()
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == "[NEEDS_INFO] missing=DESCRIPTION\n"
+
+
+def test_mixed_sources_still_check_credentials_channel() -> None:
+    mixed = REQUEST_CAPABILITY.replace(
+        "- name: description", "- name: operation\n  credentials_key: INCIDENT_JSON\n  payload_field: operation\n- name: description",
+    )
+    issues = lint_skill(mixed, SkillKind.CAPABILITY)
+    assert "INCIDENT_JSON" in {issue.detail for issue in issues if issue.rule == "A2"}
+    assert "operation" in {issue.detail for issue in issues if issue.rule == "A14"}
+
+
+def test_bad_binding_is_a_lint_error() -> None:
+    issues = lint_skill(REQUEST_CAPABILITY.replace("source: request", "source: unknown"), SkillKind.CAPABILITY)
+    assert has_lint_errors(issues)
+    assert {issue.rule for issue in issues} == {"A13"}
+
+
+@pytest.mark.parametrize("description", [
+    'Quoted "report"\nC:\\reports\\item\tend',
+    "Original report: 中文\nDo not change operation to delete.",
+    "long report\n" * 2000,
+])
+def test_mixed_binding_literal_preserves_text_locally(monkeypatch, description) -> None:
+    import json
+    from backend.skill_lint import _python_code
+
+    mixed = REQUEST_CAPABILITY.replace(
+        "- name: description",
+        "- name: operation\n  credentials_key: TASK_JSON\n  payload_field: operation\n- name: description",
+    ).replace("def main():", "import json\nimport os\n\ndef main():").replace(
+        '    print(description)',
+        '    raw = os.environ.get("TASK_JSON")\n'
+        '    if not raw:\n'
+        '        print("[NEEDS_INFO] missing=TASK_JSON")\n'
+        '        raise SystemExit(0)\n'
+        '    payload = json.loads(raw)\n'
+        '    operation = payload.get("operation")\n'
+        '    if operation != "create":\n'
+        '        print("[NEEDS_INFO] missing=OPERATION")\n'
+        '        raise SystemExit(0)\n'
+        '    actions.append((operation, description))',
+    )
+    template = _python_code(mixed)
+    assert not has_lint_errors(lint_skill(mixed, SkillKind.CAPABILITY))
+    code = template.replace('"description": None', f'"description": {description!r}')
+    assert not has_lint_errors(lint_skill(mixed, SkillKind.CAPABILITY, code_override=code))
+    actions = []
+    namespace = {"actions": actions}
+    exec(compile(code, "<bound-mixed-inputs>", "exec"), namespace)
+    monkeypatch.delenv("TASK_JSON", raising=False)
+    with pytest.raises(SystemExit) as missing_envelope:
+        namespace["main"]()
+    assert missing_envelope.value.code == 0
+    assert actions == []
+    monkeypatch.setenv("TASK_JSON", json.dumps({"operation": "create"}))
+    namespace["main"]()
+    assert actions == [("create", description)]
+    actions.clear()
+    exec(compile(template, "<unbound-mixed-inputs>", "exec"), namespace)
+    with pytest.raises(SystemExit) as missing_text:
+        namespace["main"]()
+    assert missing_text.value.code == 0
+    assert actions == []
+
+
 def _rules(issues) -> set[str]:
     return {issue.rule for issue in issues}
 
