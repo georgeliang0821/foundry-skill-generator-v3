@@ -126,7 +126,7 @@
 
         <div class="workflow-controls">
           <div class="workflow-control-row">
-            <div class="control-group">
+            <div class="control-group mode-group">
               <label for="modeSelect">Mode</label>
               <select id="modeSelect" data-testid="mode-select">
                 <option value="new">new</option>
@@ -136,7 +136,8 @@
             <div class="control-group skill-kind-group">
               <label for="skillKindSelect">Kind</label>
               <select id="skillKindSelect" data-testid="skill-kind-select">
-                <option value="capability">capability</option>
+                <option value="" disabled>&mdash; from skill</option>
+                <option value="capability" selected>capability</option>
                 <option value="scenario">scenario</option>
               </select>
             </div>

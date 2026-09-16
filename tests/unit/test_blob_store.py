@@ -10,11 +10,12 @@ from backend.blob_store import (
     LocalSkillStore,
     blob_path_of,
     blob_prefix_of,
+    infer_skill_kind,
     parse_frontmatter,
     replace_frontmatter_name,
     safe_skill_name,
 )
-from backend.models import SkillFiles
+from backend.models import SkillFiles, SkillKind
 
 
 def test_parse_frontmatter() -> None:
@@ -37,6 +38,37 @@ def test_parse_frontmatter_recovers_description_with_colon() -> None:
 
 def test_parse_frontmatter_without_delimiters_returns_empty() -> None:
     assert parse_frontmatter("no frontmatter here") == ("", "")
+
+
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        "---\nname: demo\nmetadata:\n  children:\n    - hr-leave-system\n---\nbody",
+        # skill_type alone is not enough, but together they still agree.
+        "---\nname: demo\nmetadata:\n  skill_type: scenario-orchestration\n  children:\n    - hr-leave-system\n---\nbody",
+    ],
+)
+def test_infer_skill_kind_reads_scenario_from_children(skill_md: str) -> None:
+    assert infer_skill_kind(skill_md) is SkillKind.SCENARIO
+
+
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        "---\nname: demo\ndescription: Demo\n---\nbody",
+        "---\nname: demo\nmetadata:\n  children: []\n---\nbody",
+        "---\nname: demo\nmetadata:\n  children: hr-leave-system\n---\nbody",
+        "---\nname: demo\nmetadata:\n  children:\n    - '   '\n---\nbody",
+        # Mirrors create_session, which infers from children alone and leaves the
+        # skill_type mismatch to its own 400.
+        "---\nname: demo\nmetadata:\n  skill_type: scenario-orchestration\n---\nbody",
+        "no frontmatter here",
+        "---\nname: demo\n  bad: [indent\n---\nbody",
+        "",
+    ],
+)
+def test_infer_skill_kind_falls_back_to_capability(skill_md: str) -> None:
+    assert infer_skill_kind(skill_md) is SkillKind.CAPABILITY
 
 
 def test_replace_frontmatter_name_only_touches_the_top_level_key() -> None:

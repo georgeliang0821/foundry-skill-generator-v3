@@ -802,6 +802,7 @@ class SkillIndexEntry(BaseModel):
     description: str = ""
     version_hash: str = ""
     blob_store_id: str = ""
+    skill_kind: SkillKind = SkillKind.CAPABILITY
 
 
 class SkillFiles(BaseModel):

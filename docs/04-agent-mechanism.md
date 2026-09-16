@@ -39,6 +39,14 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 
 ### 業務輸入來源：credentials / request
 
+| 名詞 | 在本專案中的意思 | 不代表什麼 |
+| --- | --- | --- |
+| `request` | 當次呼叫 Child 的任務內容，可以包含指令與明確標示的業務資料。宣告 `source: request` 時，由 Coding Agent 取得欄位值並填入 `request_inputs` 樣板，供 Python 使用。 | 不是整個 HTTP request，也不是 Python 自動可讀的全域 `request` 物件；不保證原文不變。 |
+| `credentials` | 呼叫介面提供的具名 key/value 資料通道。本專案既有契約也用它傳遞業務資料，Child Python 從對應環境變數取值。 | 不一定是密碼、token 或其他機密；名稱也不代表其中所有資料都經過身分驗證。 |
+
+**`source` 指定的是「欄位從哪裡取得」，不是「欄位是否敏感」。** 業務欄位可以選擇來源，
+但 token、部署設定與平台驗證身分仍遵循各自的既有規則，不能因此改走 request。
+
 `SGV2_ENABLE_REQUEST_INPUTS` 預設開啟，runtime 業務欄位可各自指定 `source`。
 例如 operation 來自 credentials，而原始 description 來自 request；每個欄位只有一個來源，
 不合併衝突副本，也不從另一來源 fallback。設定在 PREPARE 中記錄，來源變更會清除確認。

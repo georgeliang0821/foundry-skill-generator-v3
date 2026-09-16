@@ -8,8 +8,8 @@ export async function setScenario(request: APIRequestContext, scenario: string) 
   await request.post("/api/e2e/scenario", { data: { scenario } });
 }
 
-export async function seedSkill(request: APIRequestContext, name = "e2e-existing-skill") {
-  return request.post("/api/e2e/seed-skill", { data: { name } });
+export async function seedSkill(request: APIRequestContext, name = "e2e-existing-skill", kind?: "capability" | "scenario") {
+  return request.post("/api/e2e/seed-skill", { data: { name, kind } });
 }
 
 export async function readSession(request: APIRequestContext, sessionId: string) {

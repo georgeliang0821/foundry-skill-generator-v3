@@ -303,6 +303,7 @@ const modeHelp = {
 };
 
 const kindHelp = {
+  "": "Kind comes from the skill you pick: scenario when it declares metadata.children.",
   capability: "A directly selectable skill that performs one bounded capability.",
   scenario: "A host-selected workflow that delegates work to child capability skills.",
 };
@@ -811,8 +812,11 @@ function renderStages() {
 
 function renderSession() {
   el("sessionId").textContent = session ? session.id : "No session";
+  const isModify = el("modeSelect").value === "modify";
   if (session?.skill_kind) el("skillKindSelect").value = session.skill_kind;
-  el("skillKindSelect").disabled = el("modeSelect").value === "modify";
+  // The placeholder only makes sense in modify, where the skill decides the kind.
+  if (!isModify && !el("skillKindSelect").value) el("skillKindSelect").value = "capability";
+  el("skillKindSelect").disabled = isModify;
   el("modeHelp").textContent = modeHelp[el("modeSelect").value] || "";
   el("kindHelp").textContent = kindHelp[el("skillKindSelect").value] || "";
   renderAuthStatus();
@@ -976,6 +980,7 @@ function renderSkillSelector() {
       ? `<option value="${escapeHtml(currentSkill)}">${escapeHtml(currentSkill)} - loading skill list...</option>`
       : `<option value="">Loading skills...</option>`;
     if (currentSkill) selector.value = currentSkill;
+    syncKindSelectToTargetSkill();
     return;
   }
   if (!availableSkills.length) {
@@ -983,21 +988,43 @@ function renderSkillSelector() {
       ? `<option value="${escapeHtml(currentSkill)}">${escapeHtml(currentSkill)} - current session</option>`
       : `<option value="">No skills you have access to - ask an owner to grant you</option>`;
     if (currentSkill) selector.value = currentSkill;
+    syncKindSelectToTargetSkill();
     return;
   }
   const current = currentSkill || selector.value;
   const currentInList = availableSkills.some((skill) => skill.name === current);
+  const option = (skill) => {
+    const badge = skill.is_public ? " [public]" : "";
+    const internalBadge = skill.is_internal ? " [internal]" : "";
+    const desc = skill.description ? ` - ${escapeHtml(skill.description.slice(0, 60))}` : "";
+    return `<option value="${escapeHtml(skill.name)}">${escapeHtml(skill.name)}${internalBadge}${badge}${desc}</option>`;
+  };
+  // The kind sits on the <optgroup> rather than in every label, so the Kind field
+  // above reads as a consequence of the pick instead of a filter over the list.
+  const kindGroup = (label, skills) =>
+    (skills.length ? `<optgroup label="${label}">${skills.map(option).join("")}</optgroup>` : "");
   selector.innerHTML = [
     `<option value="">Select an existing skill</option>`,
     current && !currentInList ? `<option value="${escapeHtml(current)}">${escapeHtml(current)} - current session</option>` : "",
-    ...availableSkills.map((skill) => {
-      const badge = skill.is_public ? " [public]" : "";
-      const internalBadge = skill.is_internal ? " [internal]" : "";
-      const desc = skill.description ? ` - ${escapeHtml(skill.description.slice(0, 60))}` : "";
-      return `<option value="${escapeHtml(skill.name)}">${escapeHtml(skill.name)}${internalBadge}${badge}${desc}</option>`;
-    }),
+    kindGroup("Capability", availableSkills.filter((skill) => skill.skill_kind !== "scenario")),
+    kindGroup("Scenario (orchestration)", availableSkills.filter((skill) => skill.skill_kind === "scenario")),
   ].join("");
   if (current) selector.value = current;
+  syncKindSelectToTargetSkill();
+}
+
+// The Kind select is read-only in modify mode, so mirror whatever skill is in
+// play: a session already bound to a skill wins, otherwise the picked-but-not-
+// yet-started skill, otherwise blank -- an unbound session has no kind to show.
+function syncKindSelectToTargetSkill() {
+  if (el("modeSelect")?.value !== "modify") return;
+  const picked = (el("targetSkill")?.value || "").trim();
+  const bound = session?.remote_skill_id || session?.target_skill_id || "";
+  const kind = (bound && (!picked || picked === bound) && session?.skill_kind)
+    || availableSkills.find((skill) => skill.name === picked)?.skill_kind
+    || "";
+  el("skillKindSelect").value = kind;
+  el("kindHelp").textContent = kindHelp[kind] || "";
 }
 
 function visibleSessionsForSelector() {
@@ -5105,7 +5132,9 @@ async function startSession() {
   try {
     session = await createSession({
       mode: el("modeSelect").value,
-      skill_kind: el("skillKindSelect").value,
+      // modify infers the kind from the target SKILL.md; sending the disabled
+      // select's stale value would trip the backend's mismatch check.
+      skill_kind: el("modeSelect").value === "modify" ? null : el("skillKindSelect").value,
       target_skill_id: el("targetSkill").value || null,
       materials: [],
     });
@@ -6449,6 +6478,7 @@ function wireV7Ui() {
     sel.addEventListener("change", () => {
       const gb = document.getElementById("grantsBtn");
       if (gb) gb.style.display = sel.value ? "" : "none";
+      syncKindSelectToTargetSkill();
       // Re-filter the session list to the chosen skill (modify mode).
       renderSessionSelector();
     });

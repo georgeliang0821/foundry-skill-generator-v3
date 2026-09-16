@@ -247,22 +247,29 @@ textarea:focus, input:focus, select:focus {
 .workflow-controls {
   grid-area: controls;
   display: grid;
-  grid-template-columns: minmax(0, 840px);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   align-items: center;
   min-width: 0;
 }
 .workflow-control-row {
-  display: grid;
-  grid-template-columns: 96px minmax(140px, 1fr) minmax(150px, 1fr) auto;
+  display: flex;
+  flex-wrap: nowrap;
   gap: 12px;
-  align-items: end;
+  align-items: flex-end;
   padding: 8px 12px;
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 14px;
 }
 .workflow-control-row button { white-space: nowrap; }
+
+/* Flex, not fixed columns: `new` mode hides the Skill group, so the row must not
+   depend on how many children are currently visible. */
+.mode-group { flex: 0 0 96px; }
+.skill-kind-group { flex: 0 0 132px; }
+.target-skill-group { flex: 3 1 280px; }
+.session-picker-group { flex: 1 1 160px; }
 
 /* removed v7: was hiding the whole group when select had .hidden, now handled by JS toggling display on group */
 
@@ -297,6 +304,7 @@ textarea:focus, input:focus, select:focus {
 }
 .workflow-control-row > #newSessionBtn {
   align-self: end;
+  flex: 0 0 auto;
   min-height: 34px;
   border-radius: 9px;
 }
@@ -2407,8 +2415,9 @@ textarea:focus, input:focus, select:focus {
 
 @media (max-width: 720px) {
   .workflow-control-row {
-    grid-template-columns: 1fr;
+    flex-wrap: wrap;
   }
+  .workflow-control-row > * { flex-basis: 100%; }
   .skill-md-workspace { grid-template-columns: 1fr; }
   .files-resizer { display: none; }
   .test-sample-editor { grid-template-columns: 1fr; }
@@ -3135,8 +3144,7 @@ textarea:focus, input:focus, select:focus {
 
 
 /* v7: keep modify-mode skill picker wide enough to show full status messages. */
-.target-skill-group { min-width: 280px; }
-#targetSkill { min-width: 240px; max-width: 360px; }
+#targetSkill { min-width: 0; }
 
 
 /* v7: keep skill <select> and buttons on one horizontal line inside the column-flex control-group. */

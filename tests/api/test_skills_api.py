@@ -55,6 +55,32 @@ def test_create_modify_session_missing_skill_returns_404(client) -> None:
     assert response.status_code == 404
 
 
+def test_list_skills_reports_the_skill_kind(client, backend_main, grant_skill) -> None:
+    backend_main.store.save_skill(
+        backend_main.SkillFiles(
+            name="demo-skill",
+            skill_md="---\nname: demo-skill\ndescription: Demo\n---\n",
+        )
+    )
+    backend_main.store.save_skill(
+        backend_main.SkillFiles(
+            name="demo-scenario",
+            skill_md=(
+                "---\nname: demo-scenario\ndescription: Demo\nmetadata:\n"
+                "  skill_type: scenario-orchestration\n  children:\n    - demo-skill\n---\n"
+            ),
+        )
+    )
+    grant_skill("demo-skill", description="Demo")
+    grant_skill("demo-scenario", description="Demo")
+
+    listed = client.get("/api/skills")
+
+    assert listed.status_code == 200
+    kinds = {item["name"]: item["skill_kind"] for item in listed.json()}
+    assert kinds == {"demo-skill": "capability", "demo-scenario": "scenario"}
+
+
 def test_skill_test_uses_inline_content_and_mocked_runner(client, backend_main, monkeypatch, grant_skill) -> None:
     grant_skill("inline-skill")
     def fake_run_selection_tests(skill_content, positive_samples, negative_samples, **kwargs):

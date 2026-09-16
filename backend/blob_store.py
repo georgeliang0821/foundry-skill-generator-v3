@@ -12,7 +12,7 @@ from typing import Protocol
 import yaml
 
 from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
-from .models import SkillFiles, SkillIndexEntry
+from .models import SkillFiles, SkillIndexEntry, SkillKind
 
 
 # Mirrors the PERSISTED computed columns blob_path / blob_prefix on dbo.skills,
@@ -139,6 +139,20 @@ def parse_frontmatter_meta(skill_md: str) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def infer_skill_kind(skill_md: str) -> SkillKind:
+    """Classify a SKILL.md the same way ``create_session`` does.
+
+    Deliberately keyed on ``metadata.children`` alone and never raising, so the
+    kind shown in the skill list always predicts the kind a modify session will
+    actually get. The ``metadata.skill_type`` consistency check stays in
+    ``create_session``, which is allowed to reject the skill outright.
+    """
+    children = parse_frontmatter_meta(skill_md).get("children")
+    if isinstance(children, list) and any(isinstance(c, str) and c.strip() for c in children):
+        return SkillKind.SCENARIO
+    return SkillKind.CAPABILITY
+
+
 def _normalize_prefix(prefix: str) -> str:
     return "/".join(part for part in (prefix or "").strip("/").split("/") if part)
 
@@ -180,6 +194,7 @@ class LocalSkillStore:
                     description=description,
                     version_hash=files.version_hash,
                     blob_store_id=self.id,
+                    skill_kind=infer_skill_kind(files.skill_md),
                 )
             )
         log_event("skill_store.local.list.done", count=len(entries), store_id=self.id, duration_ms=elapsed_ms(started))
@@ -317,6 +332,7 @@ class AzureBlobSkillStore:
                     description=description,
                     version_hash=str(getattr(blob, "etag", "") or ""),
                     blob_store_id=self.id,
+                    skill_kind=infer_skill_kind(content),
                 )
             )
         sorted_entries = sorted(entries, key=lambda e: e.name)

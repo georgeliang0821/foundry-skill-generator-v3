@@ -42,6 +42,7 @@ from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
 from .e2e import (
     FakeE2EAgent,
     e2e_enabled,
+    e2e_scenario_skill_files,
     e2e_skill_files,
     fake_agent_enabled,
     fake_run_selection_tests,
@@ -2219,7 +2220,8 @@ def e2e_set_scenario(payload: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/e2e/seed-skill")
 def e2e_seed_skill(payload: dict[str, Any]) -> SkillFiles:
     require_e2e_mode()
-    files = e2e_skill_files(str(payload.get("name") or "e2e-existing-skill"))
+    builder = e2e_scenario_skill_files if str(payload.get("kind") or "").lower() == "scenario" else e2e_skill_files
+    files = builder(str(payload.get("name") or "e2e-existing-skill"))
     if payload.get("skill_md"):
         files.skill_md = str(payload["skill_md"])
     saved = store.save_skill(files)
