@@ -5,6 +5,7 @@ import pytest
 from backend.agent import (
     FOUNDRY_OUTPUT_RULES,
     FOUNDRY_OUTPUT_SHAPE,
+    _escape_handlebars,
     _extract_json_candidate,
     _infer_ask_user_input,
     _load_output_rules,
@@ -35,6 +36,32 @@ def test_extract_json_candidate_from_text_wrapper() -> None:
     raw = 'Here is the response:\n{"text": "ok", "tool_calls": []}\nThanks'
 
     assert _extract_json_candidate(raw) == '{"text": "ok", "tool_calls": []}'
+
+
+def test_escape_handlebars_neutralizes_braces_foundry_would_reject() -> None:
+    # A child SKILL.md that embeds an HTML prototype doubles every CSS brace,
+    # which Foundry's Handlebars pass over the system message rejects with
+    # 400 agent_prompt_rendering_failed.
+    raw = "<style>*{{box-sizing:border-box}}body{{margin:0}}</style>"
+
+    escaped = _escape_handlebars(raw)
+
+    assert "\\{{box-sizing" in escaped
+    assert escaped.count("\\{{") == 2
+    # Handlebars renders \{{ back to a literal {{, so the model sees the original.
+    assert escaped.replace("\\{{", "{{") == raw
+
+
+def test_escape_handlebars_leaves_clean_text_and_single_braces_alone() -> None:
+    raw = "Path: Procurement/{case_id}/input/ and a closing }} brace."
+
+    assert _escape_handlebars(raw) == raw
+
+
+def test_escape_handlebars_is_idempotent() -> None:
+    once = _escape_handlebars("body{{margin:0}}")
+
+    assert _escape_handlebars(once) == once
 
 
 def test_session_context_redacts_materials_that_the_system_message_carries() -> None:

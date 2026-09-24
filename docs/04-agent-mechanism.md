@@ -388,6 +388,19 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Research Summary** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 經 Agent 查證好的網路研究結論。 |
 | **Current Draft** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前已被接受的 `SKILL.md` 快照本體 |
 
+### 6.1 送出前的 Handlebars 跳脫
+
+組裝完成後還有最後一道處理：`_escape_handlebars()`（[backend/agent.py](../backend/agent.py)）把 System Prompt 裡未跳脫的 `{{` 換成 `\{{`，才交給 Foundry。
+
+**Foundry 只把 `role="system"` 訊息當 Handlebars 模板渲染**，`role="user"` 原樣通過。而上表 D 類掛載的內容全是使用者或模型產生的自由文字——子技能／鄰居的 SKILL.md、素材全文、當前草稿——裡面出現 `{{` 是家常便飯（最典型的是內嵌 HTML 原型時，為了 Python `str.format` 而把 CSS/JS 的大括號加倍）。這種 `{{...}}` 對 Handlebars 是不合法的運算式，會讓整個請求在「組 prompt」階段就被退回 `400 agent_prompt_rendering_failed`，**模型完全不會被呼叫**。實測只有約一半的後端會執行渲染，所以症狀是間歇性的，特別難追。
+
+`\{{` 是 Handlebars 的官方跳脫，渲染後還原成字面 `{{`，模型看到的文字不變。
+
+兩個位置上的選擇是刻意的：
+
+- **只跳脫 system，不跳脫 user。** user 訊息不經渲染，若一併跳脫，反斜線會原樣留在模型眼前，破壞[第 7 節](#7-素材materials的三層可信度合約)的素材保真度。
+- **放在 `agent.py` 的傳輸邊界，不放進 `build_system_prompt()`。** 跳脫是 Foundry 的傳輸細節而非提示詞內容；寫進組裝函式會讓反斜線滲進它的既有單元測試斷言與 Agent Graph 預覽（[第 8 節](#8-agent-graph流程視覺化輔助工具)）。
+
 ---
 
 ## 7. 素材（Materials）的三層可信度合約
