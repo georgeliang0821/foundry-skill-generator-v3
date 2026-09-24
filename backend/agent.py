@@ -773,6 +773,24 @@ Latest user message:
 """
 
 
+_HANDLEBARS_OPEN_RE = re.compile(r"(?<!\\)\{\{")
+
+
+def _escape_handlebars(text: str) -> str:
+    """Neutralize ``{{`` so Foundry's Handlebars pass cannot reject the prompt.
+
+    Foundry renders the ``role="system"`` message as a Handlebars template
+    before handing it to the model (``role="user"`` is passed through
+    untouched). Skill content routinely embeds ``{{`` -- an HTML prototype
+    whose CSS/JS was written for Python ``str.format`` doubles every brace --
+    and Handlebars rejects those as malformed expressions, failing the whole
+    request with ``400 agent_prompt_rendering_failed`` before the model is
+    ever called. ``\\{{`` is the Handlebars escape and renders back to a
+    literal ``{{``, so the model still sees the original text.
+    """
+    return _HANDLEBARS_OPEN_RE.sub(r"\\{{", text)
+
+
 async def _run_foundry_turn(session: Session, user_message: str) -> str:
     """Send a turn to the Foundry **agent** (agent_reference path).
 
@@ -789,7 +807,7 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     project_endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
     agent_name = (os.getenv("FOUNDRY_AGENT_NAME") or "skill-generator-agent").strip()
     agent_version = (os.getenv("FOUNDRY_AGENT_VERSION") or "2").strip()
-    system_prompt = build_system_prompt(session)
+    system_prompt = _escape_handlebars(build_system_prompt(session))
     query = _build_foundry_user_prompt(session, user_message)
 
     started = now_ms()
