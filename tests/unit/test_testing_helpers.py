@@ -11,6 +11,7 @@ from backend.testing import (
     ROUTE_ONLY,
     SCENARIO_DISCOVERABILITY_NOTE,
     ModeEchoError,
+    RunAuthError,
     _evaluate_apim_result,
     _post_apim_run,
     _test_request,
@@ -529,6 +530,88 @@ def test_execute_mode_still_carries_the_audit_instruction(monkeypatch: pytest.Mo
 
     assert sent[0]["mode"] == "execute"
     assert "Skill used:" in sent[0]["request"]
+
+
+def test_token_is_sent_only_in_the_authorization_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtime exports every credentials entry into the skill's environment,
+    so a token in the body would hand the user's raw token to the script."""
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
+    token = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJ4In0.sig-part-xyz"
+    captured: list = []
+
+    class _FakeResponse:
+        def read(self) -> bytes:
+            return json.dumps({"response": "ok", "mode": "route_only"}).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        captured.append(request)
+        return _FakeResponse()
+
+    monkeypatch.setattr("backend.testing.urlopen", fake_urlopen)
+
+    _post_apim_run("Help me use demo", token, mode=ROUTE_ONLY)
+
+    request = captured[0]
+    assert request.get_header("Authorization") == f"Bearer {token}"
+    raw_body = request.data.decode("utf-8")
+    assert token not in raw_body
+    assert "Bearer" not in raw_body
+    assert json.loads(raw_body)["credentials"] == {}
+
+
+def _stub_http_error(monkeypatch: pytest.MonkeyPatch, code: int, body: bytes) -> list[int]:
+    import io
+    from urllib.error import HTTPError
+
+    monkeypatch.setenv("SKILL_SELECTION_TEST_RUN_URL", "https://runtime.example.test/run")
+    calls: list[int] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001
+        calls.append(1)
+        raise HTTPError(request.full_url, code, "err", {}, io.BytesIO(body))
+
+    monkeypatch.setattr("backend.testing.urlopen", fake_urlopen)
+    return calls
+
+
+def test_http_401_aborts_and_points_at_the_runtime_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_http_error(monkeypatch, 401, b'{"error": "invalid_token"}')
+
+    with pytest.raises(RunAuthError) as excinfo:
+        _post_apim_run("Help me use demo", "token", mode=ROUTE_ONLY)
+
+    message = str(excinfo.value)
+    assert "HTTP 401" in message
+    assert "[oauth] Token rejected:" in message
+    assert "EAA administrator" in message
+
+
+def test_http_401_aborts_the_whole_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_http_error(monkeypatch, 401, b"")
+
+    with pytest.raises(RunAuthError):
+        run_selection_tests(
+            "---\nname: demo-skill\ndescription: Demo\n---\n",
+            ["a", "b"],
+            ["c"],
+            delegated_token="token",
+        )
+
+    assert len(calls) == 1
+
+
+def test_other_http_errors_stay_per_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_http_error(monkeypatch, 500, b"boom")
+
+    output = _post_apim_run("Help me use demo", "token", mode=ROUTE_ONLY)
+
+    assert output["error"].startswith("APIM /run returned HTTP 500")
 
 
 def test_missing_mode_echo_aborts(monkeypatch: pytest.MonkeyPatch) -> None:

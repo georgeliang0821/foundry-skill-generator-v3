@@ -199,6 +199,14 @@ def verify_mode_echo(requested: str, echoed: Any) -> None:
         )
 
 
+class RunAuthError(RuntimeError):
+    """The runtime rejected our Bearer token with HTTP 401.
+
+    Aborts the whole batch like ModeEchoError: every later sample would carry
+    the same token and be rejected the same way.
+    """
+
+
 def _test_request(query: str, *, mode: str) -> str:
     # Under route_only nothing is executed, so there is no run to narrate and no
     # "Skill used:" line to parse. Sending the query verbatim also keeps the
@@ -226,17 +234,14 @@ def _post_apim_run(
         log_event("apim.run.skipped", level="warning", reason="missing_delegated_token")
         return {"request_sent": request_sent, "error": "Microsoft login token is missing. Sign in before running selection tests.", "duration_ms": 0}
 
-    credentials: dict[str, str] = {
-        "access_token": delegated_token,
-        "authorization": f"Bearer {delegated_token}",
-        "token_type": "Bearer",
-    }
+    # The token travels only in the Authorization header: the runtime exports
+    # every credentials entry into the skill script's environment.
     payload = {
         "request": request_sent,
         "session_id": f"skill-generator-v2-{uuid4().hex}",
         "mode": mode,
         "scenario": scenario,
-        "credentials": credentials,
+        "credentials": {},
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -253,7 +258,6 @@ def _post_apim_run(
         has_delegated_token=bool(delegated_token),
         delegated_token=_mask_token(delegated_token),
         token_claims=_token_debug(delegated_token),
-        body_credentials_present=bool(payload.get("credentials", {}).get("access_token")),
         request_chars=len(request_sent),
         request_preview=request_sent[:800],
     )
@@ -307,6 +311,15 @@ def _post_apim_run(
             error_body=error_body[:2000],
             duration_ms=elapsed_ms(started),
         )
+        if exc.code == 401:
+            raise RunAuthError(
+                f"The runtime rejected the sign-in token (HTTP 401 from {endpoint}). "
+                "Selection tests are aborted: every sample would be rejected the same way. "
+                "The runtime deliberately returns a vague reason; the real cause is logged only "
+                "on the runtime side as '[oauth] Token rejected:'. Please contact the EAA "
+                "administrator to check that log. "
+                f"Runtime said: {error_body[:300] or exc.reason}"
+            ) from exc
         return {
             "request_sent": request_sent,
             "error": f"APIM /run returned HTTP {exc.code}: {error_body}",

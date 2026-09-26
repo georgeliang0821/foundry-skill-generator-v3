@@ -10,12 +10,14 @@ test("accepts and undoes a conversation patch", async ({ page, request }) => {
   await openApp(page);
   await createDraftWithFakeAgent(page);
   await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
   await setScenario(request, "patch_refine");
 
   await sendChat(page, "Please improve the selection boundary.");
   await expect(page.getByTestId("patch-card")).toBeVisible();
   await page.getByRole("button", { name: "Accept patch" }).click();
-  await expect(page.getByTestId("patch-card")).toContainText("Accepted");
+  // Accepting auto-continues the turn, and the fake agent may propose another patch.
+  await expect(page.getByTestId("patch-card").first()).toContainText("Accepted");
 
   await openTab(page, "files");
   await expect(page.getByTestId("file-editor")).toHaveValue(/E2E refined selection boundary/);
@@ -32,6 +34,7 @@ test("shows a recoverable error when a patch anchor is missing", async ({ page, 
   await openApp(page);
   await createDraftWithFakeAgent(page);
   await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
   await setScenario(request, "patch_failure");
 
   await sendChat(page, "Please propose a patch that will fail.");

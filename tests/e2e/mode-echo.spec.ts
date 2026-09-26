@@ -13,6 +13,7 @@ test("aborts the batch when the runtime does not echo the mode", async ({ page, 
   await openApp(page);
   await createDraftWithFakeAgent(page);
   await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
 
   await openTab(page, "tests");
   await page.getByPlaceholder("A query that SHOULD hit this skill").first().fill("Use the E2E calendar skill");

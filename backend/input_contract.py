@@ -5,6 +5,7 @@ import re
 
 import yaml
 
+from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_keys, reserved_credentials_key_reason
 from .models import InputBinding, Session, SkillKind
 from .sections import h2_sections, normalize_section
 
@@ -79,6 +80,15 @@ def input_contract_errors(session: Session, skill_md: str | None = None) -> list
             errors.append("Each runtime input must have exactly one source.")
         if any(binding.source == "request" for binding in bindings) and not request_inputs_enabled():
             errors.append("Request-derived business inputs are disabled in this environment; set SGV2_ENABLE_REQUEST_INPUTS=true to enable them.")
+        registry = obo_registry_keys(session.aca_env_result)
+        for binding in bindings:
+            key = binding.credentials_key or binding.name
+            reason = reserved_credentials_key_reason(key, registry) if binding.source == "credentials" else None
+            if reason:
+                errors.append(f"Runtime input `{binding.name}` uses credentials key `{key}`, which EAA discards: {reason}.")
+        for variable in session.prepare_brief.variables:
+            if variable.name in PLATFORM_SECRET_DENYLIST:
+                errors.append(f"`{variable.name}` is a platform secret EAA removes from the skill environment; a skill must not declare it.")
     else:
         for delegation in session.prepare_brief.delegation:
             child_md = session.child_full_md.get(delegation.child_skill, "")

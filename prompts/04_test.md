@@ -86,10 +86,11 @@ nothing is written.** That changes what the results can tell you:
   with `addresses` naming the item it closes, proposing the next one as soon as
   the previous is accepted, and NO test run until the list is empty. Wait for
   the user's review decision instead when human judgment is required.
-- For test-run failures unrelated to the skill content (env, transport, or a
-  batch aborted because the runtime did not echo the requested `mode`), surface
-  the error and ask the user how to proceed. Those are deployment findings and
-  no patch can fix them.
+- For test-run failures unrelated to the skill content (env, transport, a
+  batch aborted because the runtime did not echo the requested `mode`, or a
+  batch aborted because the runtime rejected the sign-in token with HTTP 401),
+  surface the error and ask the user how to proceed. Those are deployment
+  findings and no patch can fix them.
 
 ## Usage axis: what to check in the code
 
@@ -100,7 +101,10 @@ decided from code SHAPE: declared vs. read variable names (A2), `[NEEDS_INFO]`
 codes and their documentation (A4, A11), the entry point and the caller's
 channel (A9, A10), deployment configuration misfiled as a caller input (D1-D3),
 the identity read shape and its recovery path (I1-I3), leaking the verified
-actor (I4), and an external call whose result is never inspected (A12).
+actor (I4), an external call whose result is never inspected (A12), platform
+secrets the runtime strips (D4), placeholder credentials (D5), the Managed
+Identity contract (D6) and caller-supplied `credentials` keys the runtime
+discards (A15).
 
 **Do not re-derive those.** Re-reading the two variable lists and announcing a
 diff the tool already printed costs a turn and produces a second opinion that can
@@ -135,7 +139,9 @@ no declared rule to break, and looking for one produces speculation.
   `WHERE upn = ?` in a skill whose body says RLS is active). The redundant
   filter hides an RLS failure instead of surfacing it.
 - A fallback to a managed identity or service principal in a skill whose body
-  says the connection identity must be the end user.
+  says the connection identity must be the end user. A skill whose body
+  declares the platform Managed Identity as its way of authenticating is not a
+  fallback and is not a finding.
 - A guard the body declares -- order of security gates, error taxonomy,
   validation of caller-supplied data -- that the code drops.
 

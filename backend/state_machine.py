@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_mapping
 from .input_contract import input_contract_errors, request_inputs_enabled
 
 from .material_fidelity import (
@@ -581,9 +582,12 @@ def _format_aca_environment(session: Session) -> str | None:
         return f"## Existing ACA Environment Variables\n\nLookup status: failed\n\nError: {session.aca_env_error}"
     if not session.aca_env_result:
         return None
-    variables = session.aca_env_result.get("variables", [])
-    architectural_config = session.aca_env_result.get("architectural_config", {})
-    obo_registry = architectural_config.get("OBO_SCOPE_REGISTRY", {}) if isinstance(architectural_config, dict) else {}
+    variables = [
+        variable for variable in session.aca_env_result.get("variables", [])
+        # Present on the ACA app but stripped from every skill's environment.
+        if str(variable) not in PLATFORM_SECRET_DENYLIST
+    ]
+    obo_registry = obo_registry_mapping(session.aca_env_result)
     lines = [
         "## Existing ACA Environment Variables",
         "",

@@ -150,6 +150,64 @@ def test_save_is_not_blocked_by_advisory_lint_findings(client) -> None:
     assert response.status_code == 200
 
 
+def test_save_runs_the_eaa_lint_on_the_skill_folder(client, backend_main, monkeypatch) -> None:
+    seen: list = []
+    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: seen.append((name, files)) or [])
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+    assert response.status_code == 200
+    assert seen == [("raising-skill", {"SKILL.md": RAISING_SKILL})]
+
+
+def test_save_is_blocked_by_eaa_lint_errors_and_warnings(client, backend_main, monkeypatch) -> None:
+    problems = ["ERROR reads OBO_CLIENT_SECRET", "WARN SKILL.md: credential=... placeholder"]
+    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: problems)
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("EAA skill lint failed:")
+    assert all(problem in detail for problem in problems)
+    assert not backend_main.store.list_skills()
+
+
+def test_save_fails_closed_when_the_eaa_lint_cannot_run(client, backend_main, monkeypatch) -> None:
+    def unavailable(name, files):
+        raise backend_main.EaaLintUnavailable("EAA_REPO_DIR is not set.")
+
+    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", unavailable)
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+    assert response.status_code == 503
+    assert "EAA_REPO_DIR" in response.json()["detail"]
+    assert not backend_main.store.list_skills()
+
+
+@pytest.mark.parametrize(("variable", "message"), [
+    ({"name": "PYTHON_TASK"}, "EAA discards"),
+    ({"name": "GRAPH_ACCESS_TOKEN"}, "EAA discards"),
+    ({"name": "OBO_CLIENT_SECRET", "kind": "aca_env"}, "platform secret"),
+])
+def test_save_rejects_variables_eaa_would_drop(client, variable, message) -> None:
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.post(f"/api/sessions/{session_id}/variables", json={"variables": [variable]})
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+
+    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+    assert response.status_code == 400
+    assert message in response.json()["detail"]
+
+
 def test_accepted_draft_records_lint_findings_as_a_system_message(client, backend_main) -> None:
     session = backend_main.Session()
     session.current_skill.skill_md = RAISING_SKILL

@@ -51,6 +51,7 @@ from .e2e import (
     set_scenario,
 )
 from .material_fidelity import fidelity_warning_count, scan_material_fidelity
+from .eaa_platform import EaaLintUnavailable, obo_registry_keys, obo_registry_mapping, run_eaa_skill_lint
 from .skill_lint import lint_skill, lint_warning_count
 from .input_contract import input_contract_errors, request_inputs_enabled
 from .models import (
@@ -534,7 +535,7 @@ def _post_transition_hook(session, source, target) -> None:
 
 register_post_transition_hook(_post_transition_hook)
 
-from .testing import ModeEchoError, run_selection_tests
+from .testing import ModeEchoError, RunAuthError, run_selection_tests
 
 load_dotenv(override=True)
 
@@ -760,7 +761,7 @@ def load_aca_env_for_session(session, *, reason: str = "manual") -> None:
         session.aca_env_result = data
         session.aca_env_error = ""
         variables = data.get("variables", []) if isinstance(data, dict) else []
-        obo = (data.get("architectural_config", {}) or {}).get("OBO_SCOPE_REGISTRY", {}) if isinstance(data, dict) else {}
+        obo = obo_registry_mapping(data)
         log_event(
             "session.aca_env.loaded",
             session_id=session.id,
@@ -942,6 +943,16 @@ def save_skill_dual_write(
     if lint_errors:
         detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in lint_errors)
         raise HTTPException(status_code=400, detail=f"Skill lint failed:\n{detail}")
+
+    # The runtime's own lint. Fail closed: no verdict is never a pass.
+    try:
+        eaa_problems = run_eaa_skill_lint(skill_name, {"SKILL.md": session.current_skill.skill_md})
+    except EaaLintUnavailable as exc:
+        log_exception("skill.save.eaa_lint_unavailable", exc, session_id=session.id, skill_name=skill_name)
+        raise HTTPException(status_code=503, detail=f"EAA skill lint could not run, so the skill was not saved: {exc}") from exc
+    if eaa_problems:
+        log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, problems=eaa_problems)
+        raise HTTPException(status_code=400, detail="EAA skill lint failed:\n" + "\n".join(eaa_problems))
 
     declared_children: list[str] = []
     internal_children: list[str] = []
@@ -1211,6 +1222,9 @@ def execute_selection_tests(
         # Deliberately terminal. Surfaced as an upstream contract failure so the
         # missing/mismatched field is readable instead of collapsing into a 500.
         log_exception("selection_test.mode_echo_failed", exc, kind=kind.value)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except RunAuthError as exc:
+        log_exception("selection_test.auth_rejected", exc, kind=kind.value)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -1534,6 +1548,7 @@ def _session_lint(session: Session, skill_md: str) -> list:
             for entry in (session.prepare_brief.delegation or [])
             for capability in (entry.host_capabilities or [])
         ],
+        obo_registry_keys=obo_registry_keys(session.aca_env_result),
     )
 
 

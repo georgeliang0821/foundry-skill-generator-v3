@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 SENSITIVE_KEYS = ("authorization", "secret", "password", "token", "key", "credential")
-SAFE_KEYS = ("token_claims", "has_delegated_token", "body_credentials_present")
+SAFE_KEYS = ("token_claims", "has_delegated_token")
 
 
 def now_ms() -> int:

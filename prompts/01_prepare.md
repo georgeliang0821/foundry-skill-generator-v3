@@ -112,6 +112,22 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    which recipient), which is a `runtime` input. It is never the executing
    actor, which only ever comes from `EAA_VERIFIED_USER_UPN`.
 
+   **Decide how each downstream call authenticates, and say it out loud.** For
+   every external system: an OBO token (`obo_token`), the platform Managed
+   Identity, or nothing. Managed Identity is not a variable kind -- it becomes
+   `from azure.identity import DefaultAzureCredential` plus
+   `credential=DefaultAzureCredential()` in the sample and the authentication
+   sentence in `## OBO Token Scopes` (see The Managed Identity Contract). The
+   runtime no longer assumes a Managed Identity, so never leave the choice
+   implicit; if the materials do not settle it, ASK.
+
+   Never declare `OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL`,
+   `LOGIC_APP_SKILL_REVIEW_URL` or `AZURE_STORAGE_ACCOUNT_KEY` -- they exist
+   on the ACA app but are stripped from every skill's environment. Never name
+   a `runtime` input (or its `credentials_key`) `PATH`, `PYTHON*`, `LD_*`,
+   `EAA_VERIFIED_*` or an `OBO_SCOPE_REGISTRY` key: the runtime discards those
+   keys before the script runs.
+
 If an earlier answer changes a later one, briefly say so and re-confirm the
 affected checkpoint rather than silently overwriting it (the UI also cascades
 downstream checkpoints back to pending when an upstream one is revised).

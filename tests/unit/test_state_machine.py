@@ -128,6 +128,26 @@ def test_prompt_assembly_includes_stage_and_runtime_state() -> None:
     assert "## Blob Skill Binding" in prompt
 
 
+def test_aca_environment_hides_platform_secrets_from_the_agent() -> None:
+    from backend.state_machine import _format_aca_environment
+
+    session = Session(current_stage=Stage.PREPARE)
+    session.aca_env_result = {
+        "revision": "r1",
+        "variables": ["OBO_CLIENT_ID", "OBO_CLIENT_SECRET", "AZURE_STORAGE_ACCOUNT_KEY",
+                      "TEAMS_NOTIFY_WEBHOOK_URL", "LOGIC_APP_SKILL_REVIEW_URL", "HR_SQL_SERVER"],
+        "architectural_config": {"OBO_SCOPE_REGISTRY": '{"AZURE_SQL_ACCESS_TOKEN": "https://database.windows.net/.default"}'},
+    }
+
+    text = _format_aca_environment(session)
+
+    assert "`OBO_CLIENT_ID`" in text
+    assert "`HR_SQL_SERVER`" in text
+    for secret in ("OBO_CLIENT_SECRET", "AZURE_STORAGE_ACCOUNT_KEY", "TEAMS_NOTIFY_WEBHOOK_URL", "LOGIC_APP_SKILL_REVIEW_URL"):
+        assert secret not in text
+    assert "`AZURE_SQL_ACCESS_TOKEN`: https://database.windows.net/.default" in text
+
+
 
 
 def test_system_prompt_uses_documented_assembly_order() -> None:

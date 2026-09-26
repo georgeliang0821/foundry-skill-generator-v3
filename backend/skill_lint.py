@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from typing import Collection, Iterable, Mapping, Sequence
 
 from .models import SkillKind
+from .eaa_platform import (
+    PLATFORM_SECRET_DENYLIST,
+    STATIC_OBO_REGISTRY_KEYS,
+    reserved_credentials_key_reason,
+)
 from .input_contract import parse_input_bindings
 from .sections import h2_sections, normalize_section
 
@@ -65,6 +70,17 @@ _STEP_ROW_RE = re.compile(r"^\|[ \t]*(\d+)[ \t]*\|", re.MULTILINE)
 _STEP_HEADING_RE = re.compile(r"^Step[ \t]+(\d+)", re.IGNORECASE)
 # The conventional payload key a child capability skill dispatches on.
 _OPERATION_KEY = "operation"
+
+# --- EAA platform rules (D4-D6, A15) ----------------------------------------
+# EAA's tools/skill_lint.py regex: it scans prose too, because the runtime
+# model follows prose. Do not narrow this to code.
+_ENV_READ_TEXT_RE = re.compile(
+    r"""os\.(?:environ\s*\[\s*|environ\.get\(\s*|getenv\(\s*)["']([A-Za-z_][A-Za-z0-9_]*)["']"""
+)
+_ANY_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_CREDENTIAL_PLACEHOLDER_RE = re.compile(r"\bcredential\s*=\s*(?:\.\.\.|None\b|<)")
+_MI_CREDENTIAL_RE = re.compile(r"\b(?:DefaultAzureCredential|ManagedIdentityCredential)\b")
+_DEFAULT_CREDENTIAL = "DefaultAzureCredential"
 
 # --- The caller-facing value domain (A6-A8) --------------------------------
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
@@ -596,7 +612,11 @@ def _is_string_shaped(annotation: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _lint_capability(skill_md: str, code_override: str | None = None) -> list[LintIssue]:
+def _lint_capability(
+    skill_md: str,
+    code_override: str | None = None,
+    registry_keys: Collection[str] = STATIC_OBO_REGISTRY_KEYS,
+) -> list[LintIssue]:
     issues: list[LintIssue] = []
     try:
         bindings = parse_input_bindings(skill_md)
@@ -636,6 +656,8 @@ def _lint_capability(skill_md: str, code_override: str | None = None) -> list[Li
     issues.extend(_check_unchecked_call_result(tree))
     issues.extend(_check_deployment_config(skill_md, tree, code))
     issues.extend(_check_identity_contract(skill_md, tree))
+    issues.extend(_check_managed_identity(skill_md, tree, code))
+    issues.extend(_check_reserved_credentials_keys(skill_md, tree, registry_keys))
     return issues
 
 
@@ -1172,6 +1194,167 @@ def _check_deployment_config(skill_md: str, tree: ast.AST, code: str) -> list[Li
 
 
 # ---------------------------------------------------------------------------
+# EAA platform rules
+# ---------------------------------------------------------------------------
+
+
+def _check_platform_secrets(skill_md: str, code_override: str | None) -> list[LintIssue]:
+    """D4 -- EAA strips these secrets from the skill's environment."""
+    text = skill_md if code_override is None else code_override
+    read = [key for key in _unique(_ENV_READ_TEXT_RE.findall(text or "")) if key in PLATFORM_SECRET_DENYLIST]
+    declared: list[str] = []
+    if code_override is None:
+        declared = [
+            name
+            for section in (ENV_SECTION, OBO_SECTION, INPUTS_SECTION)
+            for name in _declared_names(_section_body(skill_md, section))
+            if name in PLATFORM_SECRET_DENYLIST
+        ]
+    return [
+        LintIssue(
+            rule="D4",
+            severity="error",
+            message=(
+                f"`{name}` is a platform secret that EAA removes from the skill's execution "
+                "environment. The skill must neither read it nor declare it as a variable -- "
+                "not even in prose, because the runtime model follows the prose and EAA's lint "
+                "scans the full text."
+            ),
+            detail=name,
+        )
+        for name in _unique(read + declared)
+    ]
+
+
+def _check_credential_placeholder(skill_md: str, code_override: str | None) -> list[LintIssue]:
+    """D5 -- a credential left for someone else to fill in is not a credential."""
+    code = code_override if code_override is not None else "\n".join(_ANY_FENCE_RE.findall(skill_md or ""))
+    match = _CREDENTIAL_PLACEHOLDER_RE.search(code or "")
+    if not match:
+        return []
+    return [
+        LintIssue(
+            rule="D5",
+            severity="error",
+            message=(
+                f"The code passes a placeholder credential (`{match.group(0).strip()}`). EAA no "
+                "longer supplies an identity by default, so the skill fails or comes back as "
+                "`[NEEDS_INFO]`. Name the credential explicitly: "
+                "`credential=DefaultAzureCredential()` for the platform Managed Identity."
+            ),
+            detail=match.group(0).strip(),
+        )
+    ]
+
+
+def _passes_default_credential(tree: ast.AST) -> bool:
+    def is_dac_call(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == _DEFAULT_CREDENTIAL
+
+    aliases = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and is_dac_call(node.value)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    return any(
+        kw.arg == "credential" and (is_dac_call(kw.value) or (isinstance(kw.value, ast.Name) and kw.value.id in aliases))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+    )
+
+
+def _check_managed_identity(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
+    """D6 -- a Managed Identity skill must say so in code AND in `## OBO Token Scopes`."""
+    obo_body = _section_body(skill_md, OBO_SECTION)
+    if not (_MI_CREDENTIAL_RE.search(code) or _DEFAULT_CREDENTIAL.lower() in obo_body.lower()):
+        return []
+    issues: list[LintIssue] = []
+    imported = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "azure.identity"
+        and any(alias.name == _DEFAULT_CREDENTIAL and alias.asname is None for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    if not imported:
+        issues.append(LintIssue(
+            rule="D6",
+            severity="error",
+            message=(
+                "A Managed Identity skill must import the credential explicitly: "
+                "`from azure.identity import DefaultAzureCredential`."
+            ),
+            detail="import",
+        ))
+    if "ManagedIdentityCredential" in code:
+        issues.append(LintIssue(
+            rule="D6",
+            severity="error",
+            message="Use `DefaultAzureCredential()` for the platform Managed Identity, not `ManagedIdentityCredential`.",
+            detail="ManagedIdentityCredential",
+        ))
+    if not _passes_default_credential(tree):
+        issues.append(LintIssue(
+            rule="D6",
+            severity="error",
+            message=(
+                "The code never passes `credential=DefaultAzureCredential()` to a client. EAA no "
+                "longer defaults to the Managed Identity; a client built without it fails or "
+                "comes back as `[NEEDS_INFO]`."
+            ),
+            detail="credential",
+        ))
+    normalized = _normalize(obo_body)
+    if not all(phrase in normalized for phrase in ("authenticate", "defaultazurecredential()", "managed identity")):
+        issues.append(LintIssue(
+            rule="D6",
+            severity="error",
+            message=(
+                f"`## {OBO_SECTION}` must state how the skill authenticates, e.g. "
+                "\"Authenticate with DefaultAzureCredential() (platform Managed Identity).\" "
+                "The runtime writes its own script from the prose, so a sample that is right "
+                "is not enough."
+            ),
+            detail=OBO_SECTION,
+        ))
+    return issues
+
+
+def _check_reserved_credentials_keys(
+    skill_md: str, tree: ast.AST, registry_keys: Collection[str]
+) -> list[LintIssue]:
+    """A15 -- EAA drops caller-supplied credentials keys with reserved names."""
+    bindings = parse_input_bindings(skill_md)
+    if bindings is not None:
+        names = [b.credentials_key or b.name for b in bindings if b.source == "credentials"]
+    else:
+        platform = {VERIFIED_UPN_VAR}
+        for section in (ENV_SECTION, OBO_SECTION, IDENTITY_SECTION):
+            platform.update(_declared_names(_section_body(skill_md, section)))
+        names = [
+            name
+            for name in _declared_names(_section_body(skill_md, INPUTS_SECTION)) + _runtime_env_reads(skill_md, tree)
+            if name not in platform
+        ]
+    issues: list[LintIssue] = []
+    for name in _unique(names):
+        reason = reserved_credentials_key_reason(name, registry_keys)
+        if reason:
+            issues.append(LintIssue(
+                rule="A15",
+                severity="error",
+                message=(
+                    f"The caller is asked to send `{name}` in `credentials`, but EAA discards that "
+                    f"key: {reason}. The value never reaches the script. Rename the input."
+                ),
+                detail=name,
+            ))
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Identity contract rules
 # ---------------------------------------------------------------------------
 
@@ -1486,6 +1669,7 @@ def lint_skill(
     child_full_md: Mapping[str, str] | None = None,
     host_capabilities: Sequence[str] = (),
     code_override: str | None = None,
+    obo_registry_keys: Collection[str] | None = None,
 ) -> list[LintIssue]:
     """Return every content issue in the artifact. Only A1 is an error.
 
@@ -1497,8 +1681,12 @@ def lint_skill(
     """
     if not (skill_md or "").strip():
         return []
+    platform = _check_platform_secrets(skill_md, code_override) + _check_credential_placeholder(
+        skill_md, code_override
+    )
     if kind is SkillKind.SCENARIO:
         return _lint_scenario(
             skill_md, child_full_md=child_full_md, host_capabilities=host_capabilities
-        )
-    return _lint_capability(skill_md, code_override)
+        ) + platform
+    registry = frozenset(obo_registry_keys) if obo_registry_keys else STATIC_OBO_REGISTRY_KEYS
+    return _lint_capability(skill_md, code_override, registry) + platform

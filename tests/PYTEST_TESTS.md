@@ -19,7 +19,11 @@ Pytest covers:
 - Agent helper parsing for JSON payloads and tool calls.
 - MCP JSON-RPC response parsing.
 - Diagnostics masking for sensitive fields.
-- Selection-test helper parsing and hit-rate calculation.
+- Selection-test helper parsing and hit-rate calculation, including that the
+  user token travels only in the `Authorization` header and that HTTP 401
+  aborts the batch.
+- EAA platform rules (D4-D6, A15) and the fail-closed EAA lint runner
+  (`tests/unit/test_eaa_platform.py`, driven by a stub `tools/skill_lint.py`).
 - FastAPI session routes.
 - Draft update and checklist update routes.
 - Save/list/load skill routes.
@@ -58,6 +62,8 @@ MICROSOFT_OBO_SCOPE=api://scope/.default
 ```
 
 It also replaces module-level stores so each API test starts from isolated state.
+The `backend_main` fixture replaces `run_eaa_skill_lint` with a stub that always
+passes, so saving never needs an EAA checkout; tests of the save gate override it.
 
 ## Commands
 

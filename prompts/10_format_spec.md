@@ -67,7 +67,10 @@ routing -- routing is the frontmatter `description`):
   must be its own `##` heading, because a scenario skill fetches it by name; a
   contract buried inside another section cannot be requested on its own.
 - `## Environment Variables` -- the `aca_env` variables (os.environ).
-- `## OBO Token Scopes` -- the `obo_token` variables and their scopes.
+- `## OBO Token Scopes` -- the `obo_token` variables and their scopes. This is
+  also where the skill states how it authenticates when it uses no OBO token:
+  a Managed Identity skill writes the authentication sentence here (see The
+  Managed Identity Contract below).
 - `## 部署設定使用規範` -- present whenever the skill declares at least one
   `aca_env` or `obo_token` variable. Reproduce the three rules verbatim (see
   below). A sentence inside the two variable sections saying the absence
@@ -248,6 +251,53 @@ prevents is silent -- `os.environ.get("AZURE_SQL_SERVER")` followed by a
 `[NEEDS_INFO]` line exits 0, so a deployment that was never configured is
 reported to the host as a missing caller input and nothing ever surfaces the
 real defect.
+
+D3 forbids switching to another identity AFTER a declared variable turned out
+to be missing. It does not forbid a skill whose declared way of authenticating
+IS the platform Managed Identity; that skill follows the contract below.
+
+## The Managed Identity Contract
+
+Some skills call an Azure resource (Azure Storage, Table Storage, Foundry, ...)
+with the platform's Managed Identity because no OBO token is available for it.
+The runtime no longer assumes a Managed Identity on its own: a skill that does
+not name its credential explicitly fails, or comes back as `[NEEDS_INFO]`.
+
+- The sample code imports the credential explicitly --
+  `from azure.identity import DefaultAzureCredential` -- and passes
+  `credential=DefaultAzureCredential()` to the client. Use
+  `DefaultAzureCredential`, not `ManagedIdentityCredential`.
+- `## OBO Token Scopes` states the authentication in one sentence, for example:
+  "This skill does not require any OBO token variable. Authenticate to Azure
+  Table Storage with `DefaultAzureCredential()` (the platform Managed
+  Identity), as shown in the sample below." When the skill also uses OBO
+  tokens, list them and add the sentence for the resource that uses the
+  Managed Identity.
+- Never leave the credential for someone else to supply: no `credential=...`,
+  no `credential=None`, no `<your-credential>`, and no prose such as "fill in
+  the credential for your deployment" or 依部署環境自行填入.
+- The resource endpoint is still deployment configuration: declare it as an
+  `aca_env` variable, never hard-code it.
+- Only use the Managed Identity when the materials or the user say so. A skill
+  whose downstream decides the caller from a user token (Graph `/me`, Azure SQL
+  with RLS) is an `obo_token` skill and must not use a Managed Identity.
+
+## Platform-Reserved Names
+
+The runtime strips these platform secrets from every skill's environment. A
+skill must never read them and must never list them in `## Environment
+Variables`, `## OBO Token Scopes`, `## Required Inputs` or any env.yaml as
+required -- not even in a prose example, because the runtime model follows the
+prose and the runtime lint scans the full text:
+`OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL`, `LOGIC_APP_SKILL_REVIEW_URL`,
+`AZURE_STORAGE_ACCOUNT_KEY`.
+
+A value the caller sends in `credentials` must not use a name the runtime
+discards: `PATH`, anything starting with `PYTHON`, `LD_` or `EAA_VERIFIED_`,
+or any `OBO_SCOPE_REGISTRY` key (for example `AZURE_SQL_ACCESS_TOKEN`,
+`GRAPH_ACCESS_TOKEN`). Such a key never reaches the script. OBO tokens are
+unchanged: keep reading them with `os.environ["<OBO_SCOPE_REGISTRY key>"]` and
+declare them under `## OBO Token Scopes`, never as caller inputs.
 
 ## V4A Patch Requirements
 

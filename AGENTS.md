@@ -39,6 +39,9 @@ uv run --no-sync python scripts/sync_reference.py check
   must already exist. Do not hand-start a server on `6275`
   (`reuseExistingServer: false`).
 - Dev server port `6274` and the Playwright port `6275` are deliberately different.
+- Saving runs the EAA repo's `tools/skill_lint.py` and fails closed without
+  `EAA_REPO_DIR` (see [docs/02-setup.md](docs/02-setup.md)). pytest stubs it in
+  the `backend_main` fixture; Playwright runs the real tool.
 - No linter or formatter is configured. Match surrounding style; do not introduce
   ruff/black/mypy config as a side effect of another change.
 

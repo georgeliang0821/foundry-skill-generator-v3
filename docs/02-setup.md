@@ -171,13 +171,19 @@ SGV2_AUTH_STORE=blob
 **這是 runtime HTTP 契約，不是 APIM 依賴。**程式只做一般 HTTP POST，不檢查主機名稱，因此任何實作下方契約的端點都可以，例如直接指向 Azure Container Apps。APIM 只是可選閘道，用於 subscription key、rate limit 或 policy；未使用 APIM 時，請確認 runtime 本身已處理部署所需的驗證與 token 轉換。
 
 ```dotenv
-# 直接指向 runtime（例如 ACA）
-SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainerapps.io/run
+# 正式網域（EAA 的 MCP_PUBLIC_BASE_URL），與 ACA FQDN 指向同一個 ACA、驗證方式相同
+SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 # 也可選擇指向 APIM 等閘道
 #SKILL_SELECTION_TEST_RUN_URL=https://example-apim.azure-api.net/coding-tool-apis/run
 ```
 
-端點必須符合的契約：接受 POST JSON（`request` / `session_id` / `mode` / `credentials`），回應 JSON 頂層要有 `response`，並原樣回顯 `mode`；同時能驗證 `Authorization: Bearer` 帶的使用者委派 token，且在 120 秒內回應。
+端點必須符合的契約：接受 POST JSON（`request` / `session_id` / `mode` / `scenario` / `credentials`），回應 JSON 頂層要有 `response`，並原樣回顯 `mode`；同時能驗證 `Authorization: Bearer` 帶的使用者委派 token，且在 120 秒內回應。
+
+> **token 只放在 `Authorization` header**。使用者委派 token（登入時以 `MICROSOFT_OBO_SCOPE` 取得，`aud` 為 `api://<app-id>` 或 `<app-id>`）只出現在 header；body 的 `credentials` 一律是空物件。EAA 會把 `credentials` 的每個鍵原樣變成 skill 執行環境的環境變數，從來沒有讀過 body 裡的 token；把 token 放進 body 等於把使用者的原始 token 交給 script。`tests/unit/test_testing_helpers.py` 有測試鎖住這一點。
+
+> **token 種類決定「看得到哪些 skill」**。這裡送的是使用者委派 token，EAA 會做 OBO，路由測試只看得到登入者被授權的 skill。儲存時會自動 grant 給儲存者，所以請用同一個帳號儲存與測試。若改用 app-only token，EAA 會改用自己的 Managed Identity 查詢，只看得到 grant 給該 MI 的 skill，待測 skill 沒 grant 會被誤判成「沒命中」。
+
+> **HTTP 401 會中止整批**。EAA 在 `MCP_AUTH_ENFORCE=validate` 下驗證 token 的 `aud` / `iss` / `exp`；被拒時整批中止並回 **HTTP 502**（比照 `mode` 回顯失敗），因為後續樣本帶的是同一個 token。EAA 回給 client 的 `error_description` 刻意寫得模糊，真正原因只記在 EAA 的 ACA log（`[oauth] Token rejected:`），請聯絡 EAA 管理員查 log。其他 HTTP 錯誤仍記在單一樣本上。
 
 > 已移除：舊版的 `SKILL_SYNC_APIM_URL`（儲存後同步 skill 清單給 Router）。本產生器現在只支援「動態載入」（Mode B）：runtime 每次請求都直接從 SQL + Blob 解析 skill，雙寫完成即生效，不需要任何 sync 步驟。若你的 runtime 仍採靜態快照（Mode A），需自行在外部呼叫 `sync_skills`。
 
@@ -191,7 +197,7 @@ SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainer
 
 | 變數 | 說明 |
 | --- | --- |
-| `MCP_ENDPOINT` | MCP 伺服器根 URL（`/mcp`），提供「列出 ACA 環境變數」的工具 |
+| `MCP_ENDPOINT` | MCP 伺服器根 URL（`/mcp`），提供「列出 ACA 環境變數」的工具；例如 `https://eaa.foundryeaa.org/mcp` |
 | `ACA_APP_NAME` | 要查詢的 ACA 應用名稱 |
 | `ACA_RESOURCE_GROUP` | 該 app 的資源群組 |
 | `ACA_SUBSCRIPTION_ID` | 訂閱 ID |
@@ -207,6 +213,23 @@ SKILL_SELECTION_TEST_RUN_URL=https://coding-tool-contoso.<region>.azurecontainer
 - **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
 
 > 這條身分**與路由測試無關**。TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；無論端點是直連或經過閘道，app-only token 都沒有使用者身分，不能用在那條路徑上。
+
+> **平台 secret 不會交給 Agent**。查到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL`、`AZURE_STORAGE_ACCOUNT_KEY` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
+
+#### EAA skill lint（儲存必要）
+
+儲存（`save_skill_dual_write()`）在寫入 Blob 前，會在 EAA repo 的 checkout 裡執行 `python tools/skill_lint.py <skill 目錄> --json`（實作：`backend/eaa_platform.py`）。
+
+| 變數 | 必要 | 說明 |
+| --- | --- | --- |
+| `EAA_REPO_DIR` | 是 | EAA repo 的本機 checkout，需包含 commit `bd13560`（S1）或更新，`tools/skill_lint.py` 從該 commit 才有。通常與 `reference/manifest.json` 的 `local_checkout` 是同一個目錄 |
+
+- **一律 fail-closed**：未設定 `EAA_REPO_DIR`、找不到工具、執行失敗或輸出無法解析，都回 **HTTP 503** 並擋下儲存；沒有「只警告就放行」的開關。
+- **errors 與 warnings 都擋**：任何一項都回 **HTTP 400**，訊息列出每一項。
+- **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
+- 工具以本專案的 Python 執行，只繼承 `PATH` 等最少環境變數，不會拿到 `.env` 裡的 secret。
+- 這是本機 subprocess，不碰 Azure。pytest 的 `backend_main` fixture 會將它改成永遠通過；Playwright 走真的工具，因此跑含儲存的 E2E 也需要 `EAA_REPO_DIR`。
+- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
 
 ### 3.2 Azure SQL 連線與驗證策略
 

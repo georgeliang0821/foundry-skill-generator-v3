@@ -982,3 +982,172 @@ def test_code_override_still_reconciles_against_the_authored_declarations() -> N
         if i.rule == "A2"
     ]
     assert {i.detail for i in issues} == {"API_HOST", "API_ACCESS_TOKEN", "QUERY_JSON", "API_REGION"}
+
+
+# --- EAA platform rules (D4-D6, A15) ----------------------------------------
+
+
+MI_CAPABILITY = """---
+name: table-cleanup
+description: "Delete expired rows from Azure Table Storage."
+---
+
+## Overview
+Deletes expired rows.
+
+## When NOT to Use This Skill
+Anything else -> use `other-skill`
+
+## Required Inputs
+
+- `QUERY_JSON` (required): the serialized request. Missing -> `[NEEDS_INFO] missing=QUERY_JSON`.
+
+## Environment Variables
+
+- `TABLE_ENDPOINT` (required): the table service endpoint.
+
+## OBO Token Scopes
+
+This skill does not require any OBO token variable. Authenticate to Azure Table Storage with `DefaultAzureCredential()` (the platform Managed Identity), as shown in the sample below.
+
+## API Reference / Sample Code
+
+```python
+import os
+
+from azure.data.tables import TableServiceClient
+from azure.identity import DefaultAzureCredential
+
+
+def main() -> None:
+    raw = os.environ.get("QUERY_JSON")
+    if not raw:
+        print("[NEEDS_INFO] missing=QUERY_JSON")
+        print("Provide the request payload.")
+        raise SystemExit(0)
+    endpoint = os.environ["TABLE_ENDPOINT"]
+    client = TableServiceClient(endpoint=endpoint, credential=DefaultAzureCredential())
+    print(f"Connected to {endpoint} for {raw} with {client}.")
+```
+"""
+
+
+def _errors(issues, rule: str) -> list[str]:
+    found = [i for i in issues if i.rule == rule]
+    assert all(i.severity == "error" for i in found)
+    return [i.detail for i in found]
+
+
+def test_managed_identity_skill_written_to_the_contract_is_clean() -> None:
+    assert lint_skill(MI_CAPABILITY, SkillKind.CAPABILITY) == []
+
+
+def test_managed_identity_credential_may_be_bound_to_a_name_first() -> None:
+    md = MI_CAPABILITY.replace(
+        "    client = TableServiceClient(endpoint=endpoint, credential=DefaultAzureCredential())",
+        "    credential = DefaultAzureCredential()\n"
+        "    client = TableServiceClient(endpoint=endpoint, credential=credential)",
+    )
+    assert lint_skill(md, SkillKind.CAPABILITY) == []
+
+
+def test_d6_requires_the_explicit_import() -> None:
+    md = MI_CAPABILITY.replace(
+        "from azure.identity import DefaultAzureCredential", "from azure import identity"
+    ).replace("credential=DefaultAzureCredential()", "credential=identity.DefaultAzureCredential()")
+    assert set(_errors(lint_skill(md, SkillKind.CAPABILITY), "D6")) == {"import", "credential"}
+
+
+def test_d6_requires_the_credential_to_be_passed() -> None:
+    md = MI_CAPABILITY.replace(", credential=DefaultAzureCredential()", "")
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D6") == ["credential"]
+
+
+def test_d6_requires_the_sentence_in_obo_token_scopes() -> None:
+    md = MI_CAPABILITY.replace(
+        "This skill does not require any OBO token variable. Authenticate to Azure Table Storage "
+        "with `DefaultAzureCredential()` (the platform Managed Identity), as shown in the sample below.",
+        "This skill does not require any OBO token variable.",
+    )
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D6") == ["OBO Token Scopes"]
+
+
+def test_d6_rejects_managed_identity_credential() -> None:
+    md = MI_CAPABILITY.replace(
+        "from azure.identity import DefaultAzureCredential",
+        "from azure.identity import DefaultAzureCredential, ManagedIdentityCredential",
+    ).replace("credential=DefaultAzureCredential()", "credential=ManagedIdentityCredential()")
+    assert set(_errors(lint_skill(md, SkillKind.CAPABILITY), "D6")) == {"ManagedIdentityCredential", "credential"}
+
+
+def test_d6_stays_quiet_for_an_obo_skill() -> None:
+    assert not [i for i in lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY) if i.rule == "D6"]
+
+
+@pytest.mark.parametrize(("placeholder", "detail"), [
+    ("credential=...", "credential=..."),
+    ("credential=None", "credential=None"),
+    ("credential=<your-credential>", "credential=<"),
+])
+def test_d5_rejects_a_placeholder_credential(placeholder: str, detail: str) -> None:
+    md = MI_CAPABILITY.replace("credential=DefaultAzureCredential()", placeholder)
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D5") == [detail]
+
+
+def test_d4_rejects_reading_a_platform_secret() -> None:
+    md = CLEAN_CAPABILITY.replace(
+        '    host = os.environ["API_HOST"]',
+        '    host = os.environ["API_HOST"]\n    key = os.environ["AZURE_STORAGE_ACCOUNT_KEY"]',
+    )
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D4") == ["AZURE_STORAGE_ACCOUNT_KEY"]
+
+
+def test_d4_scans_prose_like_the_eaa_lint() -> None:
+    md = CLEAN_CAPABILITY.replace(
+        "Does one thing.", 'Does one thing. Read `os.environ.get("OBO_CLIENT_SECRET")` if needed.'
+    )
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D4") == ["OBO_CLIENT_SECRET"]
+
+
+def test_d4_rejects_declaring_a_platform_secret() -> None:
+    md = CLEAN_CAPABILITY.replace(
+        "- `API_HOST` (required): the host.",
+        "- `API_HOST` (required): the host.\n- `TEAMS_NOTIFY_WEBHOOK_URL` (required): notifications.",
+    )
+    assert "TEAMS_NOTIFY_WEBHOOK_URL" in _errors(lint_skill(md, SkillKind.CAPABILITY), "D4")
+
+
+def test_d4_applies_to_scenario_skills() -> None:
+    md = SCENARIO.read_text(encoding="utf-8") + '\nNever call os.getenv("LOGIC_APP_SKILL_REVIEW_URL").\n'
+    assert _errors(lint_skill(md, SkillKind.SCENARIO), "D4") == ["LOGIC_APP_SKILL_REVIEW_URL"]
+
+
+def test_d4_on_prepared_code_scans_only_that_code() -> None:
+    prepared = 'import os\n\n\ndef main() -> None:\n    print(os.environ["OBO_CLIENT_SECRET"])\n'
+    issues = lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY, code_override=prepared)
+    assert _errors(issues, "D4") == ["OBO_CLIENT_SECRET"]
+
+
+@pytest.mark.parametrize("name", ["PATH", "PYTHONPATH", "PYTHON_TASK", "LD_PRELOAD", "EAA_VERIFIED_TENANT", "GRAPH_ACCESS_TOKEN"])
+def test_a15_rejects_reserved_credentials_keys(name: str) -> None:
+    md = CLEAN_CAPABILITY.replace("QUERY_JSON", name)
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "A15") == [name]
+
+
+def test_a15_uses_the_live_registry_instead_of_the_static_fallback() -> None:
+    custom = CLEAN_CAPABILITY.replace("QUERY_JSON", "CUSTOM_ACCESS_TOKEN")
+    assert _errors(lint_skill(custom, SkillKind.CAPABILITY, obo_registry_keys={"CUSTOM_ACCESS_TOKEN"}), "A15") == ["CUSTOM_ACCESS_TOKEN"]
+    graph = CLEAN_CAPABILITY.replace("QUERY_JSON", "GRAPH_ACCESS_TOKEN")
+    assert _errors(lint_skill(graph, SkillKind.CAPABILITY, obo_registry_keys={"CUSTOM_ACCESS_TOKEN"}), "A15") == []
+
+
+def test_a15_ignores_the_declared_obo_token_itself() -> None:
+    issues = lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY, obo_registry_keys={"API_ACCESS_TOKEN"})
+    assert _errors(issues, "A15") == []
+
+
+def test_a15_checks_explicit_binding_keys() -> None:
+    mixed = REQUEST_CAPABILITY.replace(
+        "- name: description", "- name: operation\n  credentials_key: PYTHON_TASK\n  payload_field: operation\n- name: description",
+    )
+    assert _errors(lint_skill(mixed, SkillKind.CAPABILITY), "A15") == ["PYTHON_TASK"]

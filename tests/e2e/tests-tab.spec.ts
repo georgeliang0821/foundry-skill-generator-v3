@@ -10,6 +10,7 @@ test("saves samples and runs deterministic local selection tests", async ({ page
   await openApp(page);
   await createDraftWithFakeAgent(page);
   await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
 
   await openTab(page, "tests");
   const positiveInput = page.getByPlaceholder("A query that SHOULD hit this skill").first();

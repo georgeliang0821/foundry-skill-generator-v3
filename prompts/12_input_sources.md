@@ -22,6 +22,11 @@ remain unchanged. The runtime state names `request_inputs_enabled`.
   member of the JSON object in that entry. Do not invent nested paths, automatic
   parsing of request, or additional host tools. Document field types, formats,
   allowed operations and operation-specific requirements in Required Inputs.
+- A `credentials_key` (or a legacy input name, which is its own key) must not
+  be `PATH`, start with `PYTHON`, `LD_` or `EAA_VERIFIED_`, or equal an
+  `OBO_SCOPE_REGISTRY` key such as `AZURE_SQL_ACCESS_TOKEN` or
+  `GRAPH_ACCESS_TOKEN`. The runtime discards those keys, so the value never
+  reaches the script.
 - `source=request` must leave `credentials_key` and `payload_field` empty.
   Every field has exactly one source. Never merge conflicting copies or fall
   back to another source. Never accept auth tokens, deployment configuration or

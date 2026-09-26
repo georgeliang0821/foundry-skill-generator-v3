@@ -106,6 +106,19 @@ Lint `A13` 拒絕無效契約，`A14` 拒絕缺少樣板、宣告與樣板綁定
 以及可直接執行的 request 範例值。這些是靜態結構檢查，**不是完整控制流程或無副作用證明**。
 既有 `A12` 外部呼叫結果檢查仍為 advisory。
 
+#### EAA 平台規則（D4–D6、A15）
+
+EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且不再預設使用 Managed Identity。以下規則都是 **error**，會擋下儲存（實作：[skill_lint.py](../backend/skill_lint.py)、[eaa_platform.py](../backend/eaa_platform.py)；規則文字在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Managed Identity Contract 與 Platform-Reserved Names）：
+
+| 規則 | 檢查 |
+| --- | --- |
+| `D4` | 讀取或宣告 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL`、`AZURE_STORAGE_ACCOUNT_KEY`。讀取檢查與 EAA lint 同一個 regex，**掃全文含說明文字**；scenario skill 也適用。 |
+| `D5` | 程式碼區塊出現 `credential=...` / `credential=None` / `credential=<...>` 佔位。 |
+| `D6` | 程式使用 `DefaultAzureCredential` / `ManagedIdentityCredential`，或 `## OBO Token Scopes` 提到 `DefaultAzureCredential` 時：必須 `from azure.identity import DefaultAzureCredential`、把 `credential=DefaultAzureCredential()`（或指定給變數後的該變數）傳給 client、不得用 `ManagedIdentityCredential`，且 `## OBO Token Scopes` 要有「Authenticate … `DefaultAzureCredential()` … Managed Identity」的說明句。 |
+| `A15` | caller 的 `credentials` 鍵名（`input-bindings` 的 `credentials_key`，或 legacy 的 Required Inputs 與 runtime 讀取）是 `PATH`、`PYTHON*`、`LD_*`、`EAA_VERIFIED_*` 或 `OBO_SCOPE_REGISTRY` 的 key。registry 以 MCP 查到的為準，取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。 |
+
+Managed Identity 不是變數種類，判斷只靠 prompt 與 D6 從程式碼偵測，不動 `models.py` 與 UI；EAA 若日後新增 `metadata.mi_scopes` 再一起結構化。`save_skill_dual_write()` 另外會在 EAA repo 跑 `tools/skill_lint.py`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
+
 Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層文字 JSON envelope，
 但不保證外層序列化、模型抽取或 Python 編碼正確。本機測試只證明受控 literal 綁定
 與缺值樣板行為；尚無真實 Foundry 失敗 trace 或端到端長文保真驗證。L2/L3 路由測試
@@ -302,13 +315,14 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > - scenario 的 **L3（Child reachability）不發自己的請求**，改為對 L2 的回應做斷言。要證明 payload 契約成立確實得真的跑一次，但路由測試不得有副作用，因此這裡只驗證樣本是否路由到已宣告的 child。
 > - scenario 的 L2 探針會在 body 頂層額外送 `scenario`（該 scenario 自己的名稱）。runtime 收到後只會把該 skill `metadata.children` 指名的 skill 交給 model，其餘的即使使用者有權限也看不到——這重現了正式環境的條件。不送的話 runtime 不過濾、整池都給，`metadata.children` 漏寫或打錯字的 skill 照樣被路由到，L3 會假性通過。前提是該 skill 已存回 Blob，否則 runtime 查不到這個名字，一樣退回不過濾。capability 測試送空字串，因為能力層 skill 是跨情境共用的。
 > - runtime 必須在回應頂層回顯同一個 `mode`。缺漏或不符會**中止整批**並回 HTTP 502，沒有降級開關。
+> - 使用者委派 token 只在 `Authorization: Bearer` header，body 的 `credentials` 是空物件。runtime 回 HTTP 401 時同樣**中止整批**並回 502，訊息提示聯絡 EAA 管理員查 `[oauth] Token rejected:` log。
 
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
 >
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
 > - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。
 > - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings，[prompts/04_test.md](../prompts/04_test.md) 則明令大腦**不得重新推導**已印出的結論，只需照抄成 `what_to_change` 項目。
-> - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）與未檢查回傳碼（A12）全數下放給 lint。
+> - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）、未檢查回傳碼（A12）與 EAA 平台規則（D4–D6、A15，見下方）全數下放給 lint。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。
 
 > ⚖️ **雙軸診斷學：**

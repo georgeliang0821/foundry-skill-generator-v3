@@ -195,6 +195,8 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     module.sessions = {}
     module.auth_tokens = {}
     module.oauth_states = {}
+    # Save runs the external EAA lint; tests that exercise it override this.
+    monkeypatch.setattr(module, "run_eaa_skill_lint", lambda *args, **kwargs: [])
     yield module
     # PREPARE-entry work runs in a daemon thread; drain it so it cannot race the
     # assertions of a later test or log into a torn-down interpreter.
