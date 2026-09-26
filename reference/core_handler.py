@@ -13,6 +13,13 @@ Core Handler - 共用核心邏輯
 - Recent full outputs(N=1 sliding window,保留上一輪完整輸出)
 - Debug 工具(skills listing, sync, clear)
 
+VERSION: 1.12
+2026.09.26 George : v1.12 — S1 caller credentials 過濾 + MI RLS 註解更正
+- 呼叫端 credentials 經 code_executor.filter_caller_env() 過濾:不得蓋掉 OBO / MI 注入的
+  token,也不得設定 PATH / PYTHON* / LD_*。
+- 更正「ACA MI 在 RLS 上有 bypass、會看到全部 skill」的註解:實測 MI 的 SUSER_SNAME()
+  是 ClientID@TenantID,以 app 名稱比對的 bypass 不成立。
+
 VERSION: 1.11
 2026.08.21 George : v1.11 — Skill Registry 分階(情境層 / 能力層)
 - list_skills() 兩條 Mode B 路徑改為投影輸出:_project_scenario_skills()
@@ -232,6 +239,7 @@ import contextlib  # 2026.06.12 George : max_replicas>1 — W4/W5 companion task
 import time  # 2026.06.12 George : max_replicas>1 — W2 查表 long-poll deadline
 import json
 import re
+import shutil
 import socket
 import uuid
 import logging
@@ -308,7 +316,7 @@ def _purge_reserved_identity_env() -> None:
 # 2026.05.12 George : v1.6 Phase 0 — 抽象介面層
 # 三個介面分別對應 design doc §17 的三個 Protocol。
 # 本階段只用階段 1 實作 (Local/Blob/InMemory),階段 2 才會出現 Hosted* 版本。
-from code_executor import CodeExecutor, LocalSubprocessExecutor
+from code_executor import CodeExecutor, LocalSubprocessExecutor, filter_caller_env
 from output_file_store import OutputFileStore, BlobOutputFileStore
 from job_state_store import JobStateStore, InMemoryJobStateStore
 
@@ -1479,17 +1487,13 @@ async def _run_coding_agent_inner(
                         logger.error(f"[OBO] Unexpected error during exchange: {e}")
                 else:
                     # ── App / Agent context(Routine fire-time)──
-                    # 沒有 user 可以 OBO。改用 ACA MI 取 SQL token,身分為 ACA MI
-                    # ([aca-app-name]),fire-time SUSER_SNAME() 即為此 MI。
+                    # 沒有 user 可以 OBO。改用 ACA MI 取 SQL token,身分為 ACA MI。
                     #
-                    # ⚠️ Demo 取捨:此 MI 在 RLS 上帶 publish 路徑的
-                    #    SUSER_SNAME()='[aca-app-name]' bypass,因此會撈到「全部」
-                    #    skills,不是 scoped 子集。Demo 階段以 agent 層正面表列控管。
-                    # TODO(正式,二選一):
-                    #    (a) Routine 改掛『另一顆無 bypass 的 routine UAMI』,
-                    #        _get_admin_sql_token 換成用該 UAMI 的 client_id;或
-                    #    (b) 在 code 層對撈回的 skills 做 allowlist intersect
-                    #        (見下游 skills_factory 注入點),硬性只留准用 skill。
+                    # 2026.09.26 實測:MI 的 SUSER_SNAME() 是 '<ClientID>@<TenantID>'
+                    # (USER_NAME() 才是 app 名稱)。RLS predicate 以 app 名稱比對的
+                    # bypass 因此不成立 → MI 只看得到 grant 給它自己的 skill
+                    # (schema 6.2 情境 B)。predicate 填 ClientID@TenantID 才會撈到
+                    # 全部 skills —— 若有部署這樣填,Routine 需改掛無 bypass 的 UAMI。
                     logger.info(
                         "[OBO] App/agent token detected (no user subject) — "
                         "skipping OBO; acquiring Azure SQL token via ACA MI "
@@ -1526,6 +1530,14 @@ async def _run_coding_agent_inner(
                 logger.warning(
                     f"[Identity] Stripped {len(forged_keys)} caller-supplied "
                     f"reserved key(s) from credentials: {forged_keys}"
+                )
+
+            # 呼叫端不得蓋掉上方 OBO / MI 注入的 token,也不得改寫 interpreter / loader 環境。
+            credentials, blocked_keys = filter_caller_env(credentials, state.user_data.keys())
+            if blocked_keys:
+                logger.warning(
+                    f"[Credentials] Dropped {len(blocked_keys)} caller-supplied key(s) "
+                    f"that shadow platform-injected or reserved env vars: {blocked_keys}"
                 )
 
             # 剩餘的 credentials 照舊注入(向後相容)
@@ -1595,6 +1607,11 @@ async def _run_coding_agent_inner(
         # 2.9 (2026.09.04 George) scenario 收斂 — 同上,還要趕在 per-turn
         # SkillsProvider 建立之前。
         state.scenario = scenario
+
+        # 2.95 (2026.09.15 George) 初始化 _debug/ 診斷目錄
+        # 必須在 _workflow.run() 之前 —— 腳本第一輪就會往裡面寫中間產物。
+        # metadata 有無即「是否為 session 第一輪」的判準。
+        _init_debug_dir(state.work_dir, reset=not metadata)
 
         # 3. 注入 session context
         if metadata:
@@ -2481,6 +2498,32 @@ def _build_still_running_response(
     }
 
 
+def _init_debug_dir(work_dir: str, reset: bool) -> None:
+    """冪等初始化 work_dir/_debug/ —— 腳本寫中間產物的診斷目錄。
+
+    2026.09.15 George : `_debug/` 是「跨輪 load-bearing 狀態」,不是純診斷暫存。
+    管線在後段 stage 會回頭讀前幾輪寫的 manifest,所以**不能每輪清空** ——
+    每輪清空會讓 manifest 活不過一個 turn,管線直接斷在中段。只在 session
+    起始(metadata 不存在)時做一次 reset。
+
+    reset=True 走的是新 session 路徑,此時 work_dir 本來就是全新空目錄,
+    rmtree 實質是 no-op;保留它純粹是防禦 work_dir 被重用的情況。
+
+    本函式不拋例外 —— 診斷目錄建不起來不該擋掉整個 workflow。
+
+    ⚠️ work_dir 位於 ACA ephemeral storage,replica 重啟後整個目錄(含 _debug/)
+       會消失。跨輪 manifest 的存活是盡力而為,不是保證。
+    """
+    debug_dir = os.path.join(work_dir, "_debug")
+    try:
+        if reset and os.path.isdir(debug_dir):
+            shutil.rmtree(debug_dir, ignore_errors=True)
+        os.makedirs(debug_dir, exist_ok=True)
+        logger.info(f"[State] _debug dir ready (reset={reset}): {debug_dir}")
+    except Exception as e:
+        logger.warning(f"[State] _debug dir init failed (non-fatal): {e}")
+
+
 def _apply_metadata_to_state(state: ConversationState, metadata: dict):
     """將 Table Storage 中的 workflow metadata 套用到新建的 state。"""
     # 2026.04.28 George: v1.5 還原 session_id / work_dir / output_files / execution_count
@@ -2661,18 +2704,12 @@ def _build_turn_summary(
 #   - user delegated token → 正常 OBO exchange 拿 SQL token,查 v_my_skills,
 #     這時回傳的清單就是這個使用者真正的 RBAC 範圍。
 #   - app/agent token(無 user subject)→ 沒有 OBO 可走,只能借用
-#     _get_admin_sql_token() 的 ACA MI token。但 MI 在 RLS predicate 上是
-#     `SUSER_SNAME() = '[aca-app-name]'` 的顯式 bypass(見 _get_admin_sql_token
-#     上方註解),查 v_my_skills 一定拿到「全部」skill,跟
-#     user_skill_grants 實際內容無關。run_workflow 借用這把 token 是為了
-#     讓 routine 執行「跑得完」,可以接受這個 demo tradeoff;但 list_skills
-#     是要「如實告知使用者被授權的範圍」,把 bypass 結果當成 RBAC 清單端
-#     出去會誤導人。所以這裡維持能顯示,但在文字上明確標註是 admin
-#     bypass 取得的完整目錄,不是 RLS 授權範圍。
-#     正式修法待辦(對齊 run_workflow 旁的 TODO):
-#       (a) Routine 改掛另一顆無 bypass 的 UAMI,或
-#       (b) 在 code 層對撈回的 skills 做 allowlist intersect
-#     二選一修完後,這裡的警語文字要一併拿掉。
+#     _get_admin_sql_token() 的 ACA MI token。查到的範圍取決於 RLS predicate:
+#     MI 的 SUSER_SNAME() 是 '<ClientID>@<TenantID>'(2026.09.26 實測),
+#     predicate 以 app 名稱比對時 bypass 不成立,結果只是「grant 給 MI 的
+#     skill」;predicate 填 ClientID@TenantID 時才是完整目錄。
+#     ⚠️ 下方分支仍以 full_catalog=True 處理並標註「admin bypass 完整目錄」——
+#     前者只影響孤兒 log 等級,後者在 bypass 不成立的部署是不正確的描述。
 def _format_skill_file_tree(file_paths: list[str]) -> list[str]:
     """將已過濾的 skill 相對路徑轉成巢狀 Markdown list。"""
     tree: dict = {}
@@ -2753,9 +2790,9 @@ def _project_scenario_skills(
     否則 parent 正文指名的 child 根本載不進來。
 
     Args:
-        full_catalog: 呼叫端這次拿到的是不是完整目錄。admin bypass 路徑是
-            (可信,孤兒判定直接 WARNING);user OBO 路徑不是 —— RLS 可能讓
-            使用者看得到 child 卻看不到 parent,會誤報,所以只記 DEBUG。
+        full_catalog: 呼叫端這次拿到的是不是完整目錄。True 時孤兒判定記 WARNING,
+            否則只記 DEBUG(RLS 可能讓呼叫者看得到 child 卻看不到 parent,會誤報)。
+            app/agent 路徑傳 True,但只有 RLS 對 MI 放行時才真的是完整目錄。
     """
     orphans = _detect_orphan_internal_skills(metas)
     if orphans:
@@ -2872,9 +2909,8 @@ async def list_skills(credentials: Optional[Dict] = None) -> str:
 
         else:
             # ── app/agent context(無 user subject,例如 Routine fire-time)──
-            # 見 function 上方大註解:MI token 在 RLS 上是顯式 bypass,
-            # 撈到的是「全部」skill,不是這個 app/agent 身份的 scoped 子集。
-            # 刻意不擋掉(維持可用),但清楚標註避免誤讀成 RBAC 範圍。
+            # 見 function 上方大註解:撈到的範圍取決於 RLS 是否對 MI 放行,
+            # 不一定是完整目錄。
             try:
                 sql_token = await _get_admin_sql_token()
             except Exception as e:
@@ -2887,9 +2923,8 @@ async def list_skills(credentials: Optional[Dict] = None) -> str:
                 logger.exception(f"[list_skills] SQL query failed (admin bypass path): {e}")
                 return "⚠️ 查詢 skill 清單時發生錯誤(SQL 連線問題),請聯絡管理員。"
 
-            # 2026.07.07 George : debug logging —— 同上,補一行 admin bypass
-            # path 查到的 skill 名稱,方便對照是不是真的拿到「全部」skill
-            # (這條路徑本來就該是全部,見上方大註解的 MI bypass 說明)。
+            # 2026.07.07 George : debug logging —— 記下這條路徑實際查到的 skill,
+            # 用來對照 RLS 是否對 MI 放行(見上方大註解)。
             logger.info(
                 "[list_skills] admin bypass path resolved %d skill(s): %s",
                 len(metas), [m.get("name") for m in metas],
@@ -2898,7 +2933,7 @@ async def list_skills(credentials: Optional[Dict] = None) -> str:
             if not metas:
                 return "⚠️ Skill 目錄為空。"
 
-            # 2026.08.21 George : 這條路徑拿到的是完整目錄,孤兒判定可信。
+            # 2026.08.21 George : 假設為完整目錄;RLS 未對 MI 放行時,孤兒 WARNING 可能誤報。
             visible = _project_scenario_skills(metas, full_catalog=True)
             if not visible:
                 return "⚠️ Skill 目錄中沒有任何情境層 skill(全部被標為 internal)。"
@@ -3072,7 +3107,7 @@ async def fetch_skill(
             return "⚠️ 未取得 Azure SQL OBO token,無法取得 skill 內容(檢查 OBO 設定)。"
     else:
         # 與 list_skills 一致:app/agent context(如 Routine fire-time)無使用者
-        # 身分,走 MI admin bypass,此時看得到的是完整目錄而非 RBAC 子集。
+        # 身分,改用 ACA MI;能取到哪些 skill 取決於 RLS 是否對 MI 放行。
         try:
             sql_token = await _get_admin_sql_token()
         except Exception as e:
@@ -3198,8 +3233,8 @@ async def sync_skills() -> str:
         sync_text = f"Skills synced: {count} skill(s). Workflow rebuilt with new skills."
         # 2026.07.05 George : list_skills 改 async 後補 await。
         # sync_skills() 本身是管理操作、沒有呼叫者的 __user_token,
-        # Dynamic 模式下會自然落入 list_skills 的 app/agent(admin bypass)
-        # 分支,顯示完整目錄並帶警語——這裡是同步後驗證用途,可以接受。
+        # Dynamic 模式下會自然落入 list_skills 的 app/agent(ACA MI)分支,
+        # 列出的是 MI 看得到的範圍——這裡是同步後驗證用途,可以接受。
         sync_text += "\n" + await list_skills()
     except Exception as e:
         logger.error(f"[SyncSkills] Failed: {e}", exc_info=True)
@@ -3230,14 +3265,14 @@ async def clear_session(session_id: str) -> str:
 # Mode B Dynamic Skills - Admin SQL Token Helper
 # 2026.05.25 George
 #
-# Gatekeeper approve 後同步 skill metadata 到 SQL 時,需要繞過 RLS 寫
-# user_skill_grants(一般 user OBO 會被 RLS 擋住寫別人的 grant)。
-# 解法:用 ACA Managed Identity 拿 SQL admin token。
+# Gatekeeper approve 後同步 skill metadata 到 SQL 時,以 ACA Managed Identity
+# 取得 SQL token 寫入 skills / user_skill_grants(一般 user 沒有這些寫入權限)。
 #
 # 前置條件(SQL 端必須完成,見 mode_b_publish_deployment.sql):
 #   1. CREATE USER [aca-app-name] FROM EXTERNAL PROVIDER
 #   2. GRANT INSERT/UPDATE/SELECT ON skills + INSERT/SELECT ON user_skill_grants
-#   3. RLS predicate function 加 SUSER_SNAME() = '[aca-app-name]' bypass
+# user_skill_grants 只有 FILTER predicate,INSERT 不受 RLS 影響,寫入不需要 bypass。
+# 2026.09.26 實測:MI 的 SUSER_SNAME() 是 '<ClientID>@<TenantID>',以 app 名稱比對的 bypass 不成立。
 # ============================================================================
 
 _admin_credential: Optional["AsyncDefaultAzureCredential"] = None  # type: ignore[name-defined]

@@ -3,15 +3,15 @@
   "upstream": {
     "repository": "https://github.com/agent-accelerators/enterprise-agent-accelerator.git",
     "local_checkout": "C:\\dev\\code_tool_hosted-async-1.8.0",
-    "commit": "1e4cb47b72bad52bf6e000855f85bb4686cd5dca",
-    "verified_at": "2026-09-11"
+    "commit": "bd13560ab0802ab119271b3cd3f2be3883dfec76",
+    "verified_at": "2026-09-26"
   },
   "files": [
     {
       "source": "core_handler.py",
       "destination": "reference/core_handler.py",
-      "version": "1.11",
-      "sha256": "9b73175103c5fe4015ddd66b489579d4a618fa03d4004cf540713528a49e5315"
+      "version": "1.12",
+      "sha256": "dd9c0e327e2f5726c8fef9deff2348eeb491511f6deecb8ce5b726a77c3de2f2"
     },
     {
       "source": "skill_gatekeeper.py",
