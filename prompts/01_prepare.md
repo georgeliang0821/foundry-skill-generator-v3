@@ -113,16 +113,23 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    actor, which only ever comes from `EAA_VERIFIED_USER_UPN`.
 
    **Decide how each downstream call authenticates, and say it out loud.** For
-   every external system: an OBO token (`obo_token`), the platform Managed
-   Identity, or nothing. Managed Identity is not a variable kind -- it becomes
+   every external system, in this order: acting as the user -> an OBO token
+   (`obo_token`); acting as the platform against an Entra-capable Azure
+   service -> the platform Managed Identity (never an API key); a service that
+   only takes an API key -> an `aca_env` secret; otherwise nothing. Managed
+   Identity is not a variable kind -- it becomes
    `from azure.identity import DefaultAzureCredential` plus
-   `credential=DefaultAzureCredential()` in the sample and the authentication
-   sentence in `## OBO Token Scopes` (see The Managed Identity Contract). The
+   `credential=DefaultAzureCredential()` in the sample, the Entra resource of
+   every service it reaches under `metadata.mi_scopes`, and the authentication
+   sentence in `## OBO Token Scopes` (see The Managed Identity Contract). Key
+   Vault can never be a Managed Identity resource. When a resource is outside
+   the platform's default `MI_SCOPE_ALLOWLIST` (`https://storage.azure.com`,
+   `https://ai.azure.com`), tell the user it is a deployment step. The
    runtime no longer assumes a Managed Identity, so never leave the choice
    implicit; if the materials do not settle it, ASK.
 
-   Never declare `OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL`,
-   `LOGIC_APP_SKILL_REVIEW_URL` or `AZURE_STORAGE_ACCOUNT_KEY` -- they exist
+   Never declare `OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL` or
+   `LOGIC_APP_SKILL_REVIEW_URL` -- they exist
    on the ACA app but are stripped from every skill's environment. Never name
    a `runtime` input (or its `credentials_key`) `PATH`, `PYTHON*`, `LD_*`,
    `EAA_VERIFIED_*` or an `OBO_SCOPE_REGISTRY` key: the runtime discards those

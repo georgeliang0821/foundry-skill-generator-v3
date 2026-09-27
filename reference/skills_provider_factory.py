@@ -44,6 +44,10 @@ skills_provider_factory.py — Per-turn, per-user SkillsProvider builder
     - SKILLS_BLOB_CONTAINER      (預設 "skills")
     - SKILLS_MATERIALIZE_BASE    (預設 /tmp/openclaw_skills)
 
+VERSION: 1.15
+2026.09.27 George : v1.15 — S3 MI 閘門:_materialize_skills() 收集已落地 skill 的
+                            metadata.mi_scopes,掛到 provider.mi_scopes_by_skill。
+
 VERSION: 1.14
 2026.09.04 George : v1.14 — scenario 白名單收斂
                             - `_materialize_skills(scenario=)`:宿主帶入情境層
@@ -257,6 +261,8 @@ from agent_framework import SkillsProvider
 from azure.storage.blob.aio import BlobServiceClient
 from cachetools import TTLCache
 
+from mi_proxy import declared_mi_scopes
+
 # 2026.08.14 George : v1.9 — skill 資料夾過濾規則的唯一真相。跟 blob 路徑
 # 推導公式放在同一檔,避免 Mode A / Mode B 各自漂移。
 from skills_sync import (
@@ -459,6 +465,8 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         super().__init__(*args, **kwargs)
         # 依載入順序、去重後保留;由 code_agent_hosted 讀取設給 state.skills_referenced
         self.loaded_skills: list[str] = []
+        # S3:本 turn 已落地 skill 的 metadata.mi_scopes(只列有宣告的),由 factory 指派
+        self.mi_scopes_by_skill: dict[str, list[str]] = {}
         # 2026.08.31 George : route_only — 記錄實際讀取的 resource,(skill, resource)。
         # 路由品質評估需要知道模型除了選對 skill,有沒有照 SKILL.md 的指示把附帶
         # 資源也讀進去 —— 只看 loaded_skills 看不出來。
@@ -1010,9 +1018,10 @@ class SkillsProviderFactory:
         metas: list[SkillMetadata],
         target_dir: Path,
         scenario: str = "",
-    ) -> None:
+    ) -> dict[str, list[str]]:
         """
         並行下載所有 skill 的資料夾內容,寫到 target_dir/{skill_name}/ 底下。
+        回傳已落地 skill 中有宣告 metadata.mi_scopes 者的 {skill_name: scopes}(S3)。
 
         目錄結構對齊 SkillsProvider 期待:
             target_dir/
@@ -1048,6 +1057,7 @@ class SkillsProviderFactory:
         """
         target_dir.mkdir(parents=True, exist_ok=True)
         scope = await self._resolve_scenario_scope(metas, scenario)
+        mi_scopes_by_skill: dict[str, list[str]] = {}
 
         async def write_one(meta: SkillMetadata) -> bool:
             if scope is not None and meta.skill_name not in scope:
@@ -1102,6 +1112,9 @@ class SkillsProviderFactory:
             ]
             if extras:
                 await asyncio.gather(*[write_extra(r) for r in extras])
+            declared = declared_mi_scopes(content)
+            if declared:
+                mi_scopes_by_skill[meta.skill_name] = declared
             return True
 
         written = 0
@@ -1112,6 +1125,9 @@ class SkillsProviderFactory:
             "[Skills] Materialized %d/%d skills to %s (%d skipped)",
             written, len(metas), target_dir, len(metas) - written,
         )
+        if mi_scopes_by_skill:
+            logger.info("[Skills] mi_scopes declared: %s", mi_scopes_by_skill)
+        return mi_scopes_by_skill
 
     async def _resolve_scenario_scope(
         self, metas: list[SkillMetadata], scenario: str
@@ -1220,7 +1236,7 @@ class SkillsProviderFactory:
 
             # Step 2 & 3: 撈 content + materialize
             try:
-                await self._materialize_skills(metas, target_dir, scenario)
+                mi_scopes_by_skill = await self._materialize_skills(metas, target_dir, scenario)
                 materialized = True
             except Exception as e:
                 logger.exception(
@@ -1257,6 +1273,7 @@ class SkillsProviderFactory:
             )
             # v1.11:同一組目錄再供 resource_name 前綴容錯使用
             provider.resource_directories = resource_dirs
+            provider.mi_scopes_by_skill = mi_scopes_by_skill
             yield provider
 
         finally:

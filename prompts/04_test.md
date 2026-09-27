@@ -142,6 +142,9 @@ no declared rule to break, and looking for one produces speculation.
   says the connection identity must be the end user. A skill whose body
   declares the platform Managed Identity as its way of authenticating is not a
   fallback and is not a finding.
+- The reverse: a Managed Identity skill that, when the token is refused
+  (`EAA MI proxy`), retries with another credential, asks for a key or switches
+  identity instead of exiting non-zero.
 - A guard the body declares -- order of security gates, error taxonomy,
   validation of caller-supplied data -- that the code drops.
 

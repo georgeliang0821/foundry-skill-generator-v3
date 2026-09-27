@@ -3,15 +3,15 @@
   "upstream": {
     "repository": "https://github.com/agent-accelerators/enterprise-agent-accelerator.git",
     "local_checkout": "C:\\dev\\code_tool_hosted-async-1.8.0",
-    "commit": "bd13560ab0802ab119271b3cd3f2be3883dfec76",
-    "verified_at": "2026-09-26"
+    "commit": "c67dc3fd190567ce46c6080ed6016989444c1137",
+    "verified_at": "2026-09-27"
   },
   "files": [
     {
       "source": "core_handler.py",
       "destination": "reference/core_handler.py",
       "version": "1.12",
-      "sha256": "dd9c0e327e2f5726c8fef9deff2348eeb491511f6deecb8ce5b726a77c3de2f2"
+      "sha256": "80b272402ed36c1f4ed1cf3c81458b98ea873f43e766d3c12b6c813c34918f66"
     },
     {
       "source": "skill_gatekeeper.py",
@@ -22,8 +22,20 @@
     {
       "source": "skills_provider_factory.py",
       "destination": "reference/skills_provider_factory.py",
-      "version": "1.14",
-      "sha256": "3394d403145ecf7ea8ed3462b3498a3e03c556382f5166f647116f1d67c00e12"
+      "version": "1.15",
+      "sha256": "95481865aa9e81ef2512a387234aa6e86a96b0e982bbce9d2d15d5aa5cf02914"
+    },
+    {
+      "source": "code_executor.py",
+      "destination": "reference/code_executor.py",
+      "version": "1.4",
+      "sha256": "060f70fbd822aa8fb6a4e7ce2f9f75a94fb2b89117901fb7ae8fc49493de1c2d"
+    },
+    {
+      "source": "mi_proxy.py",
+      "destination": "reference/mi_proxy.py",
+      "version": "1.0",
+      "sha256": "5cf881a9308702c2bda96e2fa9eeba1111a88f8b3fc5a0974a8f6296569becf8"
     }
   ],
   "contracts": [
@@ -137,6 +149,82 @@
       "review": [
         "backend/skill_lint.py",
         "backend/state_machine.py"
+      ]
+    }
+  ],
+  "restated": [
+    {
+      "source": "code_executor.py",
+      "symbol": "SUBPROCESS_ENV_DENYLIST",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "PLATFORM_SECRET_DENYLIST",
+      "relation": "equal",
+      "review": [
+        "prompts/10_format_spec.md",
+        "prompts/01_prepare.md",
+        "docs/02-setup.md"
+      ]
+    },
+    {
+      "source": "code_executor.py",
+      "symbol": "_RESERVED_EXEC_ENV_NAMES",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "_RESERVED_CREDENTIAL_NAMES",
+      "relation": "superset",
+      "review": [
+        "prompts/10_format_spec.md"
+      ]
+    },
+    {
+      "source": "code_executor.py",
+      "symbol": "_RESERVED_EXEC_ENV_PREFIXES",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "_RESERVED_CREDENTIAL_PREFIXES",
+      "relation": "superset",
+      "review": [
+        "prompts/10_format_spec.md"
+      ]
+    },
+    {
+      "source": "mi_proxy.py",
+      "symbol": "MI_ENV_KEYS",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "MI_ENV_KEYS",
+      "relation": "equal",
+      "review": [
+        "prompts/10_format_spec.md"
+      ]
+    },
+    {
+      "source": "mi_proxy.py",
+      "symbol": "HARD_DENIED_RESOURCES",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "MI_HARD_DENIED_RESOURCES",
+      "relation": "equal",
+      "review": [
+        "prompts/10_format_spec.md"
+      ]
+    },
+    {
+      "source": "mi_proxy.py",
+      "symbol": "_IDENTITY_SELECTORS",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "MI_IDENTITY_SELECTORS",
+      "relation": "superset",
+      "review": [
+        "prompts/10_format_spec.md"
+      ]
+    },
+    {
+      "source": "mi_proxy.py",
+      "symbol": "DEFAULT_ALLOWLIST",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "DEFAULT_MI_SCOPE_ALLOWLIST",
+      "relation": "equal",
+      "review": [
+        "prompts/10_format_spec.md",
+        "prompts/02_draft.md",
+        "docs/02-setup.md"
       ]
     }
   ],

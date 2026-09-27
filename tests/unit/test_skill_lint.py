@@ -990,6 +990,9 @@ def test_code_override_still_reconciles_against_the_authored_declarations() -> N
 MI_CAPABILITY = """---
 name: table-cleanup
 description: "Delete expired rows from Azure Table Storage."
+metadata:
+  mi_scopes:
+    - https://storage.azure.com
 ---
 
 ## Overview
@@ -1008,7 +1011,7 @@ Anything else -> use `other-skill`
 
 ## OBO Token Scopes
 
-This skill does not require any OBO token variable. Authenticate to Azure Table Storage with `DefaultAzureCredential()` (the platform Managed Identity), as shown in the sample below.
+This skill does not require any OBO token variable. Authenticate to Azure Table Storage with `DefaultAzureCredential()` (the platform Managed Identity), declared in `metadata.mi_scopes: [https://storage.azure.com]`.
 
 ## API Reference / Sample Code
 
@@ -1066,7 +1069,8 @@ def test_d6_requires_the_credential_to_be_passed() -> None:
 def test_d6_requires_the_sentence_in_obo_token_scopes() -> None:
     md = MI_CAPABILITY.replace(
         "This skill does not require any OBO token variable. Authenticate to Azure Table Storage "
-        "with `DefaultAzureCredential()` (the platform Managed Identity), as shown in the sample below.",
+        "with `DefaultAzureCredential()` (the platform Managed Identity), declared in "
+        "`metadata.mi_scopes: [https://storage.azure.com]`.",
         "This skill does not require any OBO token variable.",
     )
     assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D6") == ["OBO Token Scopes"]
@@ -1084,6 +1088,117 @@ def test_d6_stays_quiet_for_an_obo_skill() -> None:
     assert not [i for i in lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY) if i.rule == "D6"]
 
 
+MI_SENTENCE = (
+    "This skill does not require any OBO token variable. Authenticate to Azure Table Storage "
+    "with `DefaultAzureCredential()` (the platform Managed Identity), declared in "
+    "`metadata.mi_scopes: [https://storage.azure.com]`."
+)
+MI_SCOPES_BLOCK = "metadata:\n  mi_scopes:\n    - https://storage.azure.com\n"
+
+
+def _with_scopes(*scopes: str) -> str:
+    block = "metadata:\n  mi_scopes:\n" + "".join(f"    - {scope}\n" for scope in scopes)
+    sentence = MI_SENTENCE.replace("https://storage.azure.com", ", ".join(scopes))
+    return MI_CAPABILITY.replace(MI_SCOPES_BLOCK, block).replace(MI_SENTENCE, sentence)
+
+
+def test_d7_accepts_the_chinese_authentication_sentence() -> None:
+    md = MI_CAPABILITY.replace(
+        MI_SENTENCE,
+        "本 skill 不需要 OBO token 變數。以 `DefaultAzureCredential()`（平台 Managed Identity）驗證，"
+        "已宣告 `metadata.mi_scopes: [https://storage.azure.com]`。",
+    )
+    assert lint_skill(md, SkillKind.CAPABILITY) == []
+
+
+def test_d7_requires_mi_scopes_when_the_code_uses_managed_identity() -> None:
+    md = MI_CAPABILITY.replace(MI_SCOPES_BLOCK, "")
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D7"]
+    assert [i.detail for i in issues] == ["mi_scopes"]
+    assert "uses Managed Identity but declares no metadata.mi_scopes" in issues[0].message
+
+
+def test_d7_rejects_mi_scopes_on_a_skill_without_managed_identity() -> None:
+    md = CLEAN_CAPABILITY.replace(
+        "metadata:\n  author: a@b.c\n", "metadata:\n  author: a@b.c\n  mi_scopes:\n    - https://storage.azure.com\n"
+    )
+    assert "unused" in _errors(lint_skill(md, SkillKind.CAPABILITY), "D7")
+
+
+@pytest.mark.parametrize("scope", ["https://storage.azure.com/container", "storage.azure.com", "http://storage.azure.com"])
+def test_d7_rejects_a_malformed_resource(scope: str) -> None:
+    assert scope in _errors(lint_skill(_with_scopes(scope), SkillKind.CAPABILITY), "D7")
+
+
+def test_d7_accepts_a_trailing_default_suffix() -> None:
+    md = MI_CAPABILITY.replace("    - https://storage.azure.com\n", "    - https://storage.azure.com/.default\n")
+    assert lint_skill(md, SkillKind.CAPABILITY) == []
+
+
+def test_d7_rejects_key_vault() -> None:
+    md = _with_scopes("https://storage.azure.com", "https://vault.azure.net")
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D7") == ["https://vault.azure.net"]
+
+
+def test_d7_reports_a_resource_outside_the_default_allowlist_as_a_deployment_note(monkeypatch) -> None:
+    monkeypatch.delenv("MI_SCOPE_ALLOWLIST", raising=False)
+    md = _with_scopes("https://storage.azure.com", "https://search.azure.com")
+    issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D7"]
+    assert [(i.severity, i.detail) for i in issues] == [("info", "https://search.azure.com")]
+    assert "is not in MI_SCOPE_ALLOWLIST" in issues[0].message
+    assert "部署前需把 `https://search.azure.com` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`" in issues[0].message
+    assert "Search Index Data Reader" in issues[0].message
+
+
+def test_d7_uses_a_mirrored_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("MI_SCOPE_ALLOWLIST", "https://storage.azure.com,https://search.azure.com")
+    md = _with_scopes("https://storage.azure.com", "https://search.azure.com")
+    assert lint_skill(md, SkillKind.CAPABILITY) == []
+
+
+def test_d7_warns_that_broad_resources_grant_full_rights(monkeypatch) -> None:
+    monkeypatch.delenv("MI_SCOPE_ALLOWLIST", raising=False)
+    md = _with_scopes("https://storage.azure.com", "https://database.windows.net")
+    (issue,) = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D7"]
+    assert "全部權限" in issue.message and "OBO" in issue.message
+
+
+def test_d7_requires_code_scope_strings_to_be_declared() -> None:
+    md = MI_CAPABILITY.replace(
+        "    print(f\"Connected",
+        '    token = DefaultAzureCredential().get_token("https://ai.azure.com/.default")\n'
+        "    print(f\"Connected",
+    )
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D7") == ["https://ai.azure.com"]
+
+
+def test_d7_requires_the_resources_in_obo_token_scopes() -> None:
+    md = MI_CAPABILITY.replace(" declared in `metadata.mi_scopes: [https://storage.azure.com]`", "")
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D7") == ["OBO Token Scopes"]
+
+
+@pytest.mark.parametrize(("line", "detail"), [
+    ('    probe = os.environ["IDENTITY_ENDPOINT"]', "IDENTITY_ENDPOINT"),
+    ('    probe = {"X-IDENTITY-HEADER": os.environ.get("IDENTITY_HEADER")}', "IDENTITY_HEADER"),
+    ('    probe = "http://169.254.169.254/metadata/identity/oauth2/token"', "169.254.169.254"),
+    ('    probe = "http://localhost:42356/msi/token"', "/msi/token"),
+    ("    probe = DefaultAzureCredential(managed_identity_client_id=endpoint)", "managed_identity_client_id"),
+    ("    probe = ChainedTokenCredential(DefaultAzureCredential())", "ChainedTokenCredential"),
+    ("    probe = AzureKeyCredential(endpoint)", "AzureKeyCredential"),
+])
+def test_d8_restricts_how_the_managed_identity_token_is_obtained(line: str, detail: str) -> None:
+    md = MI_CAPABILITY.replace("    print(f\"Connected", f"{line}\n    print(probe)\n    print(f\"Connected")
+    assert detail in _errors(lint_skill(md, SkillKind.CAPABILITY), "D8")
+
+
+def test_d8_ignores_prose_and_comments() -> None:
+    md = MI_CAPABILITY.replace(
+        "    print(f\"Connected",
+        "    # never read IDENTITY_ENDPOINT or call ChainedTokenCredential\n    print(f\"Connected",
+    ) + "\nNever read `IDENTITY_ENDPOINT`.\n"
+    assert not [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D8"]
+
+
 @pytest.mark.parametrize(("placeholder", "detail"), [
     ("credential=...", "credential=..."),
     ("credential=None", "credential=None"),
@@ -1097,9 +1212,9 @@ def test_d5_rejects_a_placeholder_credential(placeholder: str, detail: str) -> N
 def test_d4_rejects_reading_a_platform_secret() -> None:
     md = CLEAN_CAPABILITY.replace(
         '    host = os.environ["API_HOST"]',
-        '    host = os.environ["API_HOST"]\n    key = os.environ["AZURE_STORAGE_ACCOUNT_KEY"]',
+        '    host = os.environ["API_HOST"]\n    key = os.environ["TEAMS_NOTIFY_WEBHOOK_URL"]',
     )
-    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D4") == ["AZURE_STORAGE_ACCOUNT_KEY"]
+    assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D4") == ["TEAMS_NOTIFY_WEBHOOK_URL"]
 
 
 def test_d4_scans_prose_like_the_eaa_lint() -> None:

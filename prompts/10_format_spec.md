@@ -15,6 +15,10 @@ metadata:
 ---
 ```
 
+A skill that uses the platform Managed Identity also declares
+`metadata.mi_scopes` (see The Managed Identity Contract); every other skill
+omits that key.
+
 `name` must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` and be at most 64
 characters -- lowercase letters, digits and hyphens only, no leading or
 trailing hyphen. This is enforced by the database (`CK_skill_name_format`), so
@@ -261,26 +265,114 @@ IS the platform Managed Identity; that skill follows the contract below.
 Some skills call an Azure resource (Azure Storage, Table Storage, Foundry, ...)
 with the platform's Managed Identity because no OBO token is available for it.
 The runtime no longer assumes a Managed Identity on its own: a skill that does
-not name its credential explicitly fails, or comes back as `[NEEDS_INFO]`.
+not name its credential explicitly fails, or comes back as `[NEEDS_INFO]`. The
+runtime's MI gate also hands a token to a script only when its skill was loaded
+in the same turn AND declares the resource in `metadata.mi_scopes`; an
+undeclared resource fails with an error containing `EAA MI proxy`.
 
-- The sample code imports the credential explicitly --
-  `from azure.identity import DefaultAzureCredential` -- and passes
+### Choose the authentication, in this order
+
+1. The call acts AS THE USER (the user's own data, auditing down to a person)
+   -> an OBO token such as `GRAPH_ACCESS_TOKEN` or `AZURE_SQL_ACCESS_TOKEN`
+   (`obo_token`). Never the Managed Identity.
+2. The call acts as the PLATFORM against an Azure service that supports Entra
+   -> `DefaultAzureCredential()` plus `metadata.mi_scopes`. Never switch to an
+   API key.
+3. An on-premises or third-party API fronted by APIM or Entra App Proxy that
+   accepts Entra tokens -> rule 1 or 2, with a token.
+4. A service that only accepts an API key -> read the value an ACA secret
+   injects with `os.environ["<ENV_NAME>"]` and declare it as an `aca_env`
+   variable. Never write the key into the skill: the file enters the model
+   context, the conversation history and every `fetch_skill` result.
+
+Only use the Managed Identity when the materials or the user say so. A skill
+whose downstream decides the caller from a user token (Graph `/me`, Azure SQL
+with RLS) is an `obo_token` skill and must not use a Managed Identity.
+
+### Declare `metadata.mi_scopes`
+
+The field is REQUIRED whenever the sample code calls
+`DefaultAzureCredential(` or `ManagedIdentityCredential(`, including when the
+credential is handed to an Azure SDK client that fetches the token internally
+(`TableServiceClient(..., credential=DefaultAzureCredential())`). A skill that
+does not use the Managed Identity must NOT carry the field.
+
+```yaml
+---
+name: <skill-name>
+description: "..."
+metadata:
+  mi_scopes:
+    - https://storage.azure.com
+---
+```
+
+It is a YAML list. Each entry is an Entra resource identifier, `https://<host>`
+with no path; a trailing `/.default` is optional. List only the resources the
+code actually reaches (least privilege):
+
+| Service the code reaches | `mi_scopes` entry |
+| --- | --- |
+| Blob / Table / Queue / Data Lake (`azure-storage-*`, `azure-data-tables`) | `https://storage.azure.com` |
+| Microsoft Foundry / Agent Service / Routines | `https://ai.azure.com` |
+| Azure AI Search (`azure-search-documents`) | `https://search.azure.com` |
+| Azure OpenAI / Azure AI Services (cognitiveservices) | `https://cognitiveservices.azure.com` |
+| Service Bus | `https://servicebus.azure.net` |
+| Event Hubs | `https://eventhubs.azure.net` |
+| Azure SQL as the platform | `https://database.windows.net` |
+| ARM / management plane as the platform | `https://management.azure.com` |
+| Key Vault | FORBIDDEN -- the runtime always refuses it; the lint rejects it |
+
+A scope string written in the code (for example
+`get_token("https://ai.azure.com/.default")`) must match a declared entry.
+
+### Declared is not the same as allowed
+
+The platform keeps a global `MI_SCOPE_ALLOWLIST`, by default only
+`https://storage.azure.com,https://ai.azure.com`. When the skill needs any
+other resource, tell the user in your `text` field (never in the skill file):
+「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI 指派
+`<最小 RBAC 角色>`」. Allowlisting `https://database.windows.net` or
+`https://management.azure.com` gives every skill that declares it the platform
+MI's full rights on that resource, so prefer an OBO token for those unless the
+resource is genuinely not authorized per user.
+
+### Write the code this way
+
+- Import the credential explicitly --
+  `from azure.identity import DefaultAzureCredential` -- and pass
   `credential=DefaultAzureCredential()` to the client. Use
   `DefaultAzureCredential`, not `ManagedIdentityCredential`.
-- `## OBO Token Scopes` states the authentication in one sentence, for example:
-  "This skill does not require any OBO token variable. Authenticate to Azure
-  Table Storage with `DefaultAzureCredential()` (the platform Managed
-  Identity), as shown in the sample below." When the skill also uses OBO
-  tokens, list them and add the sentence for the resource that uses the
-  Managed Identity.
+- Get the token only through azure-identity. Never read or hard-code
+  `IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `MSI_ENDPOINT` or `MSI_SECRET`, and
+  never call `169.254.169.254` or `localhost:<port>/msi/token` yourself.
+- Never pass `managed_identity_client_id=`, `client_id=`, `object_id=` or
+  `mi_res_id=`. The platform has only a system-assigned identity and rejects
+  any selector (403).
+- When the token is refused and the error contains `EAA MI proxy`, print a
+  clear error and exit non-zero. Never retry with another credential
+  (`ChainedTokenCredential`, `ClientSecretCredential`, `AzureKeyCredential`,
+  ...), never ask the user for a key, never switch to another identity.
 - Never leave the credential for someone else to supply: no `credential=...`,
   no `credential=None`, no `<your-credential>`, and no prose such as "fill in
   the credential for your deployment" or 依部署環境自行填入.
 - The resource endpoint is still deployment configuration: declare it as an
   `aca_env` variable, never hard-code it.
-- Only use the Managed Identity when the materials or the user say so. A skill
-  whose downstream decides the caller from a user token (Graph `/me`, Azure SQL
-  with RLS) is an `obo_token` skill and must not use a Managed Identity.
+- The Execution Environment Contract still applies: no run-time `pip install`,
+  no `pwd.getpwuid()` / `os.getlogin()`, no background process, write only in
+  the working directory.
+
+### State it in `## OBO Token Scopes`
+
+One sentence naming the credential and the declared resources, for example:
+「本 skill 不需要 OBO token 變數。以 `DefaultAzureCredential()`（平台 Managed Identity）
+驗證，已宣告 `metadata.mi_scopes: [https://storage.azure.com]`。」 When the skill also
+uses OBO tokens, list them and add the sentence for the resources that use the
+Managed Identity.
+
+The runtime executes a sample only when the skill is loaded in that same turn,
+so an MI token is never available to code run outside it. Route-only tests do
+not execute code and are unaffected.
 
 ## Platform-Reserved Names
 
@@ -289,8 +381,7 @@ skill must never read them and must never list them in `## Environment
 Variables`, `## OBO Token Scopes`, `## Required Inputs` or any env.yaml as
 required -- not even in a prose example, because the runtime model follows the
 prose and the runtime lint scans the full text:
-`OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL`, `LOGIC_APP_SKILL_REVIEW_URL`,
-`AZURE_STORAGE_ACCOUNT_KEY`.
+`OBO_CLIENT_SECRET`, `TEAMS_NOTIFY_WEBHOOK_URL`, `LOGIC_APP_SKILL_REVIEW_URL`.
 
 A value the caller sends in `credentials` must not use a name the runtime
 discards: `PATH`, anything starting with `PYTHON`, `LD_` or `EAA_VERIFIED_`,
@@ -308,7 +399,8 @@ there. That uid has no `/etc/passwd` entry. When the run ends, every process
 the uid started is killed, and symlinks, special files and multiply-linked
 files in `work_dir` are deleted. Output files are collected only from the top
 level of `work_dir`, only when they are new regular files with an allowed
-extension. `DefaultAzureCredential()` keeps working.
+extension. `DefaultAzureCredential()` keeps working for a skill that declares
+`metadata.mi_scopes` (see The Managed Identity Contract).
 
 The sample code must follow these five rules. They hold whether or not the
 sandbox is on, so apply them to every capability skill. This contract adds no

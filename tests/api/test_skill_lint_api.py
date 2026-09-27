@@ -177,6 +177,23 @@ def test_save_is_blocked_by_eaa_lint_errors_and_warnings(client, backend_main, m
     assert not backend_main.store.list_skills()
 
 
+def test_mi_allowlist_warning_saves_and_tells_the_agent_once(client, backend_main, monkeypatch) -> None:
+    warning = "WARN metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']"
+    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: [warning])
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+
+    for _ in range(2):
+        assert client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"}).status_code == 200
+
+    notes = [
+        m for m in backend_main.sessions[session_id].conversation
+        if m.role == MessageRole.SYSTEM and "MI_SCOPE_ALLOWLIST" in m.content
+    ]
+    assert len(notes) == 1
+    assert "部署前需把 `https://search.azure.com` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`" in notes[0].content
+
+
 def test_save_fails_closed_when_the_eaa_lint_cannot_run(client, backend_main, monkeypatch) -> None:
     def unavailable(name, files):
         raise backend_main.EaaLintUnavailable("EAA_REPO_DIR is not set.")

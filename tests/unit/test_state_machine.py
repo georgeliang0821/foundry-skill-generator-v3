@@ -134,7 +134,7 @@ def test_aca_environment_hides_platform_secrets_from_the_agent() -> None:
     session = Session(current_stage=Stage.PREPARE)
     session.aca_env_result = {
         "revision": "r1",
-        "variables": ["OBO_CLIENT_ID", "OBO_CLIENT_SECRET", "AZURE_STORAGE_ACCOUNT_KEY",
+        "variables": ["OBO_CLIENT_ID", "OBO_CLIENT_SECRET",
                       "TEAMS_NOTIFY_WEBHOOK_URL", "LOGIC_APP_SKILL_REVIEW_URL", "HR_SQL_SERVER"],
         "architectural_config": {"OBO_SCOPE_REGISTRY": '{"AZURE_SQL_ACCESS_TOKEN": "https://database.windows.net/.default"}'},
     }
@@ -143,7 +143,7 @@ def test_aca_environment_hides_platform_secrets_from_the_agent() -> None:
 
     assert "`OBO_CLIENT_ID`" in text
     assert "`HR_SQL_SERVER`" in text
-    for secret in ("OBO_CLIENT_SECRET", "AZURE_STORAGE_ACCOUNT_KEY", "TEAMS_NOTIFY_WEBHOOK_URL", "LOGIC_APP_SKILL_REVIEW_URL"):
+    for secret in ("OBO_CLIENT_SECRET", "TEAMS_NOTIFY_WEBHOOK_URL", "LOGIC_APP_SKILL_REVIEW_URL"):
         assert secret not in text
     assert "`AZURE_SQL_ACCESS_TOKEN`: https://database.windows.net/.default" in text
 

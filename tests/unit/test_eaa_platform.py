@@ -8,9 +8,13 @@ import pytest
 from backend.eaa_platform import (
     STATIC_OBO_REGISTRY_KEYS,
     EaaLintUnavailable,
+    declared_mi_scopes,
+    mi_allowlist_note,
+    normalize_mi_resource,
     obo_registry_keys,
     reserved_credentials_key_reason,
     run_eaa_skill_lint,
+    split_eaa_allowlist_warnings,
 )
 
 SKILL = {"SKILL.md": "---\nname: demo\ndescription: Demo\n---\n\n## Overview\nDemo.\n"}
@@ -92,6 +96,51 @@ def test_files_outside_the_skill_folder_are_refused(tmp_path: Path, monkeypatch:
     _fake_repo(tmp_path, monkeypatch, _printing([{"skill": "demo", "errors": [], "warnings": []}]))
     with pytest.raises(EaaLintUnavailable, match="outside"):
         run_eaa_skill_lint("demo", {"../escape.md": "x"})
+
+
+def test_tool_sees_a_mirrored_mi_scope_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MI_SCOPE_ALLOWLIST", "https://storage.azure.com,https://search.azure.com")
+    _fake_repo(tmp_path, monkeypatch, (
+        "import json, os\n"
+        "w = [] if 'search.azure.com' in os.environ.get('MI_SCOPE_ALLOWLIST', '') else ['no allowlist']\n"
+        "print(json.dumps([{'skill': 'demo', 'errors': [], 'warnings': w}]))\n"
+    ))
+    assert run_eaa_skill_lint("demo", SKILL) == []
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("https://Storage.azure.com/.default", "https://storage.azure.com"),
+    ("https://ai.azure.com/", "https://ai.azure.com"),
+    ("https://storage.azure.com/container", ""),
+    ("http://storage.azure.com", ""),
+    ("https://storage.azure.com:443", ""),
+    ("storage.azure.com", ""),
+    (None, ""),
+])
+def test_normalize_mi_resource_matches_the_mi_proxy(raw, expected) -> None:
+    assert normalize_mi_resource(raw) == expected
+
+
+@pytest.mark.parametrize(("frontmatter", "expected"), [
+    ("metadata:\n  mi_scopes:\n    - https://storage.azure.com\n", ["https://storage.azure.com"]),
+    ("metadata:\n  mi_scopes: https://storage.azure.com, https://ai.azure.com\n", ["https://storage.azure.com", "https://ai.azure.com"]),
+    ("metadata:\n  author: x\n", []),
+    ("metadata: [broken\n", []),
+])
+def test_declared_mi_scopes(frontmatter: str, expected: list[str]) -> None:
+    assert declared_mi_scopes(f"---\nname: demo\n{frontmatter}---\n\nbody\n") == expected
+
+
+def test_allowlist_warnings_are_split_from_blocking_problems() -> None:
+    problems = [
+        "ERROR reads OBO_CLIENT_SECRET",
+        "WARN metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']",
+        "WARN uses Managed Identity but declares no metadata.mi_scopes — MI is denied when MI_GATE_ENABLED=true",
+    ]
+    blocking, resources = split_eaa_allowlist_warnings(problems)
+    assert blocking == [problems[0], problems[2]]
+    assert resources == ["https://search.azure.com"]
+    assert "Search Index Data Reader" in mi_allowlist_note(resources[0])
 
 
 @pytest.mark.parametrize(("aca_env_result", "expected"), [

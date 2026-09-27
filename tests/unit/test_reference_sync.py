@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from scripts.sync_reference import (
     changed_symbols,
     check_response_coverage,
+    check_restated_constants,
     check_wire_coverage,
+    constant_members,
     diff_surface,
     explain_symbol,
     extract_surface,
@@ -15,6 +20,7 @@ from scripts.sync_reference import (
     impact_tokens,
     inspect_reference,
     sha256_bytes,
+    upstream_position,
     validate_contracts,
 )
 
@@ -44,6 +50,79 @@ def test_known_contracts_match_snapshot() -> None:
         for spec in manifest["files"]
     }
     assert validate_contracts(contents, manifest["contracts"]) == []
+
+
+def test_restated_constants_match_snapshot() -> None:
+    manifest = _manifest()
+    contents = {
+        spec["source"]: (ROOT / spec["destination"]).read_bytes()
+        for spec in manifest["files"]
+    }
+    assert check_restated_constants(ROOT, contents, manifest["restated"]) == []
+
+
+def test_constant_members_reads_sets_tuples_and_comma_strings() -> None:
+    content = b'A = frozenset({"x", "y"})\nB = ("p", "q")\nC = "u, v"\nD = compute()\n'
+    assert constant_members(content, "m.py", "A") == ["x", "y"]
+    assert constant_members(content, "m.py", "B") == ["p", "q"]
+    assert constant_members(content, "m.py", "C") == ["u", "v"]
+    assert constant_members(content, "m.py", "D") is None
+    assert constant_members(content, "m.py", "missing") is None
+
+
+@pytest.mark.parametrize(("relation", "ours", "expected"), [
+    ("equal", '{"a", "b"}', []),
+    ("equal", '{"a"}', ["upstream has ['b'] that OURS lacks"]),
+    ("equal", '{"a", "b", "c"}', ["OURS still has ['c'] that upstream dropped"]),
+    ("superset", '{"a", "b", "c"}', []),
+    ("superset", '{"a"}', ["upstream has ['b'] that OURS lacks"]),
+])
+def test_restated_constant_drift(tmp_path, relation: str, ours: str, expected: list[str]) -> None:
+    target = tmp_path / "backend" / "eaa_platform.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(f"OURS = frozenset({ours})\n", encoding="utf-8")
+    spec = {"source": "up.py", "symbol": "THEIRS", "file": "backend/eaa_platform.py",
+            "restated_as": "OURS", "relation": relation}
+    findings = check_restated_constants(tmp_path, {"up.py": b'THEIRS = frozenset({"a", "b"})\n'}, [spec])
+    assert [f["problem"].removeprefix("restated constant drifted: ") for f in findings] == expected
+
+
+def test_restated_constant_that_is_no_longer_a_literal_is_reported(tmp_path) -> None:
+    target = tmp_path / "backend" / "eaa_platform.py"
+    target.parent.mkdir(parents=True)
+    target.write_text('OURS = frozenset({"a"})\n', encoding="utf-8")
+    spec = {"source": "up.py", "symbol": "THEIRS", "file": "backend/eaa_platform.py", "restated_as": "OURS"}
+    (finding,) = check_restated_constants(tmp_path, {"up.py": b"THEIRS = load()\n"}, [spec])
+    assert "up.py::THEIRS is missing" in finding["problem"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_upstream_position_reports_snapshot_files_changed_past_the_pin(tmp_path) -> None:
+    repo = tmp_path / "eaa"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "mi_proxy.py").write_text("A = 1\n", encoding="utf-8")
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "pin")
+    pinned = _git(repo, "rev-parse", "HEAD")
+
+    assert upstream_position(repo, pinned, ["mi_proxy.py"])["changed_sources"] == []
+
+    (repo / "README.md").write_text("y\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "docs only")
+    assert upstream_position(repo, pinned, ["mi_proxy.py"])["changed_sources"] == []
+
+    (repo / "mi_proxy.py").write_text("A = 2\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "contract")
+    position = upstream_position(repo, pinned, ["mi_proxy.py"])
+    assert position["changed_sources"] == ["mi_proxy.py"]
+    assert position["head"] != position["pinned"] == pinned
 
 
 def test_contract_validator_names_review_targets() -> None:

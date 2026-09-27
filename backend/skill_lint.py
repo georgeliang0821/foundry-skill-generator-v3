@@ -34,8 +34,15 @@ from typing import Collection, Iterable, Mapping, Sequence
 
 from .models import SkillKind
 from .eaa_platform import (
+    MI_ENV_KEYS,
+    MI_HARD_DENIED_RESOURCES,
+    MI_IDENTITY_SELECTORS,
     PLATFORM_SECRET_DENYLIST,
     STATIC_OBO_REGISTRY_KEYS,
+    declared_mi_scopes,
+    mi_allowlist_note,
+    mi_scope_allowlist,
+    normalize_mi_resource,
     reserved_credentials_key_reason,
 )
 from .input_contract import parse_input_bindings
@@ -81,6 +88,18 @@ _ANY_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _CREDENTIAL_PLACEHOLDER_RE = re.compile(r"\bcredential\s*=\s*(?:\.\.\.|None\b|<)")
 _MI_CREDENTIAL_RE = re.compile(r"\b(?:DefaultAzureCredential|ManagedIdentityCredential)\b")
 _DEFAULT_CREDENTIAL = "DefaultAzureCredential"
+# EAA's own "uses Managed Identity" test.
+_MI_CALL_RE = re.compile(r"\b(?:DefaultAzureCredential|ManagedIdentityCredential)\s*\(")
+_MI_CREDENTIAL_CLASSES = frozenset({"DefaultAzureCredential", "ManagedIdentityCredential"})
+# Any of these next to the MI is a fallback identity or a key replacing Entra.
+_FALLBACK_CREDENTIALS = frozenset({
+    "ChainedTokenCredential", "ClientSecretCredential", "CertificateCredential",
+    "EnvironmentCredential", "AzureCliCredential", "AzurePowerShellCredential",
+    "AzureDeveloperCliCredential", "UsernamePasswordCredential", "InteractiveBrowserCredential",
+    "DeviceCodeCredential", "WorkloadIdentityCredential", "AzureKeyCredential", "AzureNamedKeyCredential",
+    "AzureSasCredential",
+})
+_MI_ENDPOINT_FRAGMENTS = ("169.254.169.254", "/msi/token", "/metadata/identity/oauth2/token")
 
 # --- EAA execution environment (E1-E4) --------------------------------------
 # Under SUBPROCESS_UID_SANDBOX the script runs as a throwaway uid with no passwd
@@ -693,6 +712,8 @@ def _lint_capability(
     issues.extend(_check_deployment_config(skill_md, tree, code))
     issues.extend(_check_identity_contract(skill_md, tree))
     issues.extend(_check_managed_identity(skill_md, tree, code))
+    issues.extend(_check_mi_scopes(skill_md, tree, code))
+    issues.extend(_check_mi_acquisition(tree, code))
     issues.extend(_check_reserved_credentials_keys(skill_md, tree, registry_keys))
     return issues
 
@@ -1353,7 +1374,8 @@ def _check_managed_identity(skill_md: str, tree: ast.AST, code: str) -> list[Lin
             detail="credential",
         ))
     normalized = _normalize(obo_body)
-    if not all(phrase in normalized for phrase in ("authenticate", "defaultazurecredential()", "managed identity")):
+    authenticates = "authenticate" in normalized or "驗證" in normalized
+    if not (authenticates and all(phrase in normalized for phrase in ("defaultazurecredential()", "managed identity"))):
         issues.append(LintIssue(
             rule="D6",
             severity="error",
@@ -1365,6 +1387,179 @@ def _check_managed_identity(skill_md: str, tree: ast.AST, code: str) -> list[Lin
             ),
             detail=OBO_SECTION,
         ))
+    return issues
+
+
+def _call_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else ""
+
+
+def _string_constants(tree: ast.AST) -> list[str]:
+    return [
+        node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+
+def _code_token_scopes(tree: ast.AST) -> list[str]:
+    """Resources named by a literal token scope: any ``.../.default`` string or a ``get_token`` argument."""
+    literals = [value for value in _string_constants(tree) if value.strip().endswith("/.default")]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _call_name(node) == "get_token":
+            literals.extend(
+                arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            )
+    return _unique(literals)
+
+
+def _check_mi_scopes(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
+    """D7 -- EAA's MI gate hands out a token only for resources in `metadata.mi_scopes`."""
+    uses_mi = bool(_MI_CALL_RE.search(code))
+    scopes = declared_mi_scopes(skill_md)
+    if not uses_mi and not scopes:
+        return []
+    if not scopes:
+        return [LintIssue(
+            rule="D7",
+            severity="error",
+            message=(
+                "The code uses Managed Identity but declares no metadata.mi_scopes. EAA's MI gate "
+                "refuses the token (the script fails with `EAA MI proxy`). List every Entra resource "
+                "the code reaches under `metadata.mi_scopes`, e.g. `- https://storage.azure.com`."
+            ),
+            detail="mi_scopes",
+        )]
+    issues: list[LintIssue] = []
+    if not uses_mi:
+        issues.append(LintIssue(
+            rule="D7",
+            severity="error",
+            message=(
+                "`metadata.mi_scopes` is declared but the code never calls `DefaultAzureCredential()`. "
+                "A skill that does not use the platform Managed Identity must not declare the field."
+            ),
+            detail="unused",
+        ))
+    allowlist = mi_scope_allowlist()
+    resources: list[str] = []
+    for scope in scopes:
+        resource = normalize_mi_resource(scope)
+        if not resource:
+            issues.append(LintIssue(
+                rule="D7",
+                severity="error",
+                message=(
+                    f"metadata.mi_scopes entry `{scope}` is not an Entra resource identifier. Write "
+                    "`https://<host>` with no path, e.g. `https://storage.azure.com`."
+                ),
+                detail=scope,
+            ))
+            continue
+        resources.append(resource)
+        if resource in MI_HARD_DENIED_RESOURCES:
+            issues.append(LintIssue(
+                rule="D7",
+                severity="error",
+                message=(
+                    f"metadata.mi_scopes: {resource} is always denied by the MI proxy. Key Vault secrets "
+                    "belong to no single skill; read an ACA secret with `os.environ[\"<NAME>\"]` instead."
+                ),
+                detail=resource,
+            ))
+        elif resource not in allowlist:
+            issues.append(LintIssue(
+                rule="D7",
+                severity="info",
+                message=(
+                    f"metadata.mi_scopes: {resource} is not in MI_SCOPE_ALLOWLIST. "
+                    + mi_allowlist_note(resource)
+                ),
+                detail=resource,
+            ))
+    for literal in _code_token_scopes(tree):
+        resource = normalize_mi_resource(literal)
+        if resource and resources and resource not in resources:
+            issues.append(LintIssue(
+                rule="D7",
+                severity="error",
+                message=(
+                    f"The code requests a token for `{literal}`, but `metadata.mi_scopes` does not "
+                    f"declare {resource}. The MI gate refuses any resource that is not declared."
+                ),
+                detail=resource,
+            ))
+    normalized = _normalize(_section_body(skill_md, OBO_SECTION))
+    missing = [r for r in resources if r not in normalized]
+    if uses_mi and ("mi_scopes" not in normalized or missing):
+        issues.append(LintIssue(
+            rule="D7",
+            severity="error",
+            message=(
+                f"`## {OBO_SECTION}` must name the declared resources, e.g. \"以 `DefaultAzureCredential()`"
+                f"（平台 Managed Identity）驗證，已宣告 `metadata.mi_scopes: [{', '.join(resources)}]`\"."
+            ),
+            detail=OBO_SECTION,
+        ))
+    return issues
+
+
+def _check_mi_acquisition(tree: ast.AST, code: str) -> list[LintIssue]:
+    """D8 -- the MI token comes only from azure-identity, for the system-assigned identity."""
+    issues: list[LintIssue] = []
+    constants = _string_constants(tree)
+    for key in sorted(MI_ENV_KEYS & set(constants)):
+        issues.append(LintIssue(
+            rule="D8",
+            severity="error",
+            message=(
+                f"The code references `{key}`. Get the Managed Identity token only through "
+                "azure-identity (`DefaultAzureCredential()`); the MI endpoint variables are not the "
+                "skill's to read."
+            ),
+            detail=key,
+        ))
+    for fragment in _MI_ENDPOINT_FRAGMENTS:
+        if any(fragment in value for value in constants):
+            issues.append(LintIssue(
+                rule="D8",
+                severity="error",
+                message=(
+                    f"The code calls the identity endpoint directly (`{fragment}`). Use "
+                    "`DefaultAzureCredential()`; a hand-rolled token request bypasses the MI gate."
+                ),
+                detail=fragment,
+            ))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _call_name(node) in _MI_CREDENTIAL_CLASSES):
+            continue
+        for kw in node.keywords:
+            if kw.arg in MI_IDENTITY_SELECTORS:
+                issues.append(LintIssue(
+                    rule="D8",
+                    severity="error",
+                    message=(
+                        f"`{_call_name(node)}({kw.arg}=...)` selects a user-assigned identity. The "
+                        "platform has only a system-assigned Managed Identity and rejects it (403); "
+                        "call `DefaultAzureCredential()` with no identity arguments."
+                    ),
+                    detail=kw.arg,
+                ))
+    if _MI_CALL_RE.search(code):
+        used = {_call_name(node) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        used |= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        for name in sorted(used & _FALLBACK_CREDENTIALS):
+            issues.append(LintIssue(
+                rule="D8",
+                severity="error",
+                message=(
+                    f"A Managed Identity skill also uses `{name}`. When the MI token is refused "
+                    "(`EAA MI proxy`) the script must print the error and exit non-zero -- never "
+                    "retry with another credential, a key or another identity."
+                ),
+                detail=name,
+            ))
     return issues
 
 

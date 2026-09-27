@@ -118,6 +118,14 @@ user's accept/reject.
   be edited directly on the accept card. After acceptance the name is stored, so
   changing it becomes a `rename_skill` that moves the Blob folder, the SQL row
   and every grant.
+- **Managed Identity skills declare `metadata.mi_scopes`.** When the sample
+  code calls `DefaultAzureCredential()`, list every Entra resource it reaches
+  in the frontmatter and name them in `## OBO Token Scopes` (see The Managed
+  Identity Contract). For each declared resource other than
+  `https://storage.azure.com` and `https://ai.azure.com`, your `text` field must
+  say: 「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI
+  指派 `<最小 RBAC 角色>`」. That is a deployment TODO and never goes into the
+  skill text.
 - The reader of the skill is a CODING AGENT picking ONE skill per user request,
   so the `description` must say WHEN to use the skill (intent/situation) and
   carry the centrifugal contrast against the neighbor skills, NOT technical

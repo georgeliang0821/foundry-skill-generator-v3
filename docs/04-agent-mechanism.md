@@ -106,18 +106,22 @@ Lint `A13` 拒絕無效契約，`A14` 拒絕缺少樣板、宣告與樣板綁定
 以及可直接執行的 request 範例值。這些是靜態結構檢查，**不是完整控制流程或無副作用證明**。
 既有 `A12` 外部呼叫結果檢查仍為 advisory。
 
-#### EAA 平台規則（D4–D6、A15）
+#### EAA 平台規則（D4–D8、A15）
 
-EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且不再預設使用 Managed Identity。以下規則都是 **error**，會擋下儲存（實作：[skill_lint.py](../backend/skill_lint.py)、[eaa_platform.py](../backend/eaa_platform.py)；規則文字在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Managed Identity Contract 與 Platform-Reserved Names）：
+EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且不再預設使用 Managed Identity；S3 的 MI 閘門（`MI_GATE_ENABLED`）只替「本輪已載入、且在 frontmatter 宣告 `metadata.mi_scopes`」的 skill 發 MI token，而且只限宣告過的資源。除特別註明者外，以下規則都是 **error**，會擋下儲存（實作：[skill_lint.py](../backend/skill_lint.py)、[eaa_platform.py](../backend/eaa_platform.py)；規則文字在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Managed Identity Contract 與 Platform-Reserved Names）：
 
 | 規則 | 檢查 |
 | --- | --- |
-| `D4` | 讀取或宣告 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL`、`AZURE_STORAGE_ACCOUNT_KEY`。讀取檢查與 EAA lint 同一個 regex，**掃全文含說明文字**；scenario skill 也適用。 |
+| `D4` | 讀取或宣告 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL`。讀取檢查與 EAA lint 同一個 regex，**掃全文含說明文字**；scenario skill 也適用。 |
 | `D5` | 程式碼區塊出現 `credential=...` / `credential=None` / `credential=<...>` 佔位。 |
-| `D6` | 程式使用 `DefaultAzureCredential` / `ManagedIdentityCredential`，或 `## OBO Token Scopes` 提到 `DefaultAzureCredential` 時：必須 `from azure.identity import DefaultAzureCredential`、把 `credential=DefaultAzureCredential()`（或指定給變數後的該變數）傳給 client、不得用 `ManagedIdentityCredential`，且 `## OBO Token Scopes` 要有「Authenticate … `DefaultAzureCredential()` … Managed Identity」的說明句。 |
+| `D6` | 程式使用 `DefaultAzureCredential` / `ManagedIdentityCredential`，或 `## OBO Token Scopes` 提到 `DefaultAzureCredential` 時：必須 `from azure.identity import DefaultAzureCredential`、把 `credential=DefaultAzureCredential()`（或指定給變數後的該變數）傳給 client、不得用 `ManagedIdentityCredential`，且 `## OBO Token Scopes` 要有「Authenticate（或「驗證」）… `DefaultAzureCredential()` … Managed Identity」的說明句。 |
+| `D7` | `metadata.mi_scopes`。程式出現 `DefaultAzureCredential(` / `ManagedIdentityCredential(` 就必填（訊息含 EAA 的 `uses Managed Identity but declares no metadata.mi_scopes`）；沒用 MI 卻宣告、項目不是 `https://<host>`（可帶 `/.default`）、宣告 Key Vault、程式裡明寫的 scope（`…/.default` 字串或 `get_token(...)` 引數）不在宣告內，或 `## OBO Token Scopes` 沒寫出 `mi_scopes` 與每個資源，都是 error。資源不在 `MI_SCOPE_ALLOWLIST` 是 **info**，訊息即部署說明（見下）。 |
+| `D8` | 只掃程式碼：引用 `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` / `MSI_ENDPOINT` / `MSI_SECRET` 等 MI 端點變數、直接呼叫 `169.254.169.254` 或 `/msi/token`、對 `DefaultAzureCredential` / `ManagedIdentityCredential` 傳 `managed_identity_client_id=` / `client_id=` / `object_id=` / `mi_res_id=` 等選擇器，或 MI skill 同時用 `ChainedTokenCredential`、`ClientSecretCredential`、`AzureKeyCredential` 等備援憑證。 |
 | `A15` | caller 的 `credentials` 鍵名（`input-bindings` 的 `credentials_key`，或 legacy 的 Required Inputs 與 runtime 讀取）是 `PATH`、`PYTHON*`、`LD_*`、`EAA_VERIFIED_*` 或 `OBO_SCOPE_REGISTRY` 的 key。registry 以 MCP 查到的為準，取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。 |
 
-Managed Identity 不是變數種類，判斷只靠 prompt 與 D6 從程式碼偵測，不動 `models.py` 與 UI；EAA 若日後新增 `metadata.mi_scopes` 再一起結構化。`save_skill_dual_write()` 另外會在 EAA repo 跑 `tools/skill_lint.py`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
+Managed Identity 不是變數種類，結構化資訊只有 frontmatter 的 `metadata.mi_scopes`，判斷靠 prompt 與 D6–D8 從程式碼偵測，不動 `models.py` 與 UI。`save_skill_dual_write()` 另外會在 EAA repo 跑 `tools/skill_lint.py`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
+
+平台另有全域白名單 `MI_SCOPE_ALLOWLIST`，預設只有 `https://storage.azure.com,https://ai.azure.com`。宣告白名單以外的資源不擋儲存：本機 D7 顯示 INFO，EAA lint 的 `is not in MI_SCOPE_ALLOWLIST` warning 也被排除在阻擋清單外，儲存後改寫一則 system message，要 Agent 在回覆中附上「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI 指派 `<最小 RBAC 角色>`」（角色對照表：`MI_RESOURCE_ROLES`）。`database.windows.net` / `management.azure.com` 會加註「取得平台 MI 在該資源的全部權限，優先改用 OBO」。執行測試（`mode: "execute"`）時同一輪必須載入該 skill 才拿得到 MI token，這是預期行為；本產生器只送 `route_only`，不受影響。
 
 #### EAA 執行環境規則（E1–E4）
 

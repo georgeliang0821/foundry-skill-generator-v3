@@ -16,7 +16,7 @@ Core Handler - 共用核心邏輯
 VERSION: 1.12
 2026.09.26 George : v1.12 — S1 caller credentials 過濾 + MI RLS 註解更正
 - 呼叫端 credentials 經 code_executor.filter_caller_env() 過濾:不得蓋掉 OBO / MI 注入的
-  token,也不得設定 PATH / PYTHON* / LD_*。
+  token,不得設定 PATH / PYTHON* / LD_*,值含入站 Bearer token 的 key 也會被丟棄。
 - 更正「ACA MI 在 RLS 上有 bypass、會看到全部 skill」的註解:實測 MI 的 SUSER_SNAME()
   是 ClientID@TenantID,以 app 名稱比對的 bypass 不成立。
 
@@ -617,6 +617,7 @@ async def startup():
     # 4a. CodeExecutor: 階段 1 用 LocalSubprocessExecutor
     # 階段 2 POC 通過後可改成 HostedAgentExecutor,這裡是唯一改動點
     _executor = LocalSubprocessExecutor()
+    await _executor.start_mi_proxy()
     _workflow.executor = _executor
     logger.info(f"[startup] CodeExecutor injected: {type(_executor).__name__}")
 
@@ -1245,6 +1246,12 @@ async def shutdown() -> None:
         except Exception as e:
             logger.warning(f"[shutdown] _admin_credential.close() error: {e}")
 
+    if _executor is not None:
+        try:
+            await _executor.close()
+        except Exception as e:
+            logger.warning(f"[shutdown] executor.close() error: {e}")
+
     # 2026.07.25 George : #5 — 關閉 debug bundle 的 cached blob client/credential/
     # executor(sync helper,卸載到 thread 避免阻塞 shutdown loop)。
     try:
@@ -1532,12 +1539,16 @@ async def _run_coding_agent_inner(
                     f"reserved key(s) from credentials: {forged_keys}"
                 )
 
-            # 呼叫端不得蓋掉上方 OBO / MI 注入的 token,也不得改寫 interpreter / loader 環境。
-            credentials, blocked_keys = filter_caller_env(credentials, state.user_data.keys())
+            # 呼叫端不得蓋掉上方 OBO / MI 注入的 token、改寫 interpreter / loader 環境,
+            # 也不得把入站 Bearer token 原樣塞進 credentials(會變成 script 的環境變數)。
+            credentials, blocked_keys = filter_caller_env(
+                credentials, state.user_data.keys(), forbidden_values=[user_token or ""]
+            )
             if blocked_keys:
                 logger.warning(
                     f"[Credentials] Dropped {len(blocked_keys)} caller-supplied key(s) "
-                    f"that shadow platform-injected or reserved env vars: {blocked_keys}"
+                    f"that shadow platform-injected/reserved env vars or echo the "
+                    f"inbound bearer token: {blocked_keys}"
                 )
 
             # 剩餘的 credentials 照舊注入(向後相容)

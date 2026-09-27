@@ -19,7 +19,7 @@ uv run --no-sync python scripts/sync_reference.py check
 | 項目 | 值 |
 | --- | --- |
 | Upstream repository | `https://github.com/agent-accelerators/enterprise-agent-accelerator.git` |
-| 本機 upstream checkout | `C:\dev\code_tool_hosted-async-1.8.0` |
+| 本機 upstream checkout | 依序取 `--upstream`、`REFERENCE_UPSTREAM_REPO`、`.env` 的 `EAA_REPO_DIR`（與儲存時跑 EAA lint 的是同一份）、manifest 的 `local_checkout` |
 | Upstream branch | `main` |
 | 本地 snapshot | `reference/` |
 | 現況與 provenance 唯一來源 | `reference/manifest.json` |
@@ -32,13 +32,22 @@ uv run --no-sync python scripts/sync_reference.py check
 
 版本相同不代表內容一定相同；`core_handler.py` 曾經在版本仍為 1.11 時改變契約。因此工具以固定 commit 的 Git blob 與 SHA-256 為準，不依賴 `VERSION` 或會移動的 `main`。`.gitattributes` 固定 `reference/*.py` 使用 LF，避免 Windows checkout 轉換換行後產生假 drift。
 
+### 1.1 Pin 落後 upstream HEAD
+
+只比對 pin 住的 commit 永遠看不到「upstream 已經往前走」。非 `--offline` 的 `check` 會另外比對 checkout 的 HEAD：
+
+- HEAD 超過 pin、但沒有任何 snapshot 檔案變動（例如只改文件）→ `[INFO]`，不影響結果。
+- HEAD 改到 snapshot 檔案 → `[BEHIND]`，exit 1。儲存時的 EAA lint 已經在用 HEAD 的規則，pin 就不再描述 Generator 實際被檢查的版本。執行 `sync --commit HEAD`（會解析成完整 sha 寫入 manifest）再跑測試。
+
+儲存時的 `eaa_lint.done` log 會帶 `eaa_commit`，可以對照當時 lint 用的是哪個 EAA commit。
+
 ---
 
 ## 2. 本專案實際使用範圍
 
 ### 2.1 Production backend
 
-目前 `backend/` **沒有 import 或執行**這三個 reference module。這是刻意的架構邊界，定義在 `backend/topology.py`：
+目前 `backend/` **沒有 import 或執行**任何 reference module。這是别意的架構邊界，定義在 `backend/topology.py`：
 
 - `backend/` 不得 import `reference/` runtime snapshot。
 - Generator 自己的 frontmatter validator 採保守格式，不複製某一版 runtime parser。
@@ -58,6 +67,21 @@ uv run --no-sync python scripts/sync_reference.py check
 > Generator 判定合法的 scenario skill，upstream `_declares_children()` 必須回傳 `True`。
 
 反方向不成立。Upstream parser 可能接受 tuple、較寬鬆 fence 等格式；Generator 可以繼續只產生所有已知 parser 都能讀取的保守格式。
+
+### 2.3 Generator 重寫的 runtime 常數（`restated`）
+
+`backend/eaa_platform.py` 把 EAA 的幾個常數重寫成自己的版本（不能 import `reference/`），D4–D8、A15 lint 與 MCP 過濾都靠它們。`code_executor.py`、`mi_proxy.py` 因此也進了 snapshot，manifest 的 `restated` 列出每一組對應：
+
+| Upstream | Generator | 關係 |
+| --- | --- | --- |
+| `code_executor.SUBPROCESS_ENV_DENYLIST` | `PLATFORM_SECRET_DENYLIST` | `equal` |
+| `code_executor._RESERVED_EXEC_ENV_NAMES` / `_PREFIXES` | `_RESERVED_CREDENTIAL_NAMES` / `_PREFIXES` | `superset`（Generator 多擋 `EAA_VERIFIED_`） |
+| `mi_proxy.MI_ENV_KEYS` | `MI_ENV_KEYS` | `equal` |
+| `mi_proxy.HARD_DENIED_RESOURCES` | `MI_HARD_DENIED_RESOURCES` | `equal` |
+| `mi_proxy._IDENTITY_SELECTORS` | `MI_IDENTITY_SELECTORS` | `superset`（Generator 多擋 `managed_identity_client_id`） |
+| `mi_proxy.DEFAULT_ALLOWLIST` | `DEFAULT_MI_SCOPE_ALLOWLIST` | `equal` |
+
+`equal` 兩邊必須完全相同；`superset` 是 Generator 别意更嚴格，只能多不能少。不一致時報告為 `[RED]`，並點名要一起改的 prompt 與文件。offline check 與 pytest 用 committed snapshot 跑同一個檢查，所以 CI 也會擋。新增重寫常數時，要把它登記進 `restated`，否則不會被檢查。
 
 ---
 
@@ -188,7 +212,8 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 
 | Upstream 變更 | 更新 reference snapshot | 檢查或修改 Generator | 判斷方式 |
 | --- | --- | --- | --- |
-| 三個來源檔內容或版本改變 | 是，三檔以同一 commit 整檔更新並記錄 provenance。 | 視以下契約而定。 | 不手摘單一 function。 |
+| snapshot 來源檔內容或版本改變 | 是，全部以同一 commit 整檔更新並記錄 provenance。 | 視以下契約而定。 | 不手摘單一 function。 |
+| `code_executor.py` / `mi_proxy.py` 的平台常數改變 | 是 | **是** | `check` 的 `restated` 報告點名 `backend/eaa_platform.py` 與對應 prompt；見 2.3。 |
 | `_declares_children`、`_declared_child_names`、scenario whitelist 改變 | 是 | **是** | 檢查 `backend/topology.py`、`backend/state_machine.py`、`backend/main.py`、scenario tests。 |
 | `v_my_skills`、RLS、`skill_key`、owner/public/internal 改變 | 是 | **是** | 檢查 `backend/skills_repo.py`、`backend/skills_index.py`、DB migrations；SQL schema 先部署。 |
 | Blob path/prefix、private folder、skill files 過濾改變 | 是 | **是** | 檢查 `backend/blob_store.py`、save/import 流程與 folder tests。 |

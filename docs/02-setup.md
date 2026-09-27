@@ -214,7 +214,7 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 > 這條身分**與路由測試無關**。TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；無論端點是直連或經過閘道，app-only token 都沒有使用者身分，不能用在那條路徑上。
 
-> **平台 secret 不會交給 Agent**。查到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL`、`AZURE_STORAGE_ACCOUNT_KEY` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
+> **平台 secret 不會交給 Agent**。查到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
 
 #### EAA skill lint（儲存必要）
 
@@ -222,10 +222,11 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| `EAA_REPO_DIR` | 是 | EAA repo 的本機 checkout，需包含 commit `bd13560`（S1）或更新，`tools/skill_lint.py` 從該 commit 才有。通常與 `reference/manifest.json` 的 `local_checkout` 是同一個目錄 |
+| `EAA_REPO_DIR` | 是 | EAA repo 的本機 checkout，需包含 commit `bd13560`（S1）或更新，`tools/skill_lint.py` 從該 commit 才有；要檢查 `metadata.mi_scopes` 需含 S3（`mi_proxy.py`）的版本。通常與 `reference/manifest.json` 的 `local_checkout` 是同一個目錄 |
+| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`。本機 lint 與 EAA lint 都用它判斷是否要附上部署說明 |
 
 - **一律 fail-closed**：未設定 `EAA_REPO_DIR`、找不到工具、執行失敗或輸出無法解析，都回 **HTTP 503** 並擋下儲存；沒有「只警告就放行」的開關。
-- **errors 與 warnings 都擋**：任何一項都回 **HTTP 400**，訊息列出每一項。
+- **errors 與 warnings 都擋**：任何一項都回 **HTTP 400**，訊息列出每一項。唯一例外是 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST`：它是部署步驟而非 skill 缺陷，儲存照常完成，Agent 會在回覆中列出要加入白名單的資源與最小 RBAC 角色（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
 - **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
 - 工具以本專案的 Python 執行，只繼承 `PATH` 等最少環境變數，不會拿到 `.env` 裡的 secret。
 - 這是本機 subprocess，不碰 Azure。pytest 的 `backend_main` fixture 會將它改成永遠通過；Playwright 走真的工具，因此跑含儲存的 E2E 也需要 `EAA_REPO_DIR`。

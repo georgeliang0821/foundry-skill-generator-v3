@@ -49,6 +49,30 @@ def git_blob(checkout: Path, commit: str, source: str) -> bytes:
     return result.stdout
 
 
+def git_output(checkout: Path, *args: str) -> str:
+    command = ["git", "-C", str(checkout), *args]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise ReferenceSyncError("git is not installed or not on PATH") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", errors="replace").strip()
+        raise ReferenceSyncError(f"git {' '.join(args)} failed: {detail}") from exc
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def resolve_commit(checkout: Path, commit: str) -> str:
+    """A full sha, so `--commit HEAD` never gets written into the manifest literally."""
+    return git_output(checkout, "rev-parse", "--verify", f"{commit}^{{commit}}")
+
+
+def upstream_position(checkout: Path, pinned: str, sources: list[str]) -> dict[str, Any]:
+    """Where the checkout's HEAD stands against the pin; comparing blobs at the pin alone never sees it."""
+    head = resolve_commit(checkout, "HEAD")
+    changed = git_output(checkout, "diff", "--name-only", pinned, head, "--", *sources).splitlines() if head != pinned else []
+    return {"head": head, "pinned": pinned, "changed_sources": sorted(changed)}
+
+
 def _find_symbol(tree: ast.Module, dotted_name: str) -> ast.AST | None:
     current: ast.AST = tree
     for part in dotted_name.split("."):
@@ -256,6 +280,50 @@ def _collection_members(value: ast.AST) -> list[str] | None:
     return sorted(members) if len(members) == len(node.elts) else None
 
 
+def constant_members(content: bytes | None, filename: str, symbol: str) -> list[str] | None:
+    """Members of a module-level string collection, or of a comma-separated string constant."""
+    try:
+        tree = ast.parse(content or b"", filename=filename)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return sorted(item.strip() for item in node.value.value.split(",") if item.strip())
+        return _collection_members(node.value)
+    return None
+
+
+def check_restated_constants(
+    repo_root: Path, upstream_contents: dict[str, bytes], specs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Constants the Generator restates instead of importing must still say what upstream says.
+
+    ``equal`` for sets the Generator must mirror exactly; ``superset`` where it is
+    deliberately stricter and may only add members.
+    """
+    findings: list[dict[str, Any]] = []
+    for spec in specs:
+        source, symbol = spec["source"], spec["symbol"]
+        target_file, restated_as = spec["file"], spec["restated_as"]
+        target = repo_root / target_file
+        upstream = constant_members(upstream_contents.get(source), source, symbol)
+        ours = constant_members(target.read_bytes() if target.is_file() else None, target_file, restated_as)
+        base = {"source": source, "symbol": symbol, "review": [f"{target_file}::{restated_as}", *spec.get("review", [])]}
+        if upstream is None or ours is None:
+            missing_side = f"{source}::{symbol}" if upstream is None else f"{target_file}::{restated_as}"
+            findings.append({**base, "problem": f"{missing_side} is missing or is no longer a literal set of strings"})
+            continue
+        added = sorted(set(upstream) - set(ours))
+        dropped = sorted(set(ours) - set(upstream)) if spec.get("relation", "equal") == "equal" else []
+        if added or dropped:
+            parts = [f"upstream has {added} that {restated_as} lacks"] if added else []
+            parts += [f"{restated_as} still has {dropped} that upstream dropped"] if dropped else []
+            findings.append({**base, "problem": "restated constant drifted: " + "; ".join(parts)})
+    return findings
+
+
 def extract_surface(content: bytes | None, filename: str) -> dict[str, dict[str, list[str]]]:
     """The externally observable contract of a snapshot, ignoring function bodies."""
     empty: dict[str, dict[str, list[str]]] = {"functions": {}, "fields": {}, "collections": {}}
@@ -457,10 +525,27 @@ def extract_version(content: bytes) -> str:
     return match.group(1) if match else "unknown"
 
 
+def _eaa_repo_dir() -> str | None:
+    """The same checkout the backend lints against; read from .env without loading its secrets."""
+    if os.getenv("EAA_REPO_DIR"):
+        return os.environ["EAA_REPO_DIR"]
+    env_file = REPO_ROOT / ".env"
+    if not env_file.is_file():
+        return None
+    from dotenv import dotenv_values
+
+    return dotenv_values(env_file).get("EAA_REPO_DIR") or None
+
+
 def _checkout_path(manifest: dict[str, Any], override: str | None) -> Path:
-    configured = override or os.getenv("REFERENCE_UPSTREAM_REPO") or manifest["upstream"].get("local_checkout")
+    configured = (
+        override
+        or os.getenv("REFERENCE_UPSTREAM_REPO")
+        or _eaa_repo_dir()
+        or manifest["upstream"].get("local_checkout")
+    )
     if not configured:
-        raise ReferenceSyncError("Pass --upstream or set REFERENCE_UPSTREAM_REPO")
+        raise ReferenceSyncError("Pass --upstream, or set EAA_REPO_DIR in .env")
     checkout = Path(configured).expanduser().resolve()
     if not (checkout / ".git").exists():
         raise ReferenceSyncError(f"Upstream checkout is not a Git repository: {checkout}")
@@ -520,7 +605,10 @@ def inspect_reference(
         "files": files,
         "surface_deltas": deltas,
         "impact": impact_index(repo_root, impact_tokens(deltas)),
-        "contract_findings": validate_contracts(upstream_contents, manifest.get("contracts", [])),
+        "contract_findings": (
+            validate_contracts(upstream_contents, manifest.get("contracts", []))
+            + check_restated_constants(repo_root, upstream_contents, manifest.get("restated", []))
+        ),
         "coverage_findings": (
             check_wire_coverage(repo_root, manifest.get("contracts", []))
             + check_response_coverage(repo_root, upstream_contents, manifest)
@@ -547,11 +635,27 @@ def _describe_delta(delta: dict[str, Any]) -> str:
     return f"{mark} {change} {kind[:-1]} `{token}`"
 
 
+def _behind(report: dict[str, Any]) -> list[str]:
+    position = report.get("upstream_position") or {}
+    return position.get("changed_sources", [])
+
+
 def _print_report(report: dict[str, Any]) -> None:
     if report.get("offline"):
         print("Reference source: committed snapshots (upstream not consulted)")
     else:
         print(f"Reference source: {report['checkout']} @ {report['commit']}")
+    position = report.get("upstream_position")
+    if position and position["head"] != position["pinned"]:
+        head, pinned = position["head"][:7], position["pinned"][:7]
+        if position["changed_sources"]:
+            print(
+                f"[BEHIND] Upstream HEAD {head} is past the pinned {pinned} and changes "
+                f"{', '.join(position['changed_sources'])}. Saves are linted against the checked-out "
+                "EAA, so the Generator may already be judged by rules the pin does not describe."
+            )
+        else:
+            print(f"[INFO] Upstream HEAD {head} is past the pinned {pinned}; no snapshot file changed.")
     for item in report["files"]:
         print(f"[{item['status'].upper():7}] {item['source']} -> {item['destination']} (version {item['version']})")
         for delta in item.get("surface", []):
@@ -582,6 +686,8 @@ def _print_report(report: dict[str, Any]) -> None:
     elif stale := [i["destination"] for i in report["files"] if not i["manifest_matches_upstream"]]:
         print(f"[YELLOW] Snapshot bytes do not match the manifest sha256: {', '.join(stale)}.")
         print("         The snapshot was edited by hand. Restore it, or re-run sync to re-pin.")
+    elif _behind(report):
+        print("[YELLOW] The pin is behind upstream HEAD. Run `sync --commit HEAD`, then tests.")
     elif report.get("coverage_findings"):
         print("[ACTION] Snapshots are current, but the Generator's use of the runtime contract is incomplete.")
     elif report.get("offline"):
@@ -649,8 +755,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.offline and args.action == "sync":
             raise ReferenceSyncError("sync needs the upstream checkout; --offline only applies to check")
         checkout = None if args.offline else _checkout_path(manifest, args.upstream)
-        commit = None if args.offline else (args.commit or manifest["upstream"]["commit"])
+        commit = None if checkout is None else resolve_commit(checkout, args.commit or manifest["upstream"]["commit"])
         report, contents, local_contents = inspect_reference(manifest, checkout, commit, repo_root)
+        if checkout is not None:
+            report["upstream_position"] = upstream_position(
+                checkout,
+                resolve_commit(checkout, manifest["upstream"]["commit"]),
+                [spec["source"] for spec in manifest["files"]],
+            )
         if args.json:
             print(json.dumps(report, indent=2))
         else:
@@ -662,7 +774,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "check":
             manifest_mismatch = any(not item["manifest_matches_upstream"] for item in report["files"])
             snapshot_drift = any(item["status"] not in ("current", "pinned") for item in report["files"])
-            if manifest_mismatch or snapshot_drift:
+            if manifest_mismatch or snapshot_drift or _behind(report):
                 return 1
             return 4 if report["coverage_findings"] else 0
         for spec in manifest["files"]:
