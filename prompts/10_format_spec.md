@@ -299,6 +299,43 @@ or any `OBO_SCOPE_REGISTRY` key (for example `AZURE_SQL_ACCESS_TOKEN`,
 unchanged: keep reading them with `os.environ["<OBO_SCOPE_REGISTRY key>"]` and
 declare them under `## OBO Token Scopes`, never as caller inputs.
 
+## The Execution Environment Contract
+
+The runtime executes the script as a subprocess that may run under a fresh,
+never-reused, non-root uid. Its working directory is the session's private
+`work_dir`, and `HOME`, `TMPDIR`, `MPLCONFIGDIR` and `XDG_CACHE_HOME` all point
+there. That uid has no `/etc/passwd` entry. When the run ends, every process
+the uid started is killed, and symlinks, special files and multiply-linked
+files in `work_dir` are deleted. Output files are collected only from the top
+level of `work_dir`, only when they are new regular files with an allowed
+extension. `DefaultAzureCredential()` keeps working.
+
+The sample code must follow these five rules. They hold whether or not the
+sandbox is on, so apply them to every capability skill. This contract adds no
+section to the skill file.
+
+- **E1** -- Read and write files only in the current working directory. Never
+  write to an absolute path such as `/app`, `/tmp`, `/home` or `/root`. Use a
+  relative path, or `tempfile` (which lands in `TMPDIR`) for scratch files.
+- **E2** -- Never install packages at run time: no `pip install`, no
+  `subprocess` call to pip, no `os.system("pip ...")`. Use only packages
+  already in the container. When one is missing, print a `[NEEDS_INFO]` line
+  explaining it instead of trying to install it.
+- **E3** -- Never depend on user-account information: no `pwd.getpwuid()`, no
+  `os.getlogin()`. When a home directory is needed, use `os.environ["HOME"]`
+  or `Path.home()`.
+- **E4** -- Leave no background process behind and never expect a process to
+  survive into the next turn: no `nohup`, no trailing `&`, no `os.fork()`
+  without waiting, no `setsid`, no daemon thread used as a service. All work
+  finishes before the script exits.
+- **E5** -- Every output file is a regular file at the top level of the working
+  directory. Never produce a symlink or hard link as output, and never expect a
+  file inside a subdirectory to be uploaded.
+
+The content lint warns on E1-E4 when a code block contains an absolute path
+under those prefixes, `pip install` / `-m pip`, `getpwuid` / `getlogin`, or
+`nohup` / `setsid` / `os.fork` / `start_new_session=True` / `daemon=True`.
+
 ## V4A Patch Requirements
 
 When emitting `propose_patch`, the patch must be safe for deterministic apply:

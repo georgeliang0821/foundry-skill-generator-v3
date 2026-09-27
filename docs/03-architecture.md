@@ -81,10 +81,10 @@ sequenceDiagram
 
     UI->>API: POST 訊息 + 素材（cookie 認身分）
     API->>SM: 取得目前階段的 system prompt（含 peer skills / 變數）
-    API->>AG: stream(session, message)
-    AG->>FND: 帶入指令與工具 schema
-    FND-->>AG: 文字片段 + 工具呼叫
-    AG-->>API: 逐一回傳事件
+    API->>AG: stream(session, message)（名稱沿用，實際是單次非串流呼叫）
+    AG->>FND: responses.create：system prompt + user message（工具 schema、session snapshot、最新訊息）
+    FND-->>AG: 完整回應（文字 + 工具呼叫 JSON）
+    AG-->>API: 解析成事件
     API->>API: apply_tool_effect（更新 SKILL.md、品質關卡、階段轉移）
     API->>ST: persist_session（寫入 .sessions/*.json）
     API-->>UI: 回傳事件批次（文字、問題卡、patch、測試結果）

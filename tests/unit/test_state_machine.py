@@ -298,6 +298,14 @@ def test_prompt_includes_mode_addenda() -> None:
     assert "Modify" in build_system_prompt(modify_session)
 
 
+def test_execution_environment_contract_reaches_capability_prompts_only() -> None:
+    capability = build_system_prompt(Session(skill_kind=SkillKind.CAPABILITY, current_stage=Stage.DRAFT))
+    scenario = build_system_prompt(Session(skill_kind=SkillKind.SCENARIO, current_stage=Stage.DRAFT))
+    assert "## The Execution Environment Contract" in capability
+    assert all(f"**{rule}**" in capability for rule in ("E1", "E2", "E3", "E4", "E5"))
+    assert "## The Execution Environment Contract" not in scenario
+
+
 def test_session_store_title_uses_first_user_message(backend_main) -> None:
     session = Session()
     session.conversation.append(ChatMessage(role=MessageRole.USER, content="  Build a calendar sync skill  "))

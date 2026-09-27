@@ -119,6 +119,19 @@ EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且
 
 Managed Identity 不是變數種類，判斷只靠 prompt 與 D6 從程式碼偵測，不動 `models.py` 與 UI；EAA 若日後新增 `metadata.mi_scopes` 再一起結構化。`save_skill_dual_write()` 另外會在 EAA repo 跑 `tools/skill_lint.py`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
 
+#### EAA 執行環境規則（E1–E4）
+
+EAA 的 `SUBPROCESS_UID_SANDBOX` 開啟後，腳本以一次性、沒有 `/etc/passwd` 項目的非 root uid 在 session work_dir 執行，結束時所有行程都會被殺掉。規則不論旗標開關都相容，因此無條件套用。以下規則都是 **warning**，不擋儲存；只掃程式碼區塊（或 TEST 的 prepared code），不掃說明文字，scenario skill 也適用（實作：[skill_lint.py](../backend/skill_lint.py)；規則文字 E1–E5 在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Execution Environment Contract）：
+
+| 規則 | 檢查 |
+| --- | --- |
+| `E1` | 引號字串以 `/app`、`/tmp`、`/home`、`/root` 開頭。 |
+| `E2` | `pip install`、`-m pip`，以及 subprocess list 形式的 `"-m", "pip"`、`"pip", "install"`。 |
+| `E3` | `getpwuid`、`getlogin`。 |
+| `E4` | `nohup`、`setsid`、`os.fork`、`start_new_session=True`、`daemon=True`。 |
+
+E5（產出檔必須是 work_dir 第一層的一般檔案）無法靜態判斷，只寫在產生規範。
+
 Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層文字 JSON envelope，
 但不保證外層序列化、模型抽取或 Python 編碼正確。本機測試只證明受控 literal 綁定
 與缺值樣板行為；尚無真實 Foundry 失敗 trace 或端到端長文保真驗證。L2/L3 路由測試
@@ -383,7 +396,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 | Core Prompt Section | 類別 | PREPARE | DRAFT | REFINE | TEST | DONE | 來源與裝載細節說明 |
 | --- | :-: | :-: | :-: | :-: | :-: | :-: | --- |
-| **Global System Prompt** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 本體骨幹：[00_global_system.md](../prompts/00_global_system.md)（內嵌 09/10 本機最佳實務與規範） |
+| **Global System Prompt** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 本體骨幹：[00_global_system.md](../prompts/00_global_system.md)；[09_best_practices.md](../prompts/09_best_practices.md) 與 Skill Format Spec（capability 為 `10_format_spec.md`、scenario 為 `10_format_spec_scenario.md`）由 `build_system_prompt()` 另外載入 |
 | **State Prompt** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 根據 `session.current_stage` 自 `prompts/` 抓取對應關卡提示詞 |
 | **Runtime State** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前運行狀態：`import` (匯入舊代碼) / `modify` (修改既有) / `create` (新增) |
 | **Blob Skill Binding** | **A** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_remote_skill_state`，載入與雲端儲存體 (Blob/SQL) 關聯狀態 |
@@ -461,6 +474,24 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | `undocumented_enum` | warning | 素材宣告了封閉值集（SQL `CHECK ... IN`、`ENUM`、JSON/YAML `enum`），但 `## Required Inputs` 沒有列出全部合法值 |
 
 警告的呈現位置：草稿工具執行後由 `_note_material_fidelity()` 寫入一則 system 訊息提示數量；完整清單在 **Topology 分頁**（`/api/sessions/{id}/topology` 回應的 `fidelity` 欄位，每次呼叫即時計算）。
+
+### 7.4 素材與「在對話中貼上」的差異
+
+同一段文字放進素材，或在對話中原封不動貼給 Agent，走的是兩條不同的路徑。每一回合呼叫 Foundry 都是獨立請求（`responses.create` 不帶 `previous_response_id`，見 [backend/agent.py](../backend/agent.py) 的 `_run_foundry_turn`），模型能看到的只有當回合組出來的兩則 message，因此「放在哪裡」直接決定模型之後還看不看得到。
+
+- **素材**：存於 `session.materials`，每一回合由 `_format_materials()` 以全文放進 `role="system"` 的 `## Materials`，並標上 kind 與該 tier 的引用邊界。user message 裡的 session snapshot 由 `_redact_materials()` 把素材內容換成一行指標加前 200 字預覽，避免同一份全文送兩次。
+- **對話貼上**：存於 `session.conversation`，當回合出現在 user message 的 `Latest user message`；之後只以 session snapshot 的 JSON 字串存在，而 `_session_context()` 只保留**最後 12 筆** conversation。
+
+| 面向 | 素材 | 對話貼上 |
+| --- | --- | --- |
+| 可見期間 | 每一回合、每個 Stage，直到使用者刪除 | 只在最後 12 筆 conversation 內。這 12 筆也包含 assistant、tool 與後端寫入的 system 訊息（lint 提醒、修正進度等），可能數個回合就被擠出，到 DRAFT／REFINE 時已看不到 |
+| 引用規則 | 依 kind 套用 Tier 1/2/3 邊界（見 [7.1](#71-三層的引用邊界)） | 無任何 tier 標記；Tier 3 的「不得當程式碼來源、不得抄入內文」與 Tier 2 的「識別字具權威性」都不適用 |
+| 長度 | 受 [7.2](#72-注入時的預算與截斷) 預算限制，超出時有截斷標記 | 無預算、無截斷標記，在 12 筆範圍內整段帶上 |
+| 所在 message | `role="system"`（經 [6.1](#61-送出前的-handlebars-跳脫) 跳脫） | `role="user"`（原樣通過） |
+| 修改 | 素材面板可編輯或刪除 | 無法修改，只能再送新訊息 |
+| 忠實度掃描 | 只掃 Tier 1/2（見 [7.3](#73-產出後的忠實度掃描僅警告不阻擋)） | 不掃 |
+
+原則：DRAFT／REFINE 需要引用的內容（程式碼、API 規格、欄位名、業務背景）一律放素材並選對 kind；對話只用來下當回合的指示或回答問題。PREPARE 期間模型寫進 Prepare Brief 的內容會延續到後續 Stage，但原文細節不會。
 
 ---
 

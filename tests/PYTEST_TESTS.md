@@ -24,6 +24,7 @@ Pytest covers:
   aborts the batch.
 - EAA platform rules (D4-D6, A15) and the fail-closed EAA lint runner
   (`tests/unit/test_eaa_platform.py`, driven by a stub `tools/skill_lint.py`).
+- EAA execution-environment warnings (E1-E4) for the uid sandbox.
 - FastAPI session routes.
 - Draft update and checklist update routes.
 - Save/list/load skill routes.

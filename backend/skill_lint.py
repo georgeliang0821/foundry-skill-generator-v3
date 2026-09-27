@@ -82,6 +82,42 @@ _CREDENTIAL_PLACEHOLDER_RE = re.compile(r"\bcredential\s*=\s*(?:\.\.\.|None\b|<)
 _MI_CREDENTIAL_RE = re.compile(r"\b(?:DefaultAzureCredential|ManagedIdentityCredential)\b")
 _DEFAULT_CREDENTIAL = "DefaultAzureCredential"
 
+# --- EAA execution environment (E1-E4) --------------------------------------
+# Under SUBPROCESS_UID_SANDBOX the script runs as a throwaway uid with no passwd
+# entry, confined to its work_dir, and every process it started is killed.
+_EXECUTION_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "E1",
+        re.compile(r"""["'](/(?:app|tmp|home|root))(?=[/"'])"""),
+        "The code uses an absolute path under `{match}`. The script may only read and write "
+        "in its working directory: use a relative path, or `tempfile` (which lands in "
+        "`TMPDIR`) for scratch files.",
+    ),
+    (
+        "E2",
+        re.compile(
+            r"""\bpip3?\s+install\b|-m\s+pip\b|["']-m["']\s*,\s*["']pip3?["']|["']pip3?["']\s*,\s*["']install["']"""
+        ),
+        "The code installs a package at run time (`{match}`). Only packages already in the "
+        "container are available; when one is missing, print `[NEEDS_INFO]` explaining it "
+        "instead of installing it.",
+    ),
+    (
+        "E3",
+        re.compile(r"\b(?:getpwuid|getlogin)\b"),
+        "The code depends on user-account information (`{match}`). The execution uid has no "
+        "passwd entry; use `os.environ[\"HOME\"]` or `Path.home()` for the home directory.",
+    ),
+    (
+        "E4",
+        re.compile(
+            r"\bnohup\b|\bsetsid\b|\bos\.fork\b|\bstart_new_session\s*=\s*True\b|\bdaemon\s*=\s*True\b"
+        ),
+        "The code starts a background or detached process (`{match}`). Every process is "
+        "killed when the run ends, so all work must finish before the script exits.",
+    ),
+)
+
 # --- The caller-facing value domain (A6-A8) --------------------------------
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
@@ -1247,6 +1283,16 @@ def _check_credential_placeholder(skill_md: str, code_override: str | None) -> l
     ]
 
 
+def _check_execution_environment(skill_md: str, code_override: str | None) -> list[LintIssue]:
+    """E1-E4 -- code shapes the EAA uid sandbox breaks. Warnings: prose is never scanned."""
+    code = code_override if code_override is not None else "\n".join(_ANY_FENCE_RE.findall(skill_md or ""))
+    return [
+        LintIssue(rule=rule, message=message.format(match=match), detail=match)
+        for rule, pattern, message in _EXECUTION_RULES
+        for match in _unique(m.group(0) if not m.groups() else m.group(1) for m in pattern.finditer(code or ""))
+    ]
+
+
 def _passes_default_credential(tree: ast.AST) -> bool:
     def is_dac_call(node: ast.AST) -> bool:
         return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == _DEFAULT_CREDENTIAL
@@ -1681,8 +1727,10 @@ def lint_skill(
     """
     if not (skill_md or "").strip():
         return []
-    platform = _check_platform_secrets(skill_md, code_override) + _check_credential_placeholder(
-        skill_md, code_override
+    platform = (
+        _check_platform_secrets(skill_md, code_override)
+        + _check_credential_placeholder(skill_md, code_override)
+        + _check_execution_environment(skill_md, code_override)
     )
     if kind is SkillKind.SCENARIO:
         return _lint_scenario(

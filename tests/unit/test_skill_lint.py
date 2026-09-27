@@ -1151,3 +1151,54 @@ def test_a15_checks_explicit_binding_keys() -> None:
         "- name: description", "- name: operation\n  credentials_key: PYTHON_TASK\n  payload_field: operation\n- name: description",
     )
     assert _errors(lint_skill(mixed, SkillKind.CAPABILITY), "A15") == ["PYTHON_TASK"]
+
+
+# --- EAA execution environment (E1-E4) --------------------------------------
+
+
+def _with_line(line: str) -> str:
+    return CLEAN_CAPABILITY.replace('    host = os.environ["API_HOST"]', f'    host = os.environ["API_HOST"]\n    {line}')
+
+
+def _warnings(issues, rule: str) -> list[str]:
+    found = [i for i in issues if i.rule == rule]
+    assert all(i.severity == "warning" for i in found)
+    return [i.detail for i in found]
+
+
+@pytest.mark.parametrize(("rule", "line", "detail"), [
+    ("E1", 'open("/tmp/out.csv", "w").write(raw)', "/tmp"),
+    ("E1", 'Path("/app/data")', "/app"),
+    ("E2", 'subprocess.run([sys.executable, "-m", "pip", "install", "pandas"])', '"-m", "pip"'),
+    ("E2", 'os.system("pip install pandas")', "pip install"),
+    ("E3", "user = pwd.getpwuid(os.getuid()).pw_name", "getpwuid"),
+    ("E3", "user = os.getlogin()", "getlogin"),
+    ("E4", "subprocess.Popen(cmd, start_new_session=True)", "start_new_session=True"),
+    ("E4", "threading.Thread(target=work, daemon=True).start()", "daemon=True"),
+])
+def test_execution_environment_rules_warn(rule: str, line: str, detail: str) -> None:
+    issues = lint_skill(_with_line(line), SkillKind.CAPABILITY)
+    assert detail in _warnings(issues, rule)
+    assert not has_lint_errors(issues)
+
+
+@pytest.mark.parametrize(("rule", "line"), [
+    ("E1", 'open("out.csv", "w").write(raw)'),
+    ("E1", 'scratch = tempfile.NamedTemporaryFile(suffix=".csv")'),
+    ("E2", "import pandas"),
+    ("E3", "home = Path.home()"),
+    ("E4", "subprocess.run(cmd, check=True)"),
+])
+def test_execution_environment_rules_stay_quiet(rule: str, line: str) -> None:
+    assert _warnings(lint_skill(_with_line(line), SkillKind.CAPABILITY), rule) == []
+
+
+def test_execution_environment_rules_ignore_prose() -> None:
+    md = CLEAN_CAPABILITY.replace("Does one thing.", "Does one thing. Never `pip install` or write to /tmp.")
+    assert lint_skill(md, SkillKind.CAPABILITY) == []
+
+
+def test_execution_environment_rules_scan_prepared_code() -> None:
+    prepared = 'import subprocess\n\n\ndef main() -> None:\n    subprocess.run("nohup worker &", shell=True)\n'
+    issues = lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY, code_override=prepared)
+    assert _warnings(issues, "E4") == ["nohup"]

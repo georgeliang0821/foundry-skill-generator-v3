@@ -103,8 +103,8 @@ channel (A9, A10), deployment configuration misfiled as a caller input (D1-D3),
 the identity read shape and its recovery path (I1-I3), leaking the verified
 actor (I4), an external call whose result is never inspected (A12), platform
 secrets the runtime strips (D4), placeholder credentials (D5), the Managed
-Identity contract (D6) and caller-supplied `credentials` keys the runtime
-discards (A15).
+Identity contract (D6), caller-supplied `credentials` keys the runtime
+discards (A15) and code shapes the execution sandbox breaks (E1-E4).
 
 **Do not re-derive those.** Re-reading the two variable lists and announcing a
 diff the tool already printed costs a turn and produces a second opinion that can
