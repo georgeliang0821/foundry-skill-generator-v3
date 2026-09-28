@@ -3,33 +3,33 @@
   "upstream": {
     "repository": "https://github.com/agent-accelerators/enterprise-agent-accelerator.git",
     "local_checkout": "C:\\dev\\code_tool_hosted-async-1.8.0",
-    "commit": "c67dc3fd190567ce46c6080ed6016989444c1137",
-    "verified_at": "2026-09-27"
+    "commit": "621bb6a8dc915c51aedff3715739c878d5c77cb7",
+    "verified_at": "2026-09-28"
   },
   "files": [
     {
       "source": "core_handler.py",
       "destination": "reference/core_handler.py",
       "version": "1.12",
-      "sha256": "80b272402ed36c1f4ed1cf3c81458b98ea873f43e766d3c12b6c813c34918f66"
+      "sha256": "ef586fab24cdc09256ab2530ae34b67270594ca6db5c416c4a1c6478ce39de8b"
     },
     {
       "source": "skill_gatekeeper.py",
       "destination": "reference/skill_gatekeeper.py",
-      "version": "2.8",
-      "sha256": "64e265d9b98c45e377076dce2491a690b18749c57f93e0662b8a361415a506c0"
+      "version": "2.9",
+      "sha256": "d039998ae7fb11ec14dc29967a1aa34f555f6e6ca609de119995080044fd786c"
     },
     {
       "source": "skills_provider_factory.py",
       "destination": "reference/skills_provider_factory.py",
-      "version": "1.15",
-      "sha256": "95481865aa9e81ef2512a387234aa6e86a96b0e982bbce9d2d15d5aa5cf02914"
+      "version": "1.16",
+      "sha256": "c5460193a4478cb6d36c6825b5646317a7a4a7bcf43fb49731ddb0b51c16206e"
     },
     {
       "source": "code_executor.py",
       "destination": "reference/code_executor.py",
       "version": "1.4",
-      "sha256": "060f70fbd822aa8fb6a4e7ce2f9f75a94fb2b89117901fb7ae8fc49493de1c2d"
+      "sha256": "60821b86ca703d4dca87473a53387dde0d2d97d676027001febeab877655aed9"
     },
     {
       "source": "mi_proxy.py",
@@ -247,7 +247,8 @@
       "task_description": "Async job lifecycle only.",
       "existing_job": "Async job lifecycle only.",
       "message": "Non-success control field; status already drives the Generator's branching.",
-      "reason": "Non-success control field; status already drives the Generator's branching."
+      "reason": "Non-success control field; status already drives the Generator's branching.",
+      "requested_scripts": "The Generator does not author scripts/, so TEST has no script call to assert; revisit if Script-type skills are generated."
     }
   },
   "validation": {

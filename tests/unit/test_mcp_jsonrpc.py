@@ -153,3 +153,58 @@ def test_http_error_detail_includes_body_and_challenge(monkeypatch: pytest.Monke
     assert "HTTP 401 Unauthorized" in err
     assert "resource_metadata" in err
     assert "Authorization header is required." in err
+
+
+def _tool_reply(inner: dict) -> bytes:
+    text = json.dumps(inner)
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}}).encode()
+
+
+def test_lint_skill_package_sends_files_as_a_json_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MICROSOFT_OBO_SCOPE", "api://app-id/user_impersonation")
+    report = {"status": "completed", "valid": True, "errors": [], "warnings": [], "ruleset_version": "1.0"}
+    sent: list = []
+
+    def _fake_urlopen(request, timeout: float = 0):  # noqa: ANN001
+        if "login.microsoftonline.com" in request.full_url:
+            return _FakeResponse(json.dumps({"access_token": "tok-123", "expires_in": 3600}).encode())
+        sent.append(request)
+        return _FakeResponse(_tool_reply(report))
+
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", _fake_urlopen)
+    files = {"SKILL.md": "---\nname: demo\n---\n中文\n"}
+
+    result, err = mcp_jsonrpc.lint_skill_package_jsonrpc(MCP_URL, "demo", files)
+
+    assert (result, err) == (report, None)
+    body = json.loads(sent[0].data.decode())
+    assert body["method"] == "tools/call"
+    assert body["params"]["name"] == "lint_skill_package"
+    arguments = body["params"]["arguments"]
+    assert arguments["skill_name"] == "demo"
+    assert isinstance(arguments["files_json"], str)
+    assert json.loads(arguments["files_json"]) == files
+    assert sent[0].get_header("Authorization") == "Bearer tok-123"
+
+
+def test_lint_skill_package_reports_rpc_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "Unknown tool"}}).encode()
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(reply))
+
+    result, err = mcp_jsonrpc.lint_skill_package_jsonrpc(MCP_URL, "demo", {"SKILL.md": "x"})
+
+    assert result is None
+    assert err == "Unknown tool"
+
+
+def test_lint_skill_package_reports_tool_errors_with_their_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = json.dumps({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"isError": True, "content": [{"type": "text", "text": "Unknown tool: lint_skill_package"}]},
+    }).encode()
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(reply))
+
+    result, err = mcp_jsonrpc.lint_skill_package_jsonrpc(MCP_URL, "demo", {"SKILL.md": "x"})
+
+    assert result is None
+    assert "Unknown tool: lint_skill_package" in err

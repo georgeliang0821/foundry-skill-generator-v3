@@ -424,9 +424,10 @@ section to the skill file.
   directory. Never produce a symlink or hard link as output, and never expect a
   file inside a subdirectory to be uploaded.
 
-The content lint warns on E1-E4 when a code block contains an absolute path
+The content lint flags E1-E4 when a code block contains an absolute path
 under those prefixes, `pip install` / `-m pip`, `getpwuid` / `getlogin`, or
 `nohup` / `setsid` / `os.fork` / `start_new_session=True` / `daemon=True`.
+E1 is a warning; E2-E4 are errors that block saving.
 
 ## V4A Patch Requirements
 

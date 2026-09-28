@@ -602,6 +602,8 @@ class Session(BaseModel):
     remote_skill_id: str | None = None
     remote_version_hash: str = ""
     blob_store_id: str = ""
+    # EAA lint_skill_package policy version the last save was validated against.
+    eaa_ruleset_version: str = ""
     current_stage: Stage = Stage.PREPARE
     owner_upn: str = ""
     materials: list[Material] = Field(default_factory=list)

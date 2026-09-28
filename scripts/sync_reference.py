@@ -525,27 +525,10 @@ def extract_version(content: bytes) -> str:
     return match.group(1) if match else "unknown"
 
 
-def _eaa_repo_dir() -> str | None:
-    """The same checkout the backend lints against; read from .env without loading its secrets."""
-    if os.getenv("EAA_REPO_DIR"):
-        return os.environ["EAA_REPO_DIR"]
-    env_file = REPO_ROOT / ".env"
-    if not env_file.is_file():
-        return None
-    from dotenv import dotenv_values
-
-    return dotenv_values(env_file).get("EAA_REPO_DIR") or None
-
-
 def _checkout_path(manifest: dict[str, Any], override: str | None) -> Path:
-    configured = (
-        override
-        or os.getenv("REFERENCE_UPSTREAM_REPO")
-        or _eaa_repo_dir()
-        or manifest["upstream"].get("local_checkout")
-    )
+    configured = override or os.getenv("REFERENCE_UPSTREAM_REPO") or manifest["upstream"].get("local_checkout")
     if not configured:
-        raise ReferenceSyncError("Pass --upstream, or set EAA_REPO_DIR in .env")
+        raise ReferenceSyncError("Pass --upstream or set REFERENCE_UPSTREAM_REPO")
     checkout = Path(configured).expanduser().resolve()
     if not (checkout / ".git").exists():
         raise ReferenceSyncError(f"Upstream checkout is not a Git repository: {checkout}")
@@ -651,8 +634,8 @@ def _print_report(report: dict[str, Any]) -> None:
         if position["changed_sources"]:
             print(
                 f"[BEHIND] Upstream HEAD {head} is past the pinned {pinned} and changes "
-                f"{', '.join(position['changed_sources'])}. Saves are linted against the checked-out "
-                "EAA, so the Generator may already be judged by rules the pin does not describe."
+                f"{', '.join(position['changed_sources'])}. The deployed runtime may already "
+                "enforce contracts the pin does not describe."
             )
         else:
             print(f"[INFO] Upstream HEAD {head} is past the pinned {pinned}; no snapshot file changed.")

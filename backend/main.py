@@ -45,6 +45,7 @@ from .e2e import (
     e2e_scenario_skill_files,
     e2e_skill_files,
     fake_agent_enabled,
+    fake_lint_enabled,
     fake_run_selection_tests,
     fake_test_runner_enabled,
     get_scenario,
@@ -52,11 +53,13 @@ from .e2e import (
 )
 from .material_fidelity import fidelity_warning_count, scan_material_fidelity
 from .eaa_platform import (
+    EaaLintRejected,
+    EaaLintResult,
     EaaLintUnavailable,
+    lint_skill_package,
     mi_allowlist_note,
     obo_registry_keys,
     obo_registry_mapping,
-    run_eaa_skill_lint,
     split_eaa_allowlist_warnings,
 )
 from .skill_lint import lint_skill, lint_warning_count
@@ -840,17 +843,39 @@ def _warn_rename_cleanup(session: Session, old_name: str, new_name: str, why: st
     session.touch()
 
 
-def _note_mi_allowlist(session: Session, resources: list[str]) -> None:
-    notes = "\n".join(f"- {mi_allowlist_note(resource)}" for resource in resources)
+def _note_eaa_warnings(session: Session, warnings: list[str], ruleset_version: str) -> None:
+    others, resources = split_eaa_allowlist_warnings(warnings)
+    lines = [f"- {mi_allowlist_note(resource)}" for resource in resources]
+    lines += [f"- {warning}" for warning in others]
     content = (
-        "Saved. The EAA lint reports metadata.mi_scopes resources outside the platform's "
-        "MI_SCOPE_ALLOWLIST. Include these deployment steps verbatim in your next reply:\n" + notes
+        f"Saved. EAA lint_skill_package (ruleset {ruleset_version or 'unknown'}) returned warnings "
+        "that do not block publishing. Tell the user about each of them in your next reply; "
+        "include the deployment steps verbatim:\n" + "\n".join(lines)
     )
     # Every accepted patch re-saves; tell the agent once per distinct set.
     if any(message.content == content for message in session.conversation):
         return
     session.conversation.append(ChatMessage(role=MessageRole.SYSTEM, content=content))
-    log_event("skill.save.mi_allowlist_pending", session_id=session.id, resources=resources)
+    log_event("skill.save.eaa_lint_warnings", session_id=session.id, warnings=warnings, mi_allowlist=resources)
+
+
+def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
+    """The runtime's own lint, fail-closed: no verdict is never a pass."""
+    if fake_lint_enabled():
+        return EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="e2e")
+    try:
+        result = lint_skill_package(skill_name, {"SKILL.md": session.current_skill.skill_md})
+    except EaaLintUnavailable as exc:
+        log_exception("skill.save.eaa_lint_unavailable", exc, session_id=session.id, skill_name=skill_name)
+        raise HTTPException(status_code=503, detail=f"EAA skill lint could not run, so the skill was not saved: {exc}") from exc
+    except EaaLintRejected as exc:
+        log_event("skill.save.eaa_lint_rejected", level="warning", session_id=session.id, skill_name=skill_name, error=str(exc))
+        raise HTTPException(status_code=400, detail=f"EAA rejected the skill package: {exc}") from exc
+    if not result.valid:
+        log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, errors=result.errors)
+        detail = "\n".join(result.errors) or "EAA reported the package invalid without listing errors."
+        raise HTTPException(status_code=400, detail="EAA skill lint failed:\n" + detail)
+    return result
 
 
 def _finalize_skill_rename(
@@ -965,16 +990,7 @@ def save_skill_dual_write(
         raise HTTPException(status_code=400, detail=f"Skill lint failed:\n{detail}")
 
     # The runtime's own lint. Fail closed: no verdict is never a pass.
-    try:
-        eaa_problems = run_eaa_skill_lint(skill_name, {"SKILL.md": session.current_skill.skill_md})
-    except EaaLintUnavailable as exc:
-        log_exception("skill.save.eaa_lint_unavailable", exc, session_id=session.id, skill_name=skill_name)
-        raise HTTPException(status_code=503, detail=f"EAA skill lint could not run, so the skill was not saved: {exc}") from exc
-    # A resource outside MI_SCOPE_ALLOWLIST is a deployment step, not a defect in the skill.
-    eaa_problems, unlisted_mi_resources = split_eaa_allowlist_warnings(eaa_problems)
-    if eaa_problems:
-        log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, problems=eaa_problems)
-        raise HTTPException(status_code=400, detail="EAA skill lint failed:\n" + "\n".join(eaa_problems))
+    eaa_lint = _eaa_lint(session, skill_name)
 
     declared_children: list[str] = []
     internal_children: list[str] = []
@@ -1100,8 +1116,9 @@ def save_skill_dual_write(
     session.current_skill.version_hash = saved.version_hash
     session.children = declared_children
     session.blob_store_id = _active_store_id()
-    if unlisted_mi_resources:
-        _note_mi_allowlist(session, unlisted_mi_resources)
+    session.eaa_ruleset_version = eaa_lint.ruleset_version
+    if eaa_lint.warnings:
+        _note_eaa_warnings(session, eaa_lint.warnings, eaa_lint.ruleset_version)
     session.touch()
     log_event(
         "skill.save.done",
@@ -1109,6 +1126,7 @@ def save_skill_dual_write(
         session_id=session.id,
         skill_name=saved.name,
         version_hash=saved.version_hash,
+        eaa_ruleset_version=eaa_lint.ruleset_version,
         duration_ms=elapsed_ms(started),
     )
     return saved

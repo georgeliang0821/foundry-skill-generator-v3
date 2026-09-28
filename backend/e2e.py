@@ -34,6 +34,10 @@ def fake_test_runner_enabled() -> bool:
     return e2e_enabled() and os.getenv("SGV2_E2E_FAKE_TEST_RUNNER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def fake_lint_enabled() -> bool:
+    return e2e_enabled() and os.getenv("SGV2_E2E_FAKE_LINT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def set_scenario(name: str) -> str:
     global _scenario
     _scenario = (name or "new_skill_happy_path").strip()

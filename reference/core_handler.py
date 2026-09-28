@@ -343,9 +343,10 @@ except ImportError:
         _StaticSkillsProvider = None
 
 # 2026.08.15 George : Mode A 也要有 resource_name 前綴容錯 —— 兩模式行為必須一致。
-# 拿不到就退回原本的 provider(只少了容錯,不至於讓 Mode A 起不來)。
+# 2026.09.27 George : 改用 StaticGuardedSkillsProvider(加上 route_only 保險絲 #4)。
+# 拿不到就退回原本的 provider(只少了容錯與保險絲,不至於讓 Mode A 起不來)。
 try:
-    from skills_provider_factory import PrefixTolerantSkillsProvider as _TolerantSkillsProvider
+    from skills_provider_factory import StaticGuardedSkillsProvider as _TolerantSkillsProvider
     _TOLERANT_PROVIDER_IMPORT_ERROR = None
 except Exception as _e:  # noqa: BLE001
     _TolerantSkillsProvider = None
@@ -502,6 +503,8 @@ def _build_static_skills_provider():
             resource_directories=resource_dirs,
         )
         provider.resource_directories = resource_dirs
+        from skills_sync import STATIC_UNSUPPORTED_SCRIPT_SKILLS
+        provider.unsupported_script_skills = dict(STATIC_UNSUPPORTED_SCRIPT_SKILLS)
         # 列出載入的 skill 名稱,方便 debug
         skill_names = sorted(
             d for d in os.listdir(SKILLS_DIR)
@@ -679,6 +682,19 @@ async def startup():
         "DYNAMIC_SKILLS_ENABLED", "false"
     ).lower() == "true"
 
+    from skills_sync import SKILL_SCRIPTS_ENABLED
+    from code_executor import SUBPROCESS_UID_SANDBOX
+    if SKILL_SCRIPTS_ENABLED and not _dynamic_enabled:
+        logger.warning(
+            "[startup] SKILL_SCRIPTS_ENABLED=true has no effect in Mode A — "
+            "script-based skills will be refused at load_skill"
+        )
+    elif SKILL_SCRIPTS_ENABLED and not SUBPROCESS_UID_SANDBOX:
+        logger.warning(
+            "[startup] SKILL_SCRIPTS_ENABLED=true without SUBPROCESS_UID_SANDBOX — "
+            "skill scripts run with the platform process identity"
+        )
+
     if not _dynamic_enabled:
         # ── Static-only 模式 (主路徑) ──
         _skills_factory = None
@@ -829,6 +845,8 @@ RESPONSE_BOUNDARY_WHITELIST = frozenset({
     # 本 whitelist 是「保留清單」不是「補齊清單」,多列一個從不存在的 key 對既有
     # 流量是 no-op。
     "loaded_resources",
+    # route_only + SKILL_SCRIPTS_ENABLED:模型要求但未執行的腳本(flag 關閉時 key 不存在)
+    "requested_scripts",
     # detach / rejected / cancelled 等非 success shape 的控制欄位也保留,
     # 讓 mcp_server._build_response_payload 仍能正確分流。
     "status",
@@ -3357,26 +3375,45 @@ async def approve_pending_skill(pending_id: str, reviewer: str = "unknown") -> d
         existing_skill_dir, existing_skill_etag = await _resolve_and_refresh_skill_dir(
             existing_skill_basename
         )
-        if not existing_skill_dir:
-            logger.warning(
-                f"[SkillReview] Merge target '{existing_skill_basename}' "
-                f"在 Blob 與本地皆不存在,將改為新建"
-            )
+    if not existing_skill_dir:
+        logger.error(
+            f"[SkillReview] Merge target '{existing_skill_basename}' 在 Blob 上不存在,"
+            f"Gatekeeper 不建立新 skill: pending_id={pending_id}"
+        )
+        return {
+            "status": "error",
+            "pending_id": pending_id,
+            "reason": f"Merge target '{existing_skill_basename}' not found on Blob",
+        }
 
     # ── ③ 對當下最新的正式 skill 做 merge(核心:避免後蓋前)──
     from skill_gatekeeper import write_knowledge_skill  # 延遲 import,避免循環依賴
 
     try:
-        skill_dir = write_knowledge_skill(knowledge, existing_skill_dir=existing_skill_dir)
+        changed = write_knowledge_skill(knowledge, existing_skill_dir)
     except Exception as e:
         logger.error(f"[SkillReview] write_knowledge_skill failed: {e}")
         return {"status": "error", "reason": f"Write failed: {e}"}
 
-    # 2026.08.14 George: 後續 Blob/SQL 一律以實際寫入的目錄名為準。merge 時落地的是
-    # 既有 skill 目錄，沿用 knowledge["skill_name"] 會上傳不存在的目錄、並在 SQL
-    # 多開一列孤兒 skill；另外目錄名已經 sanitize，能避開 schema 的名稱格式 CHECK。
-    if skill_dir:
-        skill_name = os.path.basename(skill_dir)
+    # 2026.08.14 George: 後續 Blob/SQL 一律以實際寫入的目錄名為準,不用 knowledge["skill_name"]。
+    skill_name = os.path.basename(existing_skill_dir)
+
+    if not changed:
+        logger.info(
+            f"[SkillReview] {skill_name} 內容未變更，跳過上傳與 SQL 同步: pending_id={pending_id}"
+        )
+        try:
+            await blob_delete_pending(pending_id)
+        except Exception as e:
+            logger.warning(f"[SkillReview] Pending cleanup failed: {e}")
+        return {
+            "status": "approved",
+            "pending_id": pending_id,
+            "skill_name": skill_name,
+            "action_type": pending.get("action_type"),
+            "reviewer": reviewer,
+            "changed": False,
+        }
 
     # ── ④ 上傳到 Blob 正式路徑 ──
     # 2026.08.24 George: 帶 ETag 做 If-Match。上傳沒成功就整支中止 —— 保留 pending
@@ -3396,27 +3433,17 @@ async def approve_pending_skill(pending_id: str, reviewer: str = "unknown") -> d
         }
 
     # ── ④.5 同步 metadata 到 SQL(Mode B Dynamic Skills 必要) ──
-    # 2026.05.25 George : 配合 Mode B 讀路徑(SkillsProviderFactory)
-    # - Refine 既有 skill: UPDATE skills.updated_at(觸發 cache invalidation)
-    # - 新增 skill:        INSERT skills + INSERT user_skill_grants 給 admin
-    # 用 ACA MI 拿 admin token,繞過 RLS 寫 grants
+    # UPDATE skills.updated_at(觸發 cache invalidation);用 ACA MI 拿 admin token。
     try:
         from gatekeeper_publish import sync_skill_to_sql, PublishError
 
         admin_sql_token = await _get_admin_sql_token()
 
-        sync_result = await sync_skill_to_sql(
+        await sync_skill_to_sql(
             sql_token=admin_sql_token,
             skill_name=skill_name,
-            # 2026.08.14 George: schema v2 拿掉 description，且 blob_path 改為
-            # computed column —— 二者都不再由 Python 端提供。
-            # 2026.08.14 George: schema v2.1 另加了 blob_prefix（也是 computed）
-            # 供 Mode B 列舉整個 skill 資料夾；同樣不需要這邊傳。
         )
-        logger.info(
-            f"[SkillReview] SQL synced: skill={skill_name}, "
-            f"created={sync_result.created}, granted_to={sync_result.granted_to}"
-        )
+        logger.info(f"[SkillReview] SQL synced: skill={skill_name}")
     except PublishError as e:
         # SQL sync 失敗不 fail 整個 approve:
         # - Blob 已寫,本地已寫,static 模式 user 看得到
@@ -3458,6 +3485,7 @@ async def approve_pending_skill(pending_id: str, reviewer: str = "unknown") -> d
         "skill_name": skill_name,
         "action_type": pending.get("action_type"),
         "reviewer": reviewer,
+        "changed": True,
     }
 
 

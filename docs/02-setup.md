@@ -195,6 +195,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 設定後，PREPARE 階段會透過 MCP 讀取目標 Azure Container Apps（ACA）應用**目前已有的環境變數**與 **OBO scope 註冊表**，讓 Agent 在確認 skill 變數時能分辨「ACA 已有（reuse）」或「需新增（add）」。**四個都填才會啟用**；任一留空即停用（功能 no-op，不影響其他流程）。
 
+> `MCP_ENDPOINT` 本身不是選用的：儲存時要用它呼叫 EAA 的 `lint_skill_package`（見 [EAA skill lint](#eaa-skill-lint儲存必要)）。選用的是 ACA 查詢這個功能。
+
 | 變數 | 說明 |
 | --- | --- |
 | `MCP_ENDPOINT` | MCP 伺服器根 URL（`/mcp`），提供「列出 ACA 環境變數」的工具；例如 `https://eaa.foundryeaa.org/mcp` |
@@ -205,7 +207,7 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 ##### 呼叫 MCP 用的身分
 
-呼叫 `list_aca_environment_variables` 時帶的是 **app-only token**，由 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`（也就是負責網頁登入的那支 App Registration）以 **client credentials** 對**自己**換取，scope 為 `api://<app-id>/.default`。
+呼叫 `list_aca_environment_variables` 與 `lint_skill_package` 時帶的都是 **app-only token**，由 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`（也就是負責網頁登入的那支 App Registration）以 **client credentials** 對**自己**換取，scope 為 `api://<app-id>/.default`。
 
 - **為什麼不是使用者委派身分**：PREPARE 進入時的查詢跑在背景執行緒，只拿得到 session，沒有 HTTP request 也沒有使用者 token，等同無人值守。手動重新整理（`POST /api/sessions/{id}/aca-env`）雖然有登入者，仍刻意沿用同一個 app-only 身分，避免兩條路徑結果不一致。
 - **audience 從哪來**：預設把 `MICROSOFT_OBO_SCOPE` 去掉 `/user_impersonation` 得到 `api://<app-id>`。MCP 伺服器驗證的正是這個值。若兩者不同支 app，才需要另外設 `MCP_OAUTH_AUDIENCE` 覆寫。
@@ -218,18 +220,20 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 #### EAA skill lint（儲存必要）
 
-儲存（`save_skill_dual_write()`）在寫入 Blob 前，會在 EAA repo 的 checkout 裡執行 `python tools/skill_lint.py <skill 目錄> --json`（實作：`backend/eaa_platform.py`）。
+儲存（`save_skill_dual_write()`）在寫入 Blob 前，先跑本專案的 skill lint，再透過 `MCP_ENDPOINT` 呼叫 EAA 的 MCP tool `lint_skill_package`，用 EAA 自己的規則檢核整個 skill package（實作：`backend/eaa_platform.py`、`backend/mcp_jsonrpc.py`）。本機不需要 EAA repo。
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| `EAA_REPO_DIR` | 是 | EAA repo 的本機 checkout，需包含 commit `bd13560`（S1）或更新，`tools/skill_lint.py` 從該 commit 才有；要檢查 `metadata.mi_scopes` 需含 S3（`mi_proxy.py`）的版本。通常與 `reference/manifest.json` 的 `local_checkout` 是同一個目錄 |
-| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`。本機 lint 與 EAA lint 都用它判斷是否要附上部署說明 |
+| `MCP_ENDPOINT` | 是 | EAA MCP 根 URL（`/mcp`）；身分與 ACA 查詢相同，見上方「呼叫 MCP 用的身分」 |
+| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`。只影響本機 lint 的 D7 INFO；EAA 端用的是 ACA 上的值 |
 
-- **一律 fail-closed**：未設定 `EAA_REPO_DIR`、找不到工具、執行失敗或輸出無法解析，都回 **HTTP 503** 並擋下儲存；沒有「只警告就放行」的開關。
-- **errors 與 warnings 都擋**：任何一項都回 **HTTP 400**，訊息列出每一項。唯一例外是 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST`：它是部署步驟而非 skill 缺陷，儲存照常完成，Agent 會在回覆中列出要加入白名單的資源與最小 RBAC 角色（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
-- **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
-- 工具以本專案的 Python 執行，只繼承 `PATH` 等最少環境變數，不會拿到 `.env` 裡的 secret。
-- 這是本機 subprocess，不碰 Azure。pytest 的 `backend_main` fixture 會將它改成永遠通過；Playwright 走真的工具，因此跑含儲存的 E2E 也需要 `EAA_REPO_DIR`。
+- 目前只送 `SKILL.md` 一個檔案，因為 Generator 只產出它。日後支援 `scripts/*.py` 時，必須在同一次呼叫一起送，MI scope 等跨檔檢核才準。
+- **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
+- `status == "failed"`（request 或 package 不合法）或 `valid == false`（有 lint ERROR）回 **HTTP 400**，訊息列出 EAA 的 `error` / `errors`。
+- `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
+- `ruleset_version` 記在 session 的 `eaa_ruleset_version` 與 `skill.save.done` / `mcp.lint.done` log。
+- 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
+- pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
 - 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
 
 ### 3.2 Azure SQL 連線與驗證策略

@@ -23,6 +23,21 @@ P1 預留（未來擴充）：
 - Type A 工具型保存
 - Type C 模板抽象化
 
+VERSION: 2.9
+2026.09.27 George: v2.9 — Gatekeeper 不再建立 skill;script 型 skill 的 refine 規則
+- 所有權:skill 只由 Generator 建立;Gatekeeper 只 refine 既有 skill 的 SKILL.md。
+  移除 _create_new_skill()、write_knowledge_skill() 的新建分支、manual 模式的
+  create pending;check_duplicate() 沒命中改寫 gatekeeper_suggested_new_skill log。
+- skills_referenced 有值時只在其中挑目標,一個都不適用就 SKIP;只有
+  skills_referenced == [] 才走 check_duplicate()。
+- merge 基準一律來自 Blob(需 ETag 才能 If-Match 上傳),移除本地 fallback
+  _find_skill_dir_by_name()。
+- 移除 _merge_gatekeeper_auto() / _detect_skill_origin():不再有 Gatekeeper 自產 skill,
+  所有 merge 一律走 _merge_manual_skill() 的 Gatekeeper Addendum。
+- write_knowledge_skill() 回傳 bool(內容是否變更);GatekeeperDecision 新增 changed。
+- script 型 skill(Blob 上有 scripts/)只有本輪 script_runs 有 exit_code == 0 才可
+  refine,否則排除並寫 gatekeeper_script_skill_excluded log。
+
 VERSION: 2.8
 2026.08.24 George: v2.8 — merge 基準改以 Blob 為真實來源 + skills_referenced 解析失敗護欄
 - 根因:本檔所有查找與 merge 都踩在本地 SKILLS_DIR 上,而那只是「本 replica
@@ -284,8 +299,7 @@ class SkillType(str, Enum):
 class GatekeeperAction(str, Enum):
     """Gatekeeper 的處理動作"""
     SAVE_TOOL = "save_tool"                 # 完整保存 PY + MD (P1)
-    UPDATE_KNOWLEDGE = "update_knowledge"   # 更新或新建知識型 MD (P0 ✓)
-    CREATE_TEMPLATE = "create_template"     # 抽象化後保存模板 + MD (P1)
+    UPDATE_KNOWLEDGE = "update_knowledge"   # 更新既有 skill 的 SKILL.md (P0 ✓)
     SAVE_EXAMPLE = "save_example"           # 僅存為範例
     SKIP = "skip"                           # 不保存
     # 2026.02.28 George: v2.1 新增 — 有參考 skills 且無 error 時使用
@@ -312,6 +326,8 @@ class GatekeeperPayload:
     error_messages: List[str]               # 萃取出的錯誤訊息列表
     # 2026.02.28 George: v2.1 CodingAgent 本次參考了哪些 skills
     skills_referenced: List[str] = field(default_factory=list)
+    # 本輪 run_skill_script 的紀錄:[{skill, script, args, exit_code, stderr, ...}]
+    script_runs: List[Dict] = field(default_factory=list)
 
     @classmethod
     def from_conversation_state(
@@ -375,6 +391,7 @@ class GatekeeperPayload:
             output_type=output_type,
             error_messages=error_messages,
             skills_referenced=skills_referenced or [],
+            script_runs=list(getattr(state, "script_runs", None) or []),
         )
 
 
@@ -402,8 +419,10 @@ class GatekeeperDecision:
     # 2026.08.14 George: auto 模式背景同步 SQL 時需要，避免呼叫端再從路徑反推
     skill_name: Optional[str] = None
     # 2026.08.24 George: merge 基準那份 SKILL.md 在 Blob 上的 ETag。呼叫端拿它做
-    # If-Match 條件上傳;None = 新建、或基準不是從 Blob 來的，走無條件覆蓋。
+    # If-Match 條件上傳;None = 不得上傳。
     skill_md_etag: Optional[str] = None
+    # False = merge 後內容與基準相同,呼叫端不上傳、不推進 updated_at
+    changed: bool = False
 
 
 # ============================================================================
@@ -579,7 +598,7 @@ KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 Codin
 - 只萃取「通用且可複用」的知識，不要記錄使用者特有的業務邏輯
 - error_pattern 要寫出實際的錯誤訊息關鍵字，讓未來比對時能命中
 - 如果沒有有價值的知識可萃取（例如只是 typo），回傳 {{"skip": true, "reason": "..."}}
-- ★ skill_name 命名規則（重要）：如果「系統中已有的 Skills」清單中有 description 與本次知識相關的 skill，請直接使用該 skill 的 name 作為 skill_name，以便知識合併回現有 skill 而非新建。只有在確定沒有任何已有 skill 適合時，才新建名稱。
+- ★ skill_name 命名規則（重要）：如果「系統中已有的 Skills」清單中有 description 與本次知識相關的 skill，請直接使用該 skill 的 name 作為 skill_name，以便知識合併回現有 skill。系統不會建立新 skill。
 - ★ workflow_patterns 萃取規則（重要）：
   - 觀察 CodingAgent 從失敗到成功的「行為轉變」— 它在失敗時做了什麼，成功時改成做什麼？
   - 典型的 workflow pattern 包括：「先探測/先列舉/先查詢可用資源，再開始實作」、「先驗證環境/版本，再寫業務邏輯」、「先用小範圍測試確認 API 行為，再擴展到完整實作」
@@ -649,7 +668,7 @@ async def extract_knowledge_with_llm(
         merge_hint = (
             f"重要：因為 CodingAgent 已參考 {skills_list}，"
             f"請優先使用這些已有 skill 的名稱作為 skill_name，"
-            f"以便知識合併回現有 skill 而非新建。"
+            f"以便知識合併回現有 skill。"
         )
 
     prompt = KNOWLEDGE_EXTRACTION_PROMPT.format(
@@ -849,42 +868,6 @@ def check_duplicate(
     return None
 
 
-def _find_skill_dir_by_name(skill_name: str, skills_dir: str = None) -> Optional[str]:
-    """
-    2026.02.28 George: v2.1
-    根據 skill name 精確查找 skill 目錄。
-    用於 skills_referenced 的合併場景。
-    
-    Returns:
-        skill 目錄路徑（如果找到），否則 None
-    """
-    skills_dir = skills_dir or SKILLS_DIR
-    if not os.path.exists(skills_dir):
-        return None
-    
-    # 先精確比對目錄名
-    exact_path = os.path.join(skills_dir, skill_name)
-    if os.path.isdir(exact_path) and os.path.isfile(os.path.join(exact_path, "SKILL.md")):
-        return exact_path
-    
-    # 再模糊比對 SKILL.md 裡的 name 欄位
-    for item in os.listdir(skills_dir):
-        skill_md_path = os.path.join(skills_dir, item, "SKILL.md")
-        if not os.path.isfile(skill_md_path):
-            continue
-        try:
-            with open(skill_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            # 2026.03.05 v2.3: 三元組回傳，此處不需要 desc 和 metadata
-            existing_name, _, _ = _parse_skill_frontmatter(content)
-            if existing_name and _sanitize_skill_name(existing_name) == _sanitize_skill_name(skill_name):
-                return os.path.join(skills_dir, item)
-        except Exception:
-            continue
-
-    return None
-
-
 # 2026.08.24 George : v2.8 — merge 基準以 Blob 為真實來源
 #
 # 本地 SKILLS_DIR 只在啟動時同步一次,而 Mode B 每一輪都從 Blob materialize。
@@ -913,9 +896,8 @@ async def _resolve_and_refresh_skill_dir(
     定位要 merge 的 skill 目錄,並先把 Blob 上的 SKILL.md 拉回來當基準。
 
     Returns:
-        (skill 目錄, SKILL.md 的 Blob ETag)。Blob 拿不到時退回純本地查找,
-        ETag 為 None、上傳時走無條件覆蓋(維持舊行為,不因為 Blob 不可用
-        就連寫回一起停掉)。兩邊都沒有則回 (None, None)。
+        (skill 目錄, SKILL.md 的 Blob ETag)。Blob 拿不到就回 (None, None) ——
+        寫回一律 If-Match,沒有 ETag 的本地基準寫了也傳不上去。
     """
     skills_dir = skills_dir or SKILLS_DIR
 
@@ -923,16 +905,15 @@ async def _resolve_and_refresh_skill_dir(
         from skills_sync import fetch_skill_md_from_blob
         fetched = await fetch_skill_md_from_blob(skill_name)
     except Exception as e:
-        logger.warning(f"[Gatekeeper] Blob 基準取用失敗，退回本地: {skill_name} — {e}")
+        logger.warning(f"[Gatekeeper] Blob 基準取用失敗: {skill_name} — {e}")
         fetched = None
 
-    if fetched:
-        content, etag = fetched
-        hydrated = _hydrate_skill_md(skills_dir, skill_name, content)
-        if hydrated:
-            return hydrated, etag
+    if not fetched:
+        return None, None
 
-    return _find_skill_dir_by_name(skill_name, skills_dir), None
+    content, etag = fetched
+    hydrated = _hydrate_skill_md(skills_dir, skill_name, content)
+    return (hydrated, etag) if hydrated else (None, None)
 
 
 # 2026.08.21 George : Skill Registry 分階 —— 識別「情境層 / 編排層」skill
@@ -1080,184 +1061,41 @@ def check_relevance_for_merge(
     return score
 
 
-def write_knowledge_skill(
-    knowledge: Dict,
-    existing_skill_dir: Optional[str] = None,
-    skills_dir: str = None,
-) -> Optional[str]:
+def write_knowledge_skill(knowledge: Dict, existing_skill_dir: str) -> bool:
     """
-    將知識萃取結果寫入本地 skills/ 目錄。
-    
-    符合 Agent Skills 規範（供 SkillsProvider discover）：
-    - skills/{skill-name}/SKILL.md（含 YAML frontmatter）
-    - 目錄名 = YAML name 欄位
-    
-    如果 existing_skill_dir 非 None，代表找到重複的 skill，
-    就 append 到現有 SKILL.md 而非新建。
-    
+    把萃取結果 merge 進既有 skill 的本地 SKILL.md。Gatekeeper 不建立新 skill。
+
     Returns:
-        寫入的 skill 目錄路徑
+        True = SKILL.md 內容有變更(呼叫端才需要上傳與同步 SQL)
     """
-    skills_dir = skills_dir or SKILLS_DIR
-    os.makedirs(skills_dir, exist_ok=True)
-
-    skill_name = knowledge.get("skill_name", "unknown-skill")
-    # 確保 name 符合 Agent Skills 規範：小寫、連字號、無連續連字號
-    skill_name = _sanitize_skill_name(skill_name)
-
-    if existing_skill_dir:
-        # ── 合併到現有 skill ──
-        return _merge_into_existing_skill(existing_skill_dir, knowledge)
-    else:
-        # ── 新建 skill ──
-        return _create_new_skill(skills_dir, skill_name, knowledge)
+    return _merge_into_existing_skill(existing_skill_dir, knowledge)
 
 
-def _create_new_skill(skills_dir: str, skill_name: str, knowledge: Dict) -> str:
-    """新建一個 knowledge 型 skill 目錄"""
-    skill_dir = os.path.join(skills_dir, skill_name)
-    os.makedirs(skill_dir, exist_ok=True)
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    description = knowledge.get("skill_description", "Auto-generated knowledge skill")
-    tags = knowledge.get("tags", [])
-    packages = knowledge.get("useful_packages", [])
-    known_issues = knowledge.get("known_issues", [])
-
-    # ── 產生 SKILL.md ──
-    md_lines = [
-        "---",
-        f"name: {skill_name}",
-        f'description: "{_escape_yaml_string(description)}"',
-        "metadata:",
-        f"  author: gatekeeper-auto",
-        f"  version: \"1.0\"",
-        f"  created_at: \"{now}\"",
-        f"  skill_type: knowledge",
-        "---",
-        "",
-        f"# {skill_name}",
-        "",
-        description,
-        "",
-    ]
-
-    # Tags
-    if tags:
-        md_lines.append(f"**相關技術**: {', '.join(tags)}")
-        md_lines.append("")
-
-    # Packages
-    if packages:
-        md_lines.append(f"**相關套件**: {', '.join(packages)}")
-        md_lines.append("")
-
-    # Known Issues
-    if known_issues:
-        md_lines.append("## 已知問題與 Workaround")
-        md_lines.append("")
-        for issue in known_issues:
-            md_lines.append(f"### {issue.get('title', 'Unknown Issue')}")
-            md_lines.append("")
-            if issue.get("error_pattern"):
-                md_lines.append(f"**錯誤訊息**: `{issue['error_pattern'][:200]}`")
-                md_lines.append("")
-            if issue.get("root_cause"):
-                md_lines.append(f"**根因**: {issue['root_cause']}")
-                md_lines.append("")
-            if issue.get("solution"):
-                md_lines.append(f"**解法**: {issue['solution']}")
-                md_lines.append("")
-            if issue.get("applicable_when"):
-                md_lines.append(f"**適用情境**: {issue['applicable_when']}")
-                md_lines.append("")
-
-    # 2026.03.27 v2.5: Workflow Patterns
-    workflow_patterns = knowledge.get("workflow_patterns", [])
-    if workflow_patterns:
-        md_lines.append("## 建議工作流程")
-        md_lines.append("")
-        for wp in workflow_patterns:
-            md_lines.append(f"### {wp.get('title', 'Workflow Pattern')}")
-            md_lines.append("")
-            if wp.get("trigger"):
-                md_lines.append(f"**適用時機**: {wp['trigger']}")
-                md_lines.append("")
-            if wp.get("steps"):
-                md_lines.append(f"**步驟**:")
-                md_lines.append("")
-                md_lines.append(wp['steps'])
-                md_lines.append("")
-            if wp.get("rationale"):
-                md_lines.append(f"**為什麼需要**: {wp['rationale']}")
-                md_lines.append("")
-
-    # 安全護欄
-    md_lines.extend([
-        "## ⚠️ 注意事項",
-        "",
-        "- 此 Skill 由 Gatekeeper 自動產生，內容來自實際執行歷程",
-        "- 已知問題的解法可能隨套件版本更新而失效，請注意版本相容性",
-        f"- 最後更新: {now}",
-        "",
-    ])
-
-    skill_md_content = "\n".join(md_lines)
-    skill_md_path = os.path.join(skill_dir, "SKILL.md")
-
-    with open(skill_md_path, "w", encoding="utf-8") as f:
-        f.write(skill_md_content)
-
-    logger.info(f"[Gatekeeper] 新建 Skill: {skill_dir}")
-    return skill_dir
-
-
-def _merge_into_existing_skill(skill_dir: str, knowledge: Dict) -> str:
+def _merge_into_existing_skill(skill_dir: str, knowledge: Dict) -> bool:
     """
-    將新知識 append 到現有 skill 的 SKILL.md
-    
-    2026.03.05 George: v2.3 通用化格式支援
-    - 新增 _detect_skill_origin() 分流：
-      - gatekeeper-auto: 走原有固定 marker 邏輯（**相關套件**、## 已知問題、## ⚠️ 注意事項）
-      - manual: 走新的 「## Gatekeeper Addendum」獨立 section 策略，
-        不破壞人工編排的結構
-    - 版本遞增改用 _increment_version()，同時相容 semver 和簡化版格式
-    
-    2026.03.05 George: v2.2 修正 useful_packages 資訊斷層
-    - merge 模式下也會更新「相關套件」行，將新 packages union 進現有清單
-    - 解決 check_relevance_for_merge 維度 3 (Package 重疊) 日漸失準的問題
+    將新知識 append 到現有 skill 的 SKILL.md 的「## Gatekeeper Addendum」section。
+
+    - 版本遞增用 _increment_version()，同時相容 semver 和簡化版格式
+
+    Returns:
+        True = 內容有變更並已寫入本地
     """
     skill_md_path = os.path.join(skill_dir, "SKILL.md")
 
     if not os.path.exists(skill_md_path):
-        logger.warning(f"[Gatekeeper] 找不到 {skill_md_path}，改為新建")
-        skill_name = os.path.basename(skill_dir)
-        parent_dir = os.path.dirname(skill_dir)
-        return _create_new_skill(parent_dir, skill_name, knowledge)
+        raise FileNotFoundError(f"merge 目標缺少 SKILL.md: {skill_md_path}")
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     known_issues = knowledge.get("known_issues", [])
 
     if not known_issues:
-        return skill_dir
+        return False
 
     # 讀取現有內容
     with open(skill_md_path, "r", encoding="utf-8") as f:
         existing_content = f.read()
 
-    # ═══════════════════════════════════════════════════════════════
-    # 2026.03.05 v2.3: 偵測 skill 來源，決定 merge 策略
-    # ═══════════════════════════════════════════════════════════════
-    _, _, metadata = _parse_skill_frontmatter(existing_content)
-    origin = _detect_skill_origin(existing_content, metadata)
-    logger.info(f"[Gatekeeper] Merge 策略: origin={origin}, target={os.path.basename(skill_dir)}")
-
-    if origin == "gatekeeper-auto":
-        # ── 路線 A: Gatekeeper 自產 skill → 走原有固定 marker 邏輯 ──
-        updated_content = _merge_gatekeeper_auto(existing_content, knowledge, now)
-    else:
-        # ── 路線 B: 人工撰寫 skill → 走 Addendum section 邏輯 ──
-        updated_content = _merge_manual_skill(existing_content, knowledge, now)
+    updated_content = _merge_manual_skill(existing_content, knowledge, now)
 
     # ═══════════════════════════════════════════════════════════════
     # 2026.03.10 v2.4: 若 merge 函式回傳內容完全未變（所有 issues 均重複），
@@ -1265,7 +1103,7 @@ def _merge_into_existing_skill(skill_dir: str, knowledge: Dict) -> str:
     # ═══════════════════════════════════════════════════════════════
     if updated_content == existing_content:
         logger.info(f"[Gatekeeper] 內容未變更，跳過寫入和版本遞增: {skill_dir}")
-        return skill_dir
+        return False
 
     # ═══════════════════════════════════════════════════════════════
     # 2026.03.05 v2.3: 通用版本遞增（相容 semver 和簡化版）
@@ -1287,92 +1125,8 @@ def _merge_into_existing_skill(skill_dir: str, knowledge: Dict) -> str:
     with open(skill_md_path, "w", encoding="utf-8") as f:
         f.write(updated_content)
 
-    logger.info(f"[Gatekeeper] 更新 Skill ({origin}): {skill_dir} (+{len(known_issues)} issues)")
-    return skill_dir
-
-
-def _merge_gatekeeper_auto(existing_content: str, knowledge: Dict, now: str) -> str:
-    """
-    路線 A: 合併到 Gatekeeper 自動產生的 SKILL.md
-    
-    2026.03.10 George: v2.4 加入 issue-level dedup
-    - 在 append 前呼叫 _dedup_known_issues() 過濾已存在的 issues
-    - 若去重後無新 issue，直接 return 不做任何修改（也不遞增版本號）
-    
-    2026.03.05 George: v2.3 從 _merge_into_existing_skill 抽出
-    此函式保留 v2.2 原有邏輯不變：
-    - 找 **相關套件** 行做 package union
-    - 找 ## ⚠️ 注意事項 做 known issues 插入
-    - 找不到 marker 時用 fallback
-    
-    前提：target SKILL.md 必須包含 Gatekeeper 自產的固定結構
-    """
-    known_issues = knowledge.get("known_issues", [])
-    # 2026.03.27 v2.5: 取得 workflow_patterns
-    workflow_patterns = knowledge.get("workflow_patterns", [])
-    
-    # ── 2026.03.10 v2.4: Issue-level 去重 ──
-    # 在做任何 append 之前，先過濾掉已存在的 issues
-    known_issues = _dedup_known_issues(known_issues, existing_content)
-    
-    if not known_issues and not workflow_patterns:
-        # 所有 issues 都是重複的，也沒有新 workflow pattern → 不修改檔案
-        logger.info("[Gatekeeper] 所有 issues 均為重複且無新 workflow pattern，跳過 merge (auto)")
-        return existing_content
-    
-    # ── 合併 useful_packages 到現有「相關套件」行 (v2.2 邏輯) ──
-    new_packages = knowledge.get("useful_packages", [])
-    if new_packages:
-        pkg_match = re.search(r'\*\*相關套件\*\*:\s*(.+)', existing_content)
-        if pkg_match:
-            existing_pkgs = set(
-                p.strip() for p in pkg_match.group(1).split(",") if p.strip()
-            )
-            merged_pkgs = sorted(existing_pkgs | set(new_packages))
-            existing_content = existing_content.replace(
-                pkg_match.group(0),
-                f"**相關套件**: {', '.join(merged_pkgs)}"
-            )
-            logger.info(
-                f"[Gatekeeper] 合併套件: existing={existing_pkgs}, "
-                f"new={set(new_packages)}, merged={merged_pkgs}"
-            )
-        else:
-            insert_before = "## 已知問題與 Workaround"
-            if insert_before in existing_content:
-                existing_content = existing_content.replace(
-                    insert_before,
-                    f"**相關套件**: {', '.join(sorted(new_packages))}\n\n{insert_before}"
-                )
-                logger.info(f"[Gatekeeper] 新增套件行: {new_packages}")
-
-    # ── 產生新的 known issues 段落（只包含去重後的 issues）──
-    new_section = ""
-    if known_issues:
-        new_section += _format_known_issues_section(known_issues, now)
-
-    # ── 2026.03.27 v2.5: 產生 workflow patterns 段落 ──
-    if workflow_patterns:
-        wp_section = _format_workflow_patterns_section(workflow_patterns, now)
-        if wp_section:
-            new_section += wp_section
-
-    if not new_section:
-        return existing_content
-
-    # ── 插入到 ## ⚠️ 注意事項 前 ──
-    # 2026.03.27 v2.5: 如果 ## 建議工作流程 已存在，workflow patterns 插入到其尾端
-    # 否則和 known_issues 一起插入到 ## ⚠️ 注意事項 前
-    insert_marker = "## ⚠️ 注意事項"
-    if insert_marker in existing_content:
-        existing_content = existing_content.replace(
-            insert_marker,
-            f"{new_section}\n{insert_marker}"
-        )
-    else:
-        existing_content += new_section
-
-    return existing_content
+    logger.info(f"[Gatekeeper] 更新 Skill: {skill_dir} (+{len(known_issues)} issues)")
+    return True
 
 
 def _merge_manual_skill(existing_content: str, knowledge: Dict, now: str) -> str:
@@ -1494,79 +1248,10 @@ def _merge_manual_skill(existing_content: str, knowledge: Dict, now: str) -> str
     return existing_content
 
 
-def _format_known_issues_section(known_issues: List[Dict], now: str) -> str:
-    """
-    格式化 known issues 為 Markdown 段落。
-    
-    2026.03.05 George: v2.3 從 _merge_gatekeeper_auto 和 _merge_manual_skill 
-    共用的格式化邏輯抽出為獨立函式，減少重複。
-    但因兩條路線的結構略有不同（auto 用 HTML comment 開頭，manual 用不同的包裝），
-    目前此函式只被 _merge_gatekeeper_auto 呼叫。
-    """
-    lines = [
-        "",
-        f"<!-- Gatekeeper 自動更新: {now} -->",
-    ]
-    for issue in known_issues:
-        lines.append(f"### {issue.get('title', 'Unknown Issue')}")
-        lines.append("")
-        if issue.get("error_pattern"):
-            lines.append(f"**錯誤訊息**: `{issue['error_pattern'][:200]}`")
-            lines.append("")
-        if issue.get("root_cause"):
-            lines.append(f"**根因**: {issue['root_cause']}")
-            lines.append("")
-        if issue.get("solution"):
-            lines.append(f"**解法**: {issue['solution']}")
-            lines.append("")
-        if issue.get("applicable_when"):
-            lines.append(f"**適用情境**: {issue['applicable_when']}")
-            lines.append("")
-    
-    return "\n".join(lines)
-
-
-# 2026.03.27 George: v2.5 新增 ─ Workflow Patterns 渲染
-# ============================================================================
-# 用途：將 workflow_patterns 列表渲染為 Markdown 段落
-# 供 _merge_gatekeeper_auto 和 _merge_manual_skill 共用
-# ============================================================================
-
-def _format_workflow_patterns_section(workflow_patterns: List[Dict], now: str) -> str:
-    """
-    格式化 workflow patterns 為 Markdown 段落。
-    
-    2026.03.27 George: v2.5 新增
-    """
-    if not workflow_patterns:
-        return ""
-    
-    lines = [
-        "",
-        f"<!-- Gatekeeper Workflow Pattern 自動更新: {now} -->",
-    ]
-    for wp in workflow_patterns:
-        lines.append(f"### {wp.get('title', 'Workflow Pattern')}")
-        lines.append("")
-        if wp.get("trigger"):
-            lines.append(f"**適用時機**: {wp['trigger']}")
-            lines.append("")
-        if wp.get("steps"):
-            lines.append(f"**步驟**:")
-            lines.append("")
-            lines.append(wp['steps'])
-            lines.append("")
-        if wp.get("rationale"):
-            lines.append(f"**為什麼需要**: {wp['rationale']}")
-            lines.append("")
-    
-    return "\n".join(lines)
-
-
 # ============================================================================
 # PHASE 3.6: ISSUE-LEVEL DEDUP（v2.4 新增）
 # 2026.03.10 George: 解決 SKILL.md 無限長大問題
-# 根因：_merge_gatekeeper_auto / _merge_manual_skill 在 append known_issues 時
+# 根因：_merge_manual_skill 在 append known_issues 時
 # 完全沒有比對新 issue 是否已存在，導致同一個錯誤（如 ModuleNotFoundError）
 # 每次 Gatekeeper 觸發都重複寫入。
 #
@@ -1650,8 +1335,8 @@ def _extract_existing_error_keys(existing_content: str) -> set:
     從現有 SKILL.md 內容中，批次提取所有已記錄的 error_pattern normalized keys。
     
     掃描目標：所有 **錯誤訊息**: `...` 格式的行（Gatekeeper 標準輸出格式）。
-    這是 _create_new_skill()、_merge_gatekeeper_auto()、_merge_manual_skill()
-    產生 known_issues 時的統一格式，所以能可靠地回收所有已記錄的 error patterns。
+    這是 _merge_manual_skill() 產生 known_issues 時的統一格式(舊版 Gatekeeper
+    建立的 skill 也是同一格式)，所以能可靠地回收所有已記錄的 error patterns。
     
     Returns:
         set of normalized key strings
@@ -1677,7 +1362,7 @@ def _dedup_known_issues(
     2026.03.10 George: v2.4 新增
     
     Issue-level 去重：過濾掉已存在於現有 SKILL.md 中的 known_issues。
-    供 _merge_gatekeeper_auto() 和 _merge_manual_skill() 共用。
+    供 _merge_manual_skill() 使用。
     
     比對策略（任一命中即視為重複，跳過該 issue）：
     1. error_pattern normalized key 完全匹配
@@ -1765,21 +1450,56 @@ def _dedup_known_issues(
 # 2026.02.28 George: v2.1 新增 skills-aware 決策邏輯
 # ============================================================================
 
+def _log_event(event: str, **fields: Any) -> None:
+    logger.warning("%s %s", event, json.dumps(fields, ensure_ascii=False, default=str))
+
+
+async def _excluded_as_script_skill(skill_name: str, payload: GatekeeperPayload) -> bool:
+    """script 型 skill 只有在本輪腳本成功執行過(exit_code == 0)時才可 refine。"""
+    try:
+        from skills_sync import blob_skill_has_script
+        is_script = await blob_skill_has_script(skill_name)
+    except Exception as e:
+        # 判斷不了就當 script 型:誤排除只是少一次 refine,誤放行會把繞過腳本的寫法寫進 SKILL.md
+        logger.warning(f"[Gatekeeper] 無法確認 {skill_name} 是否為 script 型，視為 script 型: {e}")
+        is_script = True
+
+    if not is_script:
+        return False
+
+    runs = [r for r in payload.script_runs if r.get("skill") == skill_name]
+    if any(r.get("exit_code") == 0 for r in runs):
+        return False
+
+    last = runs[-1] if runs else {}
+    _log_event(
+        "gatekeeper_script_skill_excluded",
+        session_id=payload.task_id,
+        skill=skill_name,
+        reason="script_failed" if runs else "script_not_run",
+        script=last.get("script"),
+        args=last.get("args"),
+        exit_code=last.get("exit_code"),
+        stderr=(last.get("stderr") or "")[-500:],
+    )
+    return True
+
+
 async def run_gatekeeper(
     payload: GatekeeperPayload,
     gatekeeper_agent: Any = None,
 ) -> GatekeeperDecision:
     """
-    Gatekeeper 主流程（P0 版本）：規則分類 → 知識萃取 → 查重 → 寫回本地。
+    Gatekeeper 主流程（P0 版本）：規則分類 → 知識萃取 → 選 merge 目標 → 寫回本地。
+    Gatekeeper 只 refine 既有 skill 的 SKILL.md,不建立新 skill。
     
     2026.02.28 George: v2.1 Skills-Aware 決策邏輯：
     - 有參考 skills + 無 error → 完全跳過（skills 已發揮作用）
-    - 有參考 skills + 有 error → 優先合併回已參考的 skill
-    - 無參考 skills → 正常走完整流程
+    - 有參考 skills + 有 error → 只在已參考的 skill 中挑合併目標
+    - 無參考 skills → check_duplicate() 找合併目標,沒有就只記 log
     
     Graceful degradation：
     - 如果 gatekeeper_agent 不可用 → 用規則層做知識萃取
-    - 查重失敗 → 直接新建（最多多一個 skill，不會丟資料）
     - 任何步驟失敗都不影響使用者體驗
     """
     start_time = datetime.now(timezone.utc)
@@ -1873,45 +1593,45 @@ async def run_gatekeeper(
     )
 
     # ═══════════════════════════════════════════
-    # PHASE 3: 查重（v2.1: skills_referenced 優先合併）
-    # 2026.03.04 George: v2.2 新增 relevance check，避免不相關知識被合併
+    # PHASE 3: 選 merge 目標 —— Gatekeeper 只 refine 既有 skill,不建立新 skill
+    # - skills_referenced 有值:只在其中挑;一個都不適用就 SKIP,不 fall through 到
+    #   check_duplicate()(正確目標依定義不在候選集內,模糊比對命中的必然是別人)
+    # - skills_referenced == []:才用 check_duplicate() 找目標;沒命中只記 log
     # ═══════════════════════════════════════════
+
+    def _skip(reason: str) -> GatekeeperDecision:
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+        logger.info(f"[Gatekeeper] 跳過寫回: {reason}")
+        return GatekeeperDecision(
+            task_id=payload.task_id,
+            classification=classification,
+            action_taken=GatekeeperAction.SKIP,
+            skill_written=None,
+            reason=reason,
+            processing_time_ms=int(elapsed),
+        )
 
     existing_skill_dir = None
     # 2026.08.24 George: v2.8 — 合併目標那份 SKILL.md 的 Blob ETag，供條件上傳用
     existing_skill_etag = None
-    # 2026.08.24 George: v2.8 — Blob 與本地都找不到的 skills_referenced
-    unresolved_refs: List[str] = []
 
-    # 2026.02.28 George: v2.1 如果有 skills_referenced，優先嘗試合併回已參考的 skill
-    # 2026.03.04 George: v2.2 加入 relevance check，不再盲目信任 skills_referenced
-    # 2026.03.10 George: v2.4.1 修正 — 遍歷所有 skills_referenced 選最佳
-    # 問題：原本迴圈用 break 取第一個找到的 skill（不管 relevance 高低），
-    #   導致 ['azure-ad-...', 'outlook-...', 'azure-diagrams-tips'] 這種列表中，
-    #   diagrams 相關的知識被合併到第一個碰巧 PASS 的 azure-ad skill
-    # 修正：評估所有 skills_referenced 的 relevance score，選分數最高的
     if payload.skills_referenced:
+        # 2026.03.10 George: v2.4.1 — 評估所有 skills_referenced 的 relevance score，選分數最高的
         best_score = 0.0
-        best_dir = None
-        best_etag = None
-        
+        unresolved_refs: List[str] = []
+
         for ref_skill in payload.skills_referenced:
-            # 2026.08.24 George: v2.8 — 改為先從 Blob 拉回 SKILL.md 當基準。
+            # 2026.08.24 George: v2.8 — 先從 Blob 拉回 SKILL.md 當基準。
             # 底下 _is_orchestration_skill()、check_relevance_for_merge() 以及
             # 之後的 merge/版本遞增/dedup 全部讀這一份，基準舊了就全部一起錯。
             found_dir, found_etag = await _resolve_and_refresh_skill_dir(ref_skill)
             if not found_dir:
                 unresolved_refs.append(ref_skill)
-                logger.info(
-                    f"[Gatekeeper] skills_referenced={ref_skill} 在 Blob 與本地皆找不到，跳過"
-                )
+                logger.info(f"[Gatekeeper] skills_referenced={ref_skill} 在 Blob 找不到，跳過")
                 continue
 
-            # 2026.08.21 George : 分階架構下,skills_referenced 會同時含 parent
-            # 與 child。parent 是情境編排層,內容是分支與流程,不是可累積的
-            # 除錯知識;而它的 tags/description 往往跟錯誤情境高度相關,
-            # relevance score 很容易贏過真正出錯的 child。一旦贏了,
-            # Gatekeeper Addendum 會靜靜寫進編排層並自動同步回 Blob。
+            # 2026.08.21 George : parent(編排層)的 tags/description 常跟錯誤情境高度
+            # 相關,relevance score 很容易贏過真正出錯的 child。
             if _is_orchestration_skill(found_dir):
                 logger.info(
                     f"[Gatekeeper] skills_referenced={ref_skill} 為編排層"
@@ -1919,85 +1639,66 @@ async def run_gatekeeper(
                 )
                 continue
 
-            # v2.4.1: 取得 relevance score（不再是 bool）
+            if await _excluded_as_script_skill(ref_skill, payload):
+                continue
+
             score = check_relevance_for_merge(knowledge, found_dir)
-            
             if score > best_score:
                 best_score = score
-                best_dir = found_dir
-                best_etag = found_etag
+                existing_skill_dir = found_dir
+                existing_skill_etag = found_etag
                 logger.info(
                     f"[Gatekeeper] 候選 Skill 更新: {ref_skill} "
                     f"score={score:.1f} (目前最佳)"
                 )
-        
-        if best_dir:
-            existing_skill_dir = best_dir
-            existing_skill_etag = best_etag
-            logger.info(
-                f"[Gatekeeper] 最終選擇合併目標: {os.path.basename(best_dir)} "
-                f"(score={best_score:.1f}, 從 {len(payload.skills_referenced)} 個候選中選出)"
-            )
-        else:
-            logger.info(
-                f"[Gatekeeper] 所有 skills_referenced 均不相關 "
-                f"(scores all = 0)，將走一般查重流程"
-            )
 
-    # ── 2026.08.24 George: v2.8 保守護欄 ──
-    # skills_referenced 有值卻一個都解析不到時，正確的合併目標依定義不在本地候選
-    # 集內，check_duplicate() 再怎麼比對都只會命中「別的 skill」——而它的門檻只有
-    # 3 個共同 token、_tokenize 又沒有 stopword 過濾，同領域命名幾乎必中。
-    # 例：azure-table-storage-cleanup 的知識會被併進
-    # faea-usage-report-from-azure-table-storage（光名字就有 3 個 token 重疊）。
-    review_mode = os.environ.get("SKILL_REVIEW_MODE", "auto").lower()
-    blocked_by_unresolved = bool(unresolved_refs) and not existing_skill_dir
-
-    if blocked_by_unresolved and review_mode != "manual":
-        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-        logger.warning(
-            f"[Gatekeeper] skills_referenced 全數無法解析 {unresolved_refs}，"
-            f"放棄寫回以避免誤併到無關 skill"
-        )
-        return GatekeeperDecision(
-            task_id=payload.task_id,
-            classification=classification,
-            action_taken=GatekeeperAction.SKIP,
-            skill_written=None,
-            reason=f"skills_referenced 無法解析（{', '.join(unresolved_refs)}），跳過寫回",
-            processing_time_ms=int(elapsed),
-        )
-
-    # 如果 skills_referenced 沒找到，走一般查重
-    if not existing_skill_dir and not blocked_by_unresolved:
+        if not existing_skill_dir:
+            if unresolved_refs:
+                return _skip(f"skills_referenced 無可用目標（無法解析: {', '.join(unresolved_refs)}）")
+            return _skip("skills_referenced 均不適合作為合併目標")
+    else:
         try:
-            existing_skill_dir = check_duplicate(
+            dup_dir = check_duplicate(
                 knowledge.get("skill_name", ""),
                 knowledge.get("skill_description", ""),
             )
-            if existing_skill_dir:
-                # 2026.08.21 George : 同上 —— 一般查重也可能命中編排層,一併擋掉,
-                # 落回「開新 skill」比污染編排層安全。
-                if _is_orchestration_skill(existing_skill_dir):
-                    logger.info(
-                        f"[Gatekeeper] 查重命中 {os.path.basename(existing_skill_dir)} "
-                        f"為編排層，不寫回知識，改走新建流程"
-                    )
-                    existing_skill_dir = None
-                else:
-                    logger.info(f"[Gatekeeper] 找到相似 Skill: {existing_skill_dir}，將合併")
         except Exception as e:
-            logger.warning(f"[Gatekeeper] 查重失敗，將新建: {e}")
+            return _skip(f"查重失敗: {e}")
+
+        if not dup_dir:
+            _log_event(
+                "gatekeeper_suggested_new_skill",
+                session_id=payload.task_id,
+                skill_name=knowledge.get("skill_name"),
+                skill_description=knowledge.get("skill_description"),
+                known_issues=[i.get("title") for i in knowledge.get("known_issues", [])],
+                workflow_patterns=[w.get("title") for w in knowledge.get("workflow_patterns", [])],
+                tags=knowledge.get("tags", []),
+            )
+            return _skip("沒有可合併的既有 skill（Gatekeeper 不建立新 skill）")
+
+        dup_name = os.path.basename(dup_dir)
+        found_dir, found_etag = await _resolve_and_refresh_skill_dir(dup_name)
+        if not found_dir:
+            return _skip(f"查重命中 {dup_name}，但 Blob 上找不到 SKILL.md")
+        if _is_orchestration_skill(found_dir):
+            return _skip(f"查重命中 {dup_name} 為編排層，不寫回知識")
+        if await _excluded_as_script_skill(dup_name, payload):
+            return _skip(f"查重命中 script 型 skill {dup_name}，本輪腳本未成功執行")
+
+        existing_skill_dir, existing_skill_etag = found_dir, found_etag
+        logger.info(f"[Gatekeeper] 找到相似 Skill: {existing_skill_dir}，將合併")
 
     # ═══════════════════════════════════════════
     # PHASE 4: 寫回本地 skills/ 目錄
     # 2026.03.30 George: v2.6 HITL — 加入 SKILL_REVIEW_MODE 分支
     # ═══════════════════════════════════════════
 
+    review_mode = os.environ.get("SKILL_REVIEW_MODE", "auto").lower()
+    target_name = os.path.basename(existing_skill_dir)
     skill_dir = None
     pending_id = None  # HITL
-
-    # HITL — 審核模式已在 PHASE 3 護欄處讀取（review_mode）
+    changed = False
 
     try:
         # HITL — manual 模式：寫 pending + 通知 Logic App，不直接寫入正式目錄
@@ -2010,33 +1711,22 @@ async def run_gatekeeper(
             )
             await _notify_logic_app(pending_id, knowledge, existing_skill_dir)
             action_taken = GatekeeperAction.PENDING_REVIEW
-            if payload.skills_referenced and existing_skill_dir:
-                reason = (
-                    f"待審核 — 預計合併回 {os.path.basename(existing_skill_dir)}"
-                )
-            else:
-                reason = f"待審核 — 預計{'更新' if existing_skill_dir else '新建'} Knowledge Skill"
+            reason = f"待審核 — 預計合併回 {target_name}"
         else:
-            # auto 模式：維持現有行為，直接寫入
-            skill_dir = write_knowledge_skill(
-                knowledge,
-                existing_skill_dir=existing_skill_dir,
-            )
+            changed = write_knowledge_skill(knowledge, existing_skill_dir)
+            skill_dir = existing_skill_dir
             action_taken = GatekeeperAction.UPDATE_KNOWLEDGE
-            # 2026.02.28 George: v2.1 在 reason 中標註是否為 skills-aware merge
-            if payload.skills_referenced and existing_skill_dir:
-                reason = f"Skills-aware 合併回 {os.path.basename(existing_skill_dir)}"
-            else:
-                reason = f"{'更新' if existing_skill_dir else '新建'} Knowledge Skill"
+            reason = f"合併回 {target_name}" if changed else f"{target_name} 內容未變更"
     except Exception as e:
         logger.error(f"[Gatekeeper] 寫回失敗: {e}")
         action_taken = GatekeeperAction.SKIP
         reason = f"寫回失敗: {e}"
+        skill_dir = None
 
     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
     logger.info(
         f"[Gatekeeper] 完成: action={action_taken.value}, "
-        f"skill={skill_dir}, pending={pending_id}, 耗時 {elapsed:.0f}ms"
+        f"skill={skill_dir}, changed={changed}, pending={pending_id}, 耗時 {elapsed:.0f}ms"
     )
 
     return GatekeeperDecision(
@@ -2047,12 +1737,10 @@ async def run_gatekeeper(
         reason=reason,
         processing_time_ms=int(elapsed),
         pending_id=pending_id,
-        # 2026.08.14 George: 取目錄名而非 knowledge["skill_name"] — merge 時實際落地的是
-        # 既有 skill 的目錄名，用前者才不會在 SQL 多開一列不存在的 skill。
-        skill_name=os.path.basename(skill_dir) if skill_dir else None,
-        # 2026.08.24 George: 只有「基準確實來自 Blob 的 merge」才帶 ETag；新建或
-        # 走模糊查重命中的路徑維持無條件覆蓋（不在本次範圍）。
+        # 2026.08.14 George: 取目錄名而非 knowledge["skill_name"] — 實際落地的是既有 skill 的目錄名
+        skill_name=target_name if skill_dir else None,
         skill_md_etag=existing_skill_etag if skill_dir else None,
+        changed=changed,
     )
 
 
@@ -2077,7 +1765,7 @@ LOGIC_APP_SKILL_REVIEW_URL = os.environ.get("LOGIC_APP_SKILL_REVIEW_URL", "")
 
 async def _write_to_pending(
     knowledge: Dict,
-    existing_skill_dir: Optional[str],
+    existing_skill_dir: str,
     classification: "ClassificationResult",
     payload: "GatekeeperPayload",
 ) -> str:
@@ -2107,10 +1795,8 @@ async def _write_to_pending(
         "knowledge": knowledge,
 
         # ── 決策 context（approve 時需要）──
-        "existing_skill_dir": (
-            os.path.basename(existing_skill_dir) if existing_skill_dir else None
-        ),
-        "action_type": "merge" if existing_skill_dir else "create",
+        "existing_skill_dir": os.path.basename(existing_skill_dir),
+        "action_type": "merge",
         "relevance_score": None,  # 由呼叫端補充（如果有的話）
         "classification": classification.primary_type.value,
 
@@ -2124,7 +1810,7 @@ async def _write_to_pending(
     logger.info(
         f"[Gatekeeper] HITL: 寫入 pending — "
         f"id={pending_id}, skill={knowledge.get('skill_name')}, "
-        f"action={'merge → ' + os.path.basename(existing_skill_dir) if existing_skill_dir else 'create'}"
+        f"action=merge → {os.path.basename(existing_skill_dir)}"
     )
 
     return pending_id
@@ -2133,7 +1819,7 @@ async def _write_to_pending(
 async def _notify_logic_app(
     pending_id: str,
     knowledge: Dict,
-    existing_skill_dir: Optional[str],
+    existing_skill_dir: str,
 ) -> None:
     """
     2026.03.30 George: v2.6 HITL 新增
@@ -2163,10 +1849,8 @@ async def _notify_logic_app(
         "pending_id": pending_id,
         "skill_name": knowledge.get("skill_name", "unknown"),
         "skill_description": knowledge.get("skill_description", "")[:200],
-        "action_type": "merge" if existing_skill_dir else "create",
-        "merge_target": (
-            os.path.basename(existing_skill_dir) if existing_skill_dir else None
-        ),
+        "action_type": "merge",
+        "merge_target": os.path.basename(existing_skill_dir),
         "issues_count": len(knowledge.get("known_issues", [])),
         "issues_text": "\n\n".join(issues_text_lines) if issues_text_lines else "無",
         "tags": knowledge.get("tags", [])[:10],
@@ -2309,11 +1993,6 @@ def _sanitize_skill_name(name: str) -> str:
     return name or "auto-skill"
 
 
-def _escape_yaml_string(s: str) -> str:
-    """Escape YAML 字串中的特殊字元"""
-    return s.replace('"', '\\"').replace('\n', ' ')
-
-
 def _generate_skill_name_from_request(user_request: str) -> str:
     """從使用者需求中產生 skill name"""
     # 提取英文關鍵字
@@ -2348,8 +2027,7 @@ def _extract_package_names(code: str) -> List[str]:
 
 def _extract_tags(payload: GatekeeperPayload) -> List[str]:
     """
-    從 payload 中提取技術標籤，用於 check_relevance_for_merge 維度 1 比對
-    以及 _create_new_skill 寫入 **相關技術** 行。
+    從 payload 中提取技術標籤，用於 check_relevance_for_merge 維度 1 比對。
     
     2026.03.10 George: v2.4 重寫 — 移除 hardcoded tech_keywords
     - 舊版問題：維護一個靜態的 tech_keywords 列表不切實際，
@@ -2473,45 +2151,6 @@ def _parse_skill_frontmatter(content: str) -> tuple:
                     metadata["version"] = stripped.split(":", 1)[1].strip().strip('"\'')
     
     return name, description, metadata
-
-
-# 2026.03.05 George: v2.3 新增 ─ 偵測 SKILL.md 的來源類型
-# ============================================================================
-# 用途：在 merge 時決定使用哪套策略
-# - "gatekeeper-auto": Gatekeeper 自動產生的 skill，有固定 heading 結構
-# - "manual": 人工撰寫的 skill，heading 結構不可預測
-# ============================================================================
-
-def _detect_skill_origin(content: str, metadata: Dict = None) -> str:
-    """
-    偵測 SKILL.md 是 Gatekeeper 自動產生還是人工撰寫。
-    
-    判斷邏輯（優先順序）：
-    1. metadata.author == "gatekeeper-auto" → 確定是自動產生
-    2. 包含 Gatekeeper 特有的結構 marker → 推定為自動產生
-    3. 以上皆無 → 視為人工撰寫
-    
-    Returns:
-        "gatekeeper-auto" 或 "manual"
-    """
-    # ── 方式 1: 透過 metadata.author 判斷（最可靠）──
-    if metadata and metadata.get("author") == "gatekeeper-auto":
-        return "gatekeeper-auto"
-    
-    # ── 方式 2: 透過結構特徵推定 ──
-    # Gatekeeper 自產的 SKILL.md 一定包含這些 heading（見 _create_new_skill）
-    gatekeeper_markers = [
-        "## 已知問題與 Workaround",
-        "## ⚠️ 注意事項",
-        "<!-- Gatekeeper 自動更新:",       # merge 時插入的 HTML comment
-    ]
-    marker_hits = sum(1 for m in gatekeeper_markers if m in content)
-    
-    # 至少命中 2 個 marker 才算（避免人工檔案偶然包含某一個 heading）
-    if marker_hits >= 2:
-        return "gatekeeper-auto"
-    
-    return "manual"
 
 
 # 2026.03.05 George: v2.3 新增 ─ 通用版本號解析與遞增

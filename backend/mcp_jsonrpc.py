@@ -201,6 +201,114 @@ def _extract_tools_call_payload(data: dict[str, Any]) -> dict[str, Any]:
     return json.loads(data["result"]["content"][0]["text"])
 
 
+def _call_tool(
+    mcp_url: str,
+    tool: str,
+    arguments: dict[str, Any],
+    *,
+    event: str,
+    timeout: float,
+    **log_fields: Any,
+) -> tuple[Any, str | None, int]:
+    """Call one MCP tool; returns ``(payload, error, started_ms)`` and never raises."""
+    started = now_ms()
+    audience = mcp_audience()
+    log_event(
+        f"{event}.start",
+        endpoint=mcp_url,
+        auth_mode="app_only" if audience else "anonymous",
+        audience=audience,
+        **log_fields,
+    )
+
+    mcp_token = ""
+    if audience:
+        try:
+            mcp_token = acquire_mcp_token(audience)
+        except HTTPError as exc:
+            detail = _http_error_detail(exc)
+            log_event("mcp.token.failed", level="error", audience=audience, error=detail, duration_ms=elapsed_ms(started))
+            return None, f"Failed to acquire the MCP access token: {detail}", started
+        except Exception as exc:  # noqa: BLE001
+            log_exception("mcp.token.failed", exc, audience=audience, duration_ms=elapsed_ms(started))
+            return None, f"Failed to acquire the MCP access token: {exc}", started
+
+    try:
+        data = mcp_post_jsonrpc(
+            mcp_url,
+            "tools/call",
+            {"name": tool, "arguments": arguments},
+            token=mcp_token,
+            timeout=timeout,
+        )
+    except HTTPError as exc:
+        detail = _http_error_detail(exc)
+        log_event(f"{event}.http_failed", level="error", endpoint=mcp_url, error=detail, duration_ms=elapsed_ms(started))
+        return None, detail, started
+    except URLError as exc:
+        log_exception(f"{event}.http_failed", exc, endpoint=mcp_url, duration_ms=elapsed_ms(started))
+        return None, str(exc), started
+    except Exception as exc:  # noqa: BLE001
+        log_exception(f"{event}.failed", exc, endpoint=mcp_url, duration_ms=elapsed_ms(started))
+        return None, str(exc), started
+
+    err = jsonrpc_error_message(data)
+    if err:
+        log_event(f"{event}.rpc_error", level="error", endpoint=mcp_url, error=err, duration_ms=elapsed_ms(started))
+        return None, err, started
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, dict) and result.get("isError"):
+        # e.g. "Unknown tool" when the deployed server predates the tool.
+        content = result.get("content") or [{}]
+        text = str(content[0].get("text", "")) if isinstance(content[0], dict) else str(content[0])
+        log_event(f"{event}.tool_error", level="error", endpoint=mcp_url, error=text[:800], duration_ms=elapsed_ms(started))
+        return None, f"MCP tool {tool} failed: {text[:800]}", started
+    try:
+        return _extract_tools_call_payload(data), None, started
+    except Exception as exc:  # noqa: BLE001
+        log_exception(f"{event}.parse_failed", exc, endpoint=mcp_url, duration_ms=elapsed_ms(started))
+        return None, f"Failed to parse MCP response: {exc}", started
+
+
+def lint_skill_package_jsonrpc(
+    mcp_url: str,
+    skill_name: str,
+    files: dict[str, str],
+    *,
+    timeout: float = 60,
+) -> tuple[dict | None, str | None]:
+    """Invoke EAA's ``lint_skill_package`` MCP tool on a whole skill package.
+
+    Returns ``(payload, error)``: the tool's JSON report, or ``None`` plus a
+    human-readable message when no report could be obtained.
+    """
+    payload, error, started = _call_tool(
+        mcp_url,
+        "lint_skill_package",
+        {"skill_name": skill_name, "files_json": json.dumps(files, ensure_ascii=False)},
+        event="mcp.lint",
+        timeout=timeout,
+        skill_name=skill_name,
+        files=len(files),
+    )
+    if error is not None:
+        return None, error
+    if not isinstance(payload, dict):
+        return None, "lint_skill_package returned a non-object payload."
+    log_event(
+        "mcp.lint.done",
+        endpoint=mcp_url,
+        skill_name=skill_name,
+        status=payload.get("status"),
+        valid=payload.get("valid"),
+        errors=len(payload.get("errors") or []),
+        warnings=len(payload.get("warnings") or []),
+        ruleset_version=payload.get("ruleset_version", ""),
+        duration_ms=elapsed_ms(started),
+    )
+    return payload, None
+
+
 def list_aca_environment_variables_jsonrpc(
     mcp_url: str,
     app_name: str,

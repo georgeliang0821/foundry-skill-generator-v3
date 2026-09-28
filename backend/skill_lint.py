@@ -1305,10 +1305,18 @@ def _check_credential_placeholder(skill_md: str, code_override: str | None) -> l
 
 
 def _check_execution_environment(skill_md: str, code_override: str | None) -> list[LintIssue]:
-    """E1-E4 -- code shapes the EAA uid sandbox breaks. Warnings: prose is never scanned."""
+    """E1-E4 -- code shapes the EAA uid sandbox breaks. Prose is never scanned.
+
+    E1 stays a warning (EAA only reports absolute paths); E2-E4 block saving.
+    """
     code = code_override if code_override is not None else "\n".join(_ANY_FENCE_RE.findall(skill_md or ""))
     return [
-        LintIssue(rule=rule, message=message.format(match=match), detail=match)
+        LintIssue(
+            rule=rule,
+            message=message.format(match=match),
+            detail=match,
+            severity="warning" if rule == "E1" else "error",
+        )
         for rule, pattern, message in _EXECUTION_RULES
         for match in _unique(m.group(0) if not m.groups() else m.group(1) for m in pattern.finditer(code or ""))
     ]

@@ -19,7 +19,7 @@ uv run --no-sync python scripts/sync_reference.py check
 | 項目 | 值 |
 | --- | --- |
 | Upstream repository | `https://github.com/agent-accelerators/enterprise-agent-accelerator.git` |
-| 本機 upstream checkout | 依序取 `--upstream`、`REFERENCE_UPSTREAM_REPO`、`.env` 的 `EAA_REPO_DIR`（與儲存時跑 EAA lint 的是同一份）、manifest 的 `local_checkout` |
+| 本機 upstream checkout | 依序取 `--upstream`、`REFERENCE_UPSTREAM_REPO`、manifest 的 `local_checkout`；只有維護者同步時需要，其他人用 `check --offline` |
 | Upstream branch | `main` |
 | 本地 snapshot | `reference/` |
 | 現況與 provenance 唯一來源 | `reference/manifest.json` |
@@ -37,9 +37,9 @@ uv run --no-sync python scripts/sync_reference.py check
 只比對 pin 住的 commit 永遠看不到「upstream 已經往前走」。非 `--offline` 的 `check` 會另外比對 checkout 的 HEAD：
 
 - HEAD 超過 pin、但沒有任何 snapshot 檔案變動（例如只改文件）→ `[INFO]`，不影響結果。
-- HEAD 改到 snapshot 檔案 → `[BEHIND]`，exit 1。儲存時的 EAA lint 已經在用 HEAD 的規則，pin 就不再描述 Generator 實際被檢查的版本。執行 `sync --commit HEAD`（會解析成完整 sha 寫入 manifest）再跑測試。
+- HEAD 改到 snapshot 檔案 → `[BEHIND]`，exit 1。部署中的 runtime 可能已經在執行 pin 沒描述到的契約。執行 `sync --commit HEAD`（會解析成完整 sha 寫入 manifest）再跑測試。
 
-儲存時的 `eaa_lint.done` log 會帶 `eaa_commit`，可以對照當時 lint 用的是哪個 EAA commit。
+儲存時的 EAA lint 走 MCP `lint_skill_package`，不讀這份 snapshot；當時用的規則版本記在 `skill.save.done` log 的 `eaa_ruleset_version`。
 
 ---
 

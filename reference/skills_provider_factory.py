@@ -44,6 +44,10 @@ skills_provider_factory.py — Per-turn, per-user SkillsProvider builder
     - SKILLS_BLOB_CONTAINER      (預設 "skills")
     - SKILLS_MATERIALIZE_BASE    (預設 /tmp/openclaw_skills)
 
+VERSION: 1.16
+2026.09.27 George : v1.16 — Mode A route_only 保險絲:StaticGuardedSkillsProvider + request_scope()
+                            (ContextVar,因為 Mode A provider 全域共用)。
+
 VERSION: 1.15
 2026.09.27 George : v1.15 — S3 MI 閘門:_materialize_skills() 收集已落地 skill 的
                             metadata.mi_scopes,掛到 provider.mi_scopes_by_skill。
@@ -246,14 +250,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
 import struct
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+import uuid
+import weakref
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 import aioodbc
 import yaml
@@ -267,11 +275,22 @@ from mi_proxy import declared_mi_scopes
 # 推導公式放在同一檔,避免 Mode A / Mode B 各自漂移。
 from skills_sync import (
     SKILL_ENTRY_FILENAME,
+    SKILL_SCRIPTS_ENABLED,
+    bundled_script_entries,
     derive_resource_scan_args,
+    script_skill_problem,
     select_skill_files,
+    skill_script_relpath,
 )
 
 logger = logging.getLogger(__name__)
+
+# script 型 skill 在 work_dir 內的落地子目錄(無副檔名 → 不會被當成產出上傳)
+SKILL_SCRIPTS_WORKDIR = "_skill_scripts"
+
+# work_dir 內的 run 紀錄 + 沙箱 helper(`import eaa_runs`);子目錄 → 不會被當成產出上傳
+EAA_RUNS_DIR = "eaa_runs"
+_EAA_RUNS_HELPER = Path(__file__).with_name("eaa_runs_helper.py")
 
 
 # ============================================================================
@@ -300,6 +319,13 @@ except ValueError:
 # ============================================================================
 # Data Model
 # ============================================================================
+@dataclass
+class MaterializeResult:
+    mi_scopes_by_skill: dict[str, list[str]] = field(default_factory=dict)
+    unsupported_script_skills: dict[str, str] = field(default_factory=dict)
+    script_blob_meta: dict[str, dict] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class SkillMetadata:
     """對應 v_my_skills view 的 row"""
@@ -404,11 +430,28 @@ def _dedupe_private_over_global(metas: list[SkillMetadata]) -> list[SkillMetadat
 # 不另外列舉,維持「目錄清單只有一個來源」。
 #
 # 只用 public API(get_resource / _find_skill),不碰 FileSkill._resources。
+def _lookup_ci(mapping: dict[str, str], name: str) -> str | None:
+    """MAF 以不分大小寫比對 skill 名稱,這裡跟著一致。"""
+    if not mapping or not name:
+        return None
+    lowered = name.lower()
+    return next((v for k, v in mapping.items() if k.lower() == lowered), None)
+
+
 class PrefixTolerantSkillsProvider(SkillsProvider):
     """SkillsProvider 子類:read_skill_resource 的 resource_name 前綴容錯。"""
 
     # 由 from_paths 呼叫端在建構後指派(derive_resource_scan_args 的第二個回傳值)
     resource_directories: tuple[str, ...] = ()
+    # script 型 skill 在本環境不能執行的原因 {skill_name: reason};建構後整包指派,不就地修改
+    unsupported_script_skills: dict[str, str] = {}
+
+    async def _load_skill(self, skills, skill_name):  # type: ignore[override]
+        reason = _lookup_ci(self.unsupported_script_skills, skill_name)
+        if reason:
+            logger.warning("[Skills] load_skill(%s) refused: %s", skill_name, reason)
+            return f"Error: skill '{skill_name}' is script-based and cannot be used here: {reason}"
+        return await super()._load_skill(skills, skill_name)
 
     async def _read_skill_resource(self, skills, skill_name, resource_name, **kwargs):  # type: ignore[override]
         resolved = await self._resolve_resource_name(skills, skill_name, resource_name)
@@ -471,6 +514,12 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         # 路由品質評估需要知道模型除了選對 skill,有沒有照 SKILL.md 的指示把附帶
         # 資源也讀進去 —— 只看 loaded_skills 看不出來。
         self.loaded_resources: list[tuple[str, str]] = []
+        # route_only + SKILL_SCRIPTS_ENABLED:模型要求執行但未執行的腳本
+        self.requested_scripts: list[dict] = []
+        # script 型 skill 的腳本 blob 稽核資訊 {skill_name: {blob, etag, last_modified}}
+        self.script_blob_meta: dict[str, dict] = {}
+        # 由 code_agent_hosted.run() 在 SKILL_SCRIPTS_ENABLED 時指派;None = 不執行腳本
+        self.script_context: ScriptRunContext | None = None
 
     async def _load_skill(self, skills, skill_name):  # type: ignore[override]
         # 2026.06.07 George : GA 1.8.0 遷移(語義式) — parent _load_skill 已改為
@@ -521,6 +570,228 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         # 現行實質防護是 skills_sync 同步時排除 scripts/ 目錄(檔案不落地),但那是
         # 內容層約定,會隨 skill 自動產生而漂移。這裡補成結構層。
         if self.route_only:
+            if SKILL_SCRIPTS_ENABLED:
+                self.requested_scripts.append(
+                    {"skill": skill_name, "script": script_name, "args": args}
+                )
+                logger.info(
+                    "[route_only] run_skill_script recorded, not executed: skill=%s script=%s",
+                    skill_name, script_name,
+                )
+                return json.dumps({
+                    "status": "not_executed",
+                    "reason": "route_only: scripts are recorded but never executed in routing-only mode",
+                }, ensure_ascii=False)
+            raise RuntimeError(
+                f"[route_only] blocked run_skill_script(skill={skill_name!r}, "
+                f"script={script_name!r}) — scripts must not execute in "
+                "routing-only mode."
+            )
+        if self.script_context is not None:
+            return await self.script_context.run(self, skills, skill_name, script_name, args)
+        return await super()._run_skill_script(
+            skills, skill_name, script_name, args, **kwargs
+        )
+
+
+def _clip(text: str, limit: int = 5000) -> str:
+    if len(text) <= limit:
+        return text
+    head = tail = 2000
+    return f"{text[:head]}\n... [truncated {len(text) - head - tail} chars] ...\n{text[-tail:]}"
+
+
+def _shrink(value: Any, keep: int) -> Any:
+    if isinstance(value, list):
+        items = [_shrink(v, keep) for v in value[:keep]]
+        if len(value) > keep:
+            items.append(f"...(+{len(value) - keep} more)")
+        return items
+    if isinstance(value, dict):
+        return {k: _shrink(v, keep) for k, v in value.items()}
+    if isinstance(value, str) and len(value) > 300:
+        return value[:300] + f"...(+{len(value) - 300} chars)"
+    return value
+
+
+def _preview_output(text: str, limit: int = 5000) -> tuple[str, bool]:
+    """給 LLM 的 stdout 預覽;JSON 超長時縮陣列但保留所有 key,預覽仍是合法 JSON。"""
+    if len(text) <= limit:
+        return text, False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return _clip(text, limit), True
+    preview = text
+    for keep in (10, 5, 3, 1, 0):
+        preview = json.dumps(_shrink(data, keep), ensure_ascii=False)
+        if len(preview) <= limit:
+            return preview, True
+    return _clip(preview, limit), True
+
+
+# 同一 session 的腳本一次只跑一支:共用 work_dir(S2 會整棵 chown)與 executor._running_procs。
+_session_script_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+@dataclass
+class ScriptRunContext:
+    """執行 script 型 skill 所需的 per-request 狀態(由 code_agent_hosted 建立)。"""
+
+    executor: Any
+    session_id: str
+    work_dir: str
+    env_vars: dict
+    timeout: int
+    script_runs: list
+    output_files: list
+    run_count: int = 0
+    lock: Any = None
+    # DEBUG_MODE 時由 code_agent_hosted 指派:on_run(run: dict, code: str),每次實際執行後呼叫
+    on_run: Any = None
+
+    def __post_init__(self) -> None:
+        lock = _session_script_locks.get(self.session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _session_script_locks[self.session_id] = lock
+        self.lock = lock
+
+    async def run(self, provider, skills, skill_name, script_name, args) -> str:
+        """執行 scripts/<skill>.py;一律回傳 JSON 字串,從不 raise(MAF 會把例外吞成 generic 錯誤)。"""
+        record = {"skill": skill_name, "script": script_name, "args": args, "exit_code": None}
+
+        def finish(status: str, *, exit_code=None, stdout="", stderr="", output_files=()) -> str:
+            record.update(status=status, exit_code=exit_code, stderr=_clip(stderr, 2000))
+            self.script_runs.append(record)
+            logger.info(
+                "[SkillScript] %s/%s status=%s exit_code=%s", skill_name, script_name, status, exit_code,
+            )
+            preview, truncated = _preview_output(stdout)
+            payload = {
+                "status": status,
+                "exit_code": exit_code,
+                "stdout": preview,
+                "stderr": _clip(stderr),
+                "output_files": [os.path.basename(f) for f in output_files],
+            }
+            if "run_id" in record:
+                payload = {
+                    "run_id": record["run_id"],
+                    **payload,
+                    "stdout_truncated": truncated,
+                    "stdout_chars": len(stdout),
+                }
+            return json.dumps(payload, ensure_ascii=False)
+
+        try:
+            if args is None:
+                args = []
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                return finish("invalid_args", stderr="args must be a JSON array of strings (argv-v1)")
+
+            skill = provider._find_skill(skills, skill_name) if skill_name else None
+            if skill is None:
+                return finish("not_found", stderr=f"skill '{skill_name}' not found")
+            canonical = skill.frontmatter.name
+            record["skill"] = canonical
+
+            reason = _lookup_ci(provider.unsupported_script_skills, canonical)
+            if reason:
+                return finish("unsupported", stderr=reason)
+
+            expected = skill_script_relpath(canonical)
+            if (script_name or "").replace("\\", "/") != expected:
+                return finish("not_found", stderr=f"only {expected} can be run for skill '{canonical}'")
+            script = await skill.get_script(expected)
+            if script is None:
+                return finish("not_found", stderr=f"{expected} is not materialized")
+            record.update(provider.script_blob_meta.get(canonical, {}))
+
+            code = (await asyncio.to_thread(Path(script.full_path).read_bytes)).decode("utf-8")
+            async with self.lock:
+                self.run_count += 1
+                record["run_id"] = f"run_{uuid.uuid4().hex[:12]}"
+                result = await self.executor.execute(
+                    code=code,
+                    session_id=self.session_id,
+                    work_dir=self.work_dir,
+                    execution_count=self.run_count,
+                    env_vars=self.env_vars,
+                    timeout=self.timeout,
+                    mi_scopes=provider.mi_scopes_by_skill.get(canonical, []),
+                    script_relpath=f"{SKILL_SCRIPTS_WORKDIR}/{canonical}.py",
+                    argv=args,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[SkillScript] %s/%s runner error", skill_name, script_name)
+            record.pop("run_id", None)
+            return finish("error", stderr=f"{type(e).__name__}: {e}")
+
+        new_files = list(result.new_output_files or [])
+        for f in new_files:
+            if f not in self.output_files:
+                self.output_files.append(f)
+        stdout = result.raw_stdout or ""
+        stderr = result.raw_stderr or ""
+        tool_result = finish(
+            getattr(result.status, "value", str(result.status)),
+            exit_code=result.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            output_files=new_files,
+        )
+        run_id = record["run_id"]
+        data = json.dumps(
+            {"run_id": run_id, "skill": canonical, "stdout": stdout}, ensure_ascii=False
+        ).encode("utf-8")
+        try:
+            await asyncio.to_thread(self._write_local_run, run_id, data)
+        except Exception:  # noqa: BLE001
+            logger.exception("[SkillScript] local run record %s not written", run_id)
+        if self.on_run is not None:
+            try:
+                self.on_run({
+                    "run_id": run_id,
+                    "skill": canonical,
+                    "script": expected,
+                    "command": ["python", f"{SKILL_SCRIPTS_WORKDIR}/{canonical}.py", *args],
+                    "args": args,
+                    "status": record["status"],
+                    "exit_code": result.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }, code)
+            except Exception:  # noqa: BLE001
+                logger.exception("[SkillScript] on_run hook failed for %s", run_id)
+        return tool_result
+
+    def _write_local_run(self, run_id: str, data: bytes) -> None:
+        runs_dir = Path(self.work_dir, EAA_RUNS_DIR)
+        (runs_dir / "_data").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_EAA_RUNS_HELPER, runs_dir / "__init__.py")
+        (runs_dir / "_data" / f"{run_id}.json").write_bytes(data)
+
+
+# Mode A 的 provider 是全域共用的,不能用屬性存 per-request 狀態。
+_route_only_ctx: ContextVar[bool] = ContextVar("skills_route_only", default=False)
+
+
+@contextmanager
+def request_scope(route_only: bool) -> Iterator[None]:
+    """在目前請求的 context 內綁定 route_only,供共用 provider 讀取。"""
+    token = _route_only_ctx.set(route_only)
+    try:
+        yield
+    finally:
+        _route_only_ctx.reset(token)
+
+
+class StaticGuardedSkillsProvider(PrefixTolerantSkillsProvider):
+    """Mode A 共用 provider:補上 route_only 保險絲 #4(狀態由 request_scope 綁定)。"""
+
+    async def _run_skill_script(self, skills, skill_name, script_name, args=None, **kwargs):  # type: ignore[override]
+        if _route_only_ctx.get():
             raise RuntimeError(
                 f"[route_only] blocked run_skill_script(skill={skill_name!r}, "
                 f"script={script_name!r}) — scripts must not execute in "
@@ -984,7 +1255,15 @@ class SkillsProviderFactory:
         """
         if not meta.blob_prefix:
             return []
+        return (await self._list_skill_folder(meta))[0]
 
+    async def _list_skill_scripts(self, meta: SkillMetadata) -> list[str]:
+        """該 skill 在 Blob 上 scripts/ 底下的所有檔案(不論是否落地),用來判斷 script 型。"""
+        if not meta.blob_prefix:
+            return []
+        return (await self._list_skill_folder(meta))[1]
+
+    async def _list_skill_folder(self, meta: SkillMetadata) -> tuple[list[str], list[str]]:
         cache_key = (meta.skill_key, meta.updated_at)
         cached = self._listing_cache.get(cache_key)
         if cached is not None:
@@ -1001,14 +1280,16 @@ class SkillsProviderFactory:
             if rel:
                 entries.append((rel, blob.size or 0))
 
-        selected = select_skill_files(meta.skill_name, entries)
-        self._listing_cache[cache_key] = selected
+        allowed = skill_script_relpath(meta.skill_name) if SKILL_SCRIPTS_ENABLED else None
+        selected = select_skill_files(meta.skill_name, entries, allowed_script=allowed)
+        scripts = bundled_script_entries(entries)
+        self._listing_cache[cache_key] = (selected, scripts)
 
         logger.info(
             "[Skills] Listed %s: %d blob(s) → %d file(s) selected (prefix=%s)",
             meta.skill_name, len(entries), len(selected), meta.blob_prefix,
         )
-        return selected
+        return selected, scripts
 
     # ------------------------------------------------------------------
     # Step 3: Materialize 到 per-turn 目錄
@@ -1018,10 +1299,10 @@ class SkillsProviderFactory:
         metas: list[SkillMetadata],
         target_dir: Path,
         scenario: str = "",
-    ) -> dict[str, list[str]]:
+    ) -> MaterializeResult:
         """
         並行下載所有 skill 的資料夾內容,寫到 target_dir/{skill_name}/ 底下。
-        回傳已落地 skill 中有宣告 metadata.mi_scopes 者的 {skill_name: scopes}(S3)。
+        回傳已落地 skill 的 mi_scopes(S3)、script 型 skill 的不可執行原因與腳本 blob 稽核資訊。
 
         目錄結構對齊 SkillsProvider 期待:
             target_dir/
@@ -1057,7 +1338,8 @@ class SkillsProviderFactory:
         """
         target_dir.mkdir(parents=True, exist_ok=True)
         scope = await self._resolve_scenario_scope(metas, scenario)
-        mi_scopes_by_skill: dict[str, list[str]] = {}
+        result = MaterializeResult()
+        mi_scopes_by_skill = result.mi_scopes_by_skill
 
         async def write_one(meta: SkillMetadata) -> bool:
             if scope is not None and meta.skill_name not in scope:
@@ -1088,6 +1370,8 @@ class SkillsProviderFactory:
                 encoding="utf-8",
             )
 
+            script_rel = skill_script_relpath(meta.skill_name)
+
             async def write_extra(rel: str) -> None:
                 dest = skill_dir / rel
                 # select_skill_files() 已擋過 path traversal,這裡是落地前的
@@ -1105,6 +1389,13 @@ class SkillsProviderFactory:
                 )
                 downloader = await blob_client.download_blob()
                 await asyncio.to_thread(dest.write_bytes, await downloader.readall())
+                if rel == script_rel:
+                    props = downloader.properties
+                    result.script_blob_meta[meta.skill_name] = {
+                        "blob": meta.blob_prefix + rel,
+                        "etag": getattr(props, "etag", None),
+                        "last_modified": str(getattr(props, "last_modified", "")),
+                    }
 
             extras = [
                 r for r in await self._list_skill_files(meta)
@@ -1112,6 +1403,11 @@ class SkillsProviderFactory:
             ]
             if extras:
                 await asyncio.gather(*[write_extra(r) for r in extras])
+            problem = script_skill_problem(
+                meta.skill_name, await self._list_skill_scripts(meta), dynamic_mode=True
+            )
+            if problem:
+                result.unsupported_script_skills[meta.skill_name] = problem
             declared = declared_mi_scopes(content)
             if declared:
                 mi_scopes_by_skill[meta.skill_name] = declared
@@ -1127,7 +1423,11 @@ class SkillsProviderFactory:
         )
         if mi_scopes_by_skill:
             logger.info("[Skills] mi_scopes declared: %s", mi_scopes_by_skill)
-        return mi_scopes_by_skill
+        if result.unsupported_script_skills:
+            logger.warning(
+                "[Skills] script-based skills not runnable: %s", result.unsupported_script_skills,
+            )
+        return result
 
     async def _resolve_scenario_scope(
         self, metas: list[SkillMetadata], scenario: str
@@ -1236,7 +1536,7 @@ class SkillsProviderFactory:
 
             # Step 2 & 3: 撈 content + materialize
             try:
-                mi_scopes_by_skill = await self._materialize_skills(metas, target_dir, scenario)
+                materialized_result = await self._materialize_skills(metas, target_dir, scenario)
                 materialized = True
             except Exception as e:
                 logger.exception(
@@ -1273,7 +1573,9 @@ class SkillsProviderFactory:
             )
             # v1.11:同一組目錄再供 resource_name 前綴容錯使用
             provider.resource_directories = resource_dirs
-            provider.mi_scopes_by_skill = mi_scopes_by_skill
+            provider.mi_scopes_by_skill = materialized_result.mi_scopes_by_skill
+            provider.unsupported_script_skills = materialized_result.unsupported_script_skills
+            provider.script_blob_meta = materialized_result.script_blob_meta
             yield provider
 
         finally:

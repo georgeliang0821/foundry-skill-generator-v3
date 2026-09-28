@@ -420,6 +420,8 @@ class CodeExecutor(Protocol):
         env_vars: Dict[str, str],
         timeout: int = 120,
         mi_scopes: Optional[Collection[str]] = None,
+        script_relpath: Optional[str] = None,
+        argv: Optional[List[str]] = None,
     ) -> ExecutionResult:
         """執行 code,回傳結構化結果。
 
@@ -441,6 +443,8 @@ class CodeExecutor(Protocol):
                      詳見 code_agent_hosted.py 該變數宣告處的完整說明。
             mi_scopes: 本輪已載入 skill 宣告的 metadata.mi_scopes 聯集。
                      None = 沒有 skill context(static 模式)。只在 MI_GATE_ENABLED 時生效。
+            script_relpath: script 型 skill 的腳本落地位置(相對 work_dir);code 原樣寫入
+            argv: 腳本命令列參數(僅 script_relpath 模式使用)
 
         Returns:
             ExecutionResult — 包含 agent_message (給 LLM 看的字串)
@@ -573,8 +577,13 @@ class LocalSubprocessExecutor:
         env_vars: Dict[str, str],
         timeout: int = 120,
         mi_scopes: Optional[Collection[str]] = None,
+        script_relpath: Optional[str] = None,
+        argv: Optional[List[str]] = None,
     ) -> ExecutionResult:
         """執行 code,回傳結構化結果。
+
+        script_relpath 有值時(script 型 skill):code 原樣寫到 work_dir 下該路徑,
+        不剝 markdown fence、不用 script_v{N}.py,並以 argv 當命令列參數執行。
 
         Phase 3 變更摘要 (與 Phase 0 對照):
         1. 簽章新增 session_id (第二個位置參數),用於 _running_procs 註冊。
@@ -588,14 +597,17 @@ class LocalSubprocessExecutor:
         # ──────────────────────────────────────────────────────────
         # Step 1: Strip markdown fence (與既有邏輯相同)
         # ──────────────────────────────────────────────────────────
-        code = code.strip()
-        for prefix in ["```python", "```"]:
-            if code.startswith(prefix):
-                code = code[len(prefix):]
-        if code.endswith("```"):
-            code = code[:-3]
-        code = code.strip()
-        script_path = os.path.join(work_dir, f"script_v{execution_count}.py")
+        if script_relpath is None:
+            code = code.strip()
+            for prefix in ["```python", "```"]:
+                if code.startswith(prefix):
+                    code = code[len(prefix):]
+            if code.endswith("```"):
+                code = code[:-3]
+            code = code.strip()
+            script_path = os.path.join(work_dir, f"script_v{execution_count}.py")
+        else:
+            script_path = os.path.join(work_dir, script_relpath)
 
         # S2: 先把 work_dir 清乾淨並交給本次 uid,之後 root 才在裡面寫 script
         sandbox_uid: Optional[int] = None
@@ -617,7 +629,9 @@ class LocalSubprocessExecutor:
         # Step 2: 寫入 script 檔案
         # 命名規則 script_v{N}.py 維持既有,供 debug bundle 與 audit 用
         # ──────────────────────────────────────────────────────────
-        with open(script_path, "w", encoding="utf-8") as f:
+        if script_relpath is not None:
+            os.makedirs(os.path.dirname(script_path), exist_ok=True)
+        with open(script_path, "w", encoding="utf-8", newline="" if script_relpath else None) as f:
             f.write(code)
 
         # ──────────────────────────────────────────────────────────
@@ -727,7 +741,7 @@ class LocalSubprocessExecutor:
         proc = None  # 給 except 路徑使用,確保 NameError 不會發生
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, script_path,
+                sys.executable, script_path, *(argv or []),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=work_dir,

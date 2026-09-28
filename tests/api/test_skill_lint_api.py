@@ -150,63 +150,101 @@ def test_save_is_not_blocked_by_advisory_lint_findings(client) -> None:
     assert response.status_code == 200
 
 
-def test_save_runs_the_eaa_lint_on_the_skill_folder(client, backend_main, monkeypatch) -> None:
-    seen: list = []
-    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: seen.append((name, files)) or [])
+def _lint_result(backend_main, *, valid=True, errors=(), warnings=(), ruleset_version="1.0"):
+    return backend_main.EaaLintResult(
+        valid=valid, errors=list(errors), warnings=list(warnings), ruleset_version=ruleset_version
+    )
+
+
+def _save_raising_skill(client):
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+    return session_id, client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
 
-    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+def test_save_sends_the_skill_package_to_eaa_and_records_the_ruleset(client, backend_main, monkeypatch) -> None:
+    seen: list = []
+    monkeypatch.setattr(
+        backend_main, "lint_skill_package",
+        lambda name, files: seen.append((name, files)) or _lint_result(backend_main),
+    )
+
+    session_id, response = _save_raising_skill(client)
 
     assert response.status_code == 200
     assert seen == [("raising-skill", {"SKILL.md": RAISING_SKILL})]
+    assert response.json()["eaa_ruleset_version"] == "1.0"
+    assert backend_main.sessions[session_id].eaa_ruleset_version == "1.0"
 
 
-def test_save_is_blocked_by_eaa_lint_errors_and_warnings(client, backend_main, monkeypatch) -> None:
-    problems = ["ERROR reads OBO_CLIENT_SECRET", "WARN SKILL.md: credential=... placeholder"]
-    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: problems)
-    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
-    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+def test_save_is_blocked_by_eaa_lint_errors(client, backend_main, monkeypatch) -> None:
+    errors = ["reads OBO_CLIENT_SECRET, which is removed from the subprocess environment"]
+    monkeypatch.setattr(backend_main, "lint_skill_package", lambda name, files: _lint_result(backend_main, valid=False, errors=errors))
 
-    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+    _, response = _save_raising_skill(client)
 
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert detail.startswith("EAA skill lint failed:")
-    assert all(problem in detail for problem in problems)
+    assert errors[0] in detail
     assert not backend_main.store.list_skills()
 
 
-def test_mi_allowlist_warning_saves_and_tells_the_agent_once(client, backend_main, monkeypatch) -> None:
-    warning = "WARN metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']"
-    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", lambda name, files: [warning])
-    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
-    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+def test_save_is_blocked_when_eaa_rejects_the_package(client, backend_main, monkeypatch) -> None:
+    def rejected(name, files):
+        raise backend_main.EaaLintRejected("files_json must include SKILL.md")
 
-    for _ in range(2):
-        assert client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"}).status_code == 200
+    monkeypatch.setattr(backend_main, "lint_skill_package", rejected)
 
+    _, response = _save_raising_skill(client)
+
+    assert response.status_code == 400
+    assert "files_json must include SKILL.md" in response.json()["detail"]
+    assert not backend_main.store.list_skills()
+
+
+def test_eaa_warnings_save_and_are_relayed_to_the_agent_once(client, backend_main, monkeypatch) -> None:
+    warnings = [
+        "metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']",
+        "SKILL.md: installs packages at runtime",
+    ]
+    monkeypatch.setattr(backend_main, "lint_skill_package", lambda name, files: _lint_result(backend_main, warnings=warnings))
+    session_id, first = _save_raising_skill(client)
+
+    second = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+
+    assert first.status_code == second.status_code == 200
     notes = [
         m for m in backend_main.sessions[session_id].conversation
-        if m.role == MessageRole.SYSTEM and "MI_SCOPE_ALLOWLIST" in m.content
+        if m.role == MessageRole.SYSTEM and "lint_skill_package" in m.content
     ]
     assert len(notes) == 1
     assert "部署前需把 `https://search.azure.com` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`" in notes[0].content
+    assert "- SKILL.md: installs packages at runtime" in notes[0].content
 
 
 def test_save_fails_closed_when_the_eaa_lint_cannot_run(client, backend_main, monkeypatch) -> None:
     def unavailable(name, files):
-        raise backend_main.EaaLintUnavailable("EAA_REPO_DIR is not set.")
+        raise backend_main.EaaLintUnavailable("MCP_ENDPOINT is not set.")
 
-    monkeypatch.setattr(backend_main, "run_eaa_skill_lint", unavailable)
-    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
-    client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": RAISING_SKILL})
+    monkeypatch.setattr(backend_main, "lint_skill_package", unavailable)
 
-    response = client.post(f"/api/sessions/{session_id}/save", json={"name": "raising-skill"})
+    _, response = _save_raising_skill(client)
 
     assert response.status_code == 503
-    assert "EAA_REPO_DIR" in response.json()["detail"]
+    assert "MCP_ENDPOINT" in response.json()["detail"]
     assert not backend_main.store.list_skills()
+
+
+def test_e2e_fake_lint_skips_mcp(client, backend_main, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_E2E_MODE", "1")
+    monkeypatch.setenv("SGV2_E2E_FAKE_LINT", "1")
+    monkeypatch.setattr(backend_main, "lint_skill_package", lambda name, files: pytest.fail("MCP must not be called"))
+
+    _, response = _save_raising_skill(client)
+
+    assert response.status_code == 200
+    assert response.json()["eaa_ruleset_version"] == "e2e"
 
 
 @pytest.mark.parametrize(("variable", "message"), [

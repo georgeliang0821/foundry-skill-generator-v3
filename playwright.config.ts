@@ -29,6 +29,8 @@ export default defineConfig({
       SGV2_E2E_MODE: "1",
       SGV2_E2E_FAKE_AGENT: "1",
       SGV2_E2E_FAKE_TEST_RUNNER: "1",
+      // .env may point MCP_ENDPOINT at a real EAA; never lint E2E saves there.
+      SGV2_E2E_FAKE_LINT: "1",
       // The browser cannot send X-Test-UPN, so give it a standing identity.
       E2E_MODE: "1",
       E2E_DEFAULT_UPN: "e2e@example.com",

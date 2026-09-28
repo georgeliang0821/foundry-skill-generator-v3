@@ -1275,9 +1275,9 @@ def _with_line(line: str) -> str:
     return CLEAN_CAPABILITY.replace('    host = os.environ["API_HOST"]', f'    host = os.environ["API_HOST"]\n    {line}')
 
 
-def _warnings(issues, rule: str) -> list[str]:
+def _findings(issues, rule: str) -> list[str]:
     found = [i for i in issues if i.rule == rule]
-    assert all(i.severity == "warning" for i in found)
+    assert all(i.severity == ("warning" if rule == "E1" else "error") for i in found)
     return [i.detail for i in found]
 
 
@@ -1291,10 +1291,11 @@ def _warnings(issues, rule: str) -> list[str]:
     ("E4", "subprocess.Popen(cmd, start_new_session=True)", "start_new_session=True"),
     ("E4", "threading.Thread(target=work, daemon=True).start()", "daemon=True"),
 ])
-def test_execution_environment_rules_warn(rule: str, line: str, detail: str) -> None:
+def test_execution_environment_rules(rule: str, line: str, detail: str) -> None:
     issues = lint_skill(_with_line(line), SkillKind.CAPABILITY)
-    assert detail in _warnings(issues, rule)
-    assert not has_lint_errors(issues)
+    assert detail in _findings(issues, rule)
+    # E1 is advisory; E2-E4 block saving like EAA's sandbox warnings used to.
+    assert has_lint_errors(issues) is (rule != "E1")
 
 
 @pytest.mark.parametrize(("rule", "line"), [
@@ -1305,7 +1306,7 @@ def test_execution_environment_rules_warn(rule: str, line: str, detail: str) -> 
     ("E4", "subprocess.run(cmd, check=True)"),
 ])
 def test_execution_environment_rules_stay_quiet(rule: str, line: str) -> None:
-    assert _warnings(lint_skill(_with_line(line), SkillKind.CAPABILITY), rule) == []
+    assert _findings(lint_skill(_with_line(line), SkillKind.CAPABILITY), rule) == []
 
 
 def test_execution_environment_rules_ignore_prose() -> None:
@@ -1316,4 +1317,4 @@ def test_execution_environment_rules_ignore_prose() -> None:
 def test_execution_environment_rules_scan_prepared_code() -> None:
     prepared = 'import subprocess\n\n\ndef main() -> None:\n    subprocess.run("nohup worker &", shell=True)\n'
     issues = lint_skill(CLEAN_CAPABILITY, SkillKind.CAPABILITY, code_override=prepared)
-    assert _warnings(issues, "E4") == ["nohup"]
+    assert _findings(issues, "E4") == ["nohup"]

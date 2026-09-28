@@ -1,111 +1,77 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
+from backend import eaa_platform
 from backend.eaa_platform import (
     STATIC_OBO_REGISTRY_KEYS,
+    EaaLintRejected,
     EaaLintUnavailable,
     declared_mi_scopes,
+    lint_skill_package,
     mi_allowlist_note,
     normalize_mi_resource,
     obo_registry_keys,
     reserved_credentials_key_reason,
-    run_eaa_skill_lint,
     split_eaa_allowlist_warnings,
 )
 
 SKILL = {"SKILL.md": "---\nname: demo\ndescription: Demo\n---\n\n## Overview\nDemo.\n"}
 
 
-def _fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
-    repo = tmp_path / "eaa"
-    (repo / "tools").mkdir(parents=True)
-    (repo / "tools" / "skill_lint.py").write_text(body, encoding="utf-8")
-    monkeypatch.setenv("EAA_REPO_DIR", str(repo))
-    return repo
+def _mcp(monkeypatch: pytest.MonkeyPatch, payload=None, error=None) -> list:
+    calls: list = []
+    monkeypatch.setenv("MCP_ENDPOINT", "https://eaa.example/mcp/")
+
+    def fake(url, skill_name, files, *, timeout):
+        calls.append((url, skill_name, files))
+        return payload, error
+
+    monkeypatch.setattr(eaa_platform, "lint_skill_package_jsonrpc", fake)
+    return calls
 
 
-def _printing(stdout: object, code: int = 0) -> str:
-    text = stdout if isinstance(stdout, str) else json.dumps(stdout)
-    return f"import sys\nsys.stdout.write({text!r})\nsys.exit({code})\n"
+def test_lint_requires_mcp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MCP_ENDPOINT", raising=False)
+    with pytest.raises(EaaLintUnavailable, match="MCP_ENDPOINT"):
+        lint_skill_package("demo", SKILL)
 
 
-def test_lint_requires_eaa_repo_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("EAA_REPO_DIR", raising=False)
-    with pytest.raises(EaaLintUnavailable, match="EAA_REPO_DIR"):
-        run_eaa_skill_lint("demo", SKILL)
+def test_clean_report_passes_and_carries_the_ruleset(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _mcp(monkeypatch, {"status": "completed", "valid": True, "errors": [], "warnings": ["w"], "ruleset_version": "1.0"})
+    result = lint_skill_package("demo", SKILL)
+    assert (result.valid, result.errors, result.warnings, result.ruleset_version) == (True, [], ["w"], "1.0")
+    assert calls == [("https://eaa.example/mcp", "demo", SKILL)]
 
 
-def test_lint_requires_the_tool_in_the_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EAA_REPO_DIR", str(tmp_path))
-    with pytest.raises(EaaLintUnavailable, match="bd13560"):
-        run_eaa_skill_lint("demo", SKILL)
+def test_errors_make_the_report_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mcp(monkeypatch, {"status": "completed", "valid": False, "errors": ["reads OBO_CLIENT_SECRET"], "warnings": []})
+    result = lint_skill_package("demo", SKILL)
+    assert not result.valid and result.errors == ["reads OBO_CLIENT_SECRET"]
 
 
-def test_clean_report_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_repo(tmp_path, monkeypatch, _printing([{"skill": "demo", "errors": [], "warnings": []}]))
-    assert run_eaa_skill_lint("demo", SKILL) == []
+def test_listed_errors_are_never_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mcp(monkeypatch, {"status": "completed", "valid": True, "errors": ["e"], "warnings": []})
+    assert not lint_skill_package("demo", SKILL).valid
 
 
-def test_errors_and_warnings_are_both_returned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    report = [{"skill": "demo", "errors": ["reads OBO_CLIENT_SECRET"], "warnings": ["credential=... placeholder"]}]
-    _fake_repo(tmp_path, monkeypatch, _printing(report, code=1))
-    assert run_eaa_skill_lint("demo", SKILL) == [
-        "ERROR reads OBO_CLIENT_SECRET",
-        "WARN credential=... placeholder",
-    ]
+def test_failed_status_is_a_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mcp(monkeypatch, {"status": "failed", "error": "files_json must include SKILL.md"})
+    with pytest.raises(EaaLintRejected, match="must include SKILL.md"):
+        lint_skill_package("demo", SKILL)
 
 
-def test_warnings_alone_still_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_repo(tmp_path, monkeypatch, _printing([{"skill": "demo", "errors": [], "warnings": ["w"]}]))
-    assert run_eaa_skill_lint("demo", SKILL) == ["WARN w"]
-
-
-@pytest.mark.parametrize("body", [
-    _printing([{"skill": "demo", "errors": [], "warnings": []}], code=2),
-    _printing("not json"),
-    _printing([]),
-    _printing([{"skill": "demo", "errors": [], "warnings": []}], code=1),
-    "raise SystemExit(3)\n",
+@pytest.mark.parametrize(("payload", "error"), [
+    (None, "HTTP 401 Unauthorized"),
+    ({"status": "running"}, None),
+    ({"status": "completed"}, None),
+    ({"status": "completed", "valid": "yes"}, None),
+    ({"status": "completed", "valid": True, "errors": "e"}, None),
 ])
-def test_no_trustworthy_verdict_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
-    _fake_repo(tmp_path, monkeypatch, body)
+def test_no_trustworthy_verdict_fails_closed(monkeypatch: pytest.MonkeyPatch, payload, error) -> None:
+    _mcp(monkeypatch, payload, error)
     with pytest.raises(EaaLintUnavailable):
-        run_eaa_skill_lint("demo", SKILL)
-
-
-def test_tool_gets_the_skill_folder_and_no_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AZURE_CLIENT_SECRET", "do-not-leak")
-    _fake_repo(tmp_path, monkeypatch, (
-        "import json, os, sys\n"
-        "from pathlib import Path\n"
-        "folder = Path(sys.argv[1])\n"
-        "warnings = [] if sys.argv[2:] == ['--json'] else ['missing --json']\n"
-        "if os.environ.get('AZURE_CLIENT_SECRET'): warnings.append('secret leaked')\n"
-        "if folder.name != 'demo': warnings.append('wrong folder ' + folder.name)\n"
-        "if 'name: demo' not in (folder / 'SKILL.md').read_text(encoding='utf-8'): warnings.append('no SKILL.md')\n"
-        "print(json.dumps([{'skill': folder.name, 'errors': [], 'warnings': warnings}]))\n"
-    ))
-    assert run_eaa_skill_lint("demo", SKILL) == []
-
-
-def test_files_outside_the_skill_folder_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_repo(tmp_path, monkeypatch, _printing([{"skill": "demo", "errors": [], "warnings": []}]))
-    with pytest.raises(EaaLintUnavailable, match="outside"):
-        run_eaa_skill_lint("demo", {"../escape.md": "x"})
-
-
-def test_tool_sees_a_mirrored_mi_scope_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MI_SCOPE_ALLOWLIST", "https://storage.azure.com,https://search.azure.com")
-    _fake_repo(tmp_path, monkeypatch, (
-        "import json, os\n"
-        "w = [] if 'search.azure.com' in os.environ.get('MI_SCOPE_ALLOWLIST', '') else ['no allowlist']\n"
-        "print(json.dumps([{'skill': 'demo', 'errors': [], 'warnings': w}]))\n"
-    ))
-    assert run_eaa_skill_lint("demo", SKILL) == []
+        lint_skill_package("demo", SKILL)
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
@@ -131,14 +97,14 @@ def test_declared_mi_scopes(frontmatter: str, expected: list[str]) -> None:
     assert declared_mi_scopes(f"---\nname: demo\n{frontmatter}---\n\nbody\n") == expected
 
 
-def test_allowlist_warnings_are_split_from_blocking_problems() -> None:
-    problems = [
-        "ERROR reads OBO_CLIENT_SECRET",
-        "WARN metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']",
-        "WARN uses Managed Identity but declares no metadata.mi_scopes — MI is denied when MI_GATE_ENABLED=true",
+def test_allowlist_warnings_are_split_from_other_warnings() -> None:
+    warnings = [
+        "SKILL.md: installs packages at runtime",
+        "metadata.mi_scopes: https://search.azure.com is not in MI_SCOPE_ALLOWLIST ['https://ai.azure.com']",
+        "uses Managed Identity but declares no metadata.mi_scopes — MI is denied when MI_GATE_ENABLED=true",
     ]
-    blocking, resources = split_eaa_allowlist_warnings(problems)
-    assert blocking == [problems[0], problems[2]]
+    others, resources = split_eaa_allowlist_warnings(warnings)
+    assert others == [warnings[0], warnings[2]]
     assert resources == ["https://search.azure.com"]
     assert "Search Index Data Reader" in mi_allowlist_note(resources[0])
 

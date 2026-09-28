@@ -119,13 +119,13 @@ EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且
 | `D8` | 只掃程式碼：引用 `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` / `MSI_ENDPOINT` / `MSI_SECRET` 等 MI 端點變數、直接呼叫 `169.254.169.254` 或 `/msi/token`、對 `DefaultAzureCredential` / `ManagedIdentityCredential` 傳 `managed_identity_client_id=` / `client_id=` / `object_id=` / `mi_res_id=` 等選擇器，或 MI skill 同時用 `ChainedTokenCredential`、`ClientSecretCredential`、`AzureKeyCredential` 等備援憑證。 |
 | `A15` | caller 的 `credentials` 鍵名（`input-bindings` 的 `credentials_key`，或 legacy 的 Required Inputs 與 runtime 讀取）是 `PATH`、`PYTHON*`、`LD_*`、`EAA_VERIFIED_*` 或 `OBO_SCOPE_REGISTRY` 的 key。registry 以 MCP 查到的為準，取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。 |
 
-Managed Identity 不是變數種類，結構化資訊只有 frontmatter 的 `metadata.mi_scopes`，判斷靠 prompt 與 D6–D8 從程式碼偵測，不動 `models.py` 與 UI。`save_skill_dual_write()` 另外會在 EAA repo 跑 `tools/skill_lint.py`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
+Managed Identity 不是變數種類，結構化資訊只有 frontmatter 的 `metadata.mi_scopes`，判斷靠 prompt 與 D6–D8 從程式碼偵測，不動 `models.py` 與 UI。`save_skill_dual_write()` 另外會呼叫 EAA 的 MCP tool `lint_skill_package`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
 
-平台另有全域白名單 `MI_SCOPE_ALLOWLIST`，預設只有 `https://storage.azure.com,https://ai.azure.com`。宣告白名單以外的資源不擋儲存：本機 D7 顯示 INFO，EAA lint 的 `is not in MI_SCOPE_ALLOWLIST` warning 也被排除在阻擋清單外，儲存後改寫一則 system message，要 Agent 在回覆中附上「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI 指派 `<最小 RBAC 角色>`」（角色對照表：`MI_RESOURCE_ROLES`）。`database.windows.net` / `management.azure.com` 會加註「取得平台 MI 在該資源的全部權限，優先改用 OBO」。執行測試（`mode: "execute"`）時同一輪必須載入該 skill 才拿得到 MI token，這是預期行為；本產生器只送 `route_only`，不受影響。
+平台另有全域白名單 `MI_SCOPE_ALLOWLIST`，預設只有 `https://storage.azure.com,https://ai.azure.com`。宣告白名單以外的資源不擋儲存：本機 D7 顯示 INFO，EAA `lint_skill_package` 回傳的 `is not in MI_SCOPE_ALLOWLIST` 是 warning，儲存後與其他 warnings 一起寫成一則 system message，要 Agent 在回覆中附上「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI 指派 `<最小 RBAC 角色>`」（角色對照表：`MI_RESOURCE_ROLES`）。`database.windows.net` / `management.azure.com` 會加註「取得平台 MI 在該資源的全部權限，優先改用 OBO」。執行測試（`mode: "execute"`）時同一輪必須載入該 skill 才拿得到 MI token，這是預期行為；本產生器只送 `route_only`，不受影響。
 
 #### EAA 執行環境規則（E1–E4）
 
-EAA 的 `SUBPROCESS_UID_SANDBOX` 開啟後，腳本以一次性、沒有 `/etc/passwd` 項目的非 root uid 在 session work_dir 執行，結束時所有行程都會被殺掉。規則不論旗標開關都相容，因此無條件套用。以下規則都是 **warning**，不擋儲存；只掃程式碼區塊（或 TEST 的 prepared code），不掃說明文字，scenario skill 也適用（實作：[skill_lint.py](../backend/skill_lint.py)；規則文字 E1–E5 在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Execution Environment Contract）：
+EAA 的 `SUBPROCESS_UID_SANDBOX` 開啟後，腳本以一次性、沒有 `/etc/passwd` 項目的非 root uid 在 session work_dir 執行，結束時所有行程都會被殺掉。規則不論旗標開關都相容，因此無條件套用。`E1` 是 **warning**（EAA 只列為 INFO）；`E2`–`E4` 是 **error**，會擋下儲存。只掃程式碼區塊（或 TEST 的 prepared code），不掃說明文字，scenario skill 也適用（實作：[skill_lint.py](../backend/skill_lint.py)；規則文字 E1–E5 在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Execution Environment Contract）：
 
 | 規則 | 檢查 |
 | --- | --- |
