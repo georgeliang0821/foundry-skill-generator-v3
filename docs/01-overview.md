@@ -50,11 +50,23 @@
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
 - **登入與資料列級隔離（RLS）**：以 Entra 登入後的 email 作為身分，依 `dbo.user_skill_grants` 決定可存取的 Skill。
 - **公開 Skill（`is_public`）**：將一個全域 Skill 標為公開，所有登入者即可使用，**不需逐人授權**。前端在「Skill access」彈窗切換，並以 `public` 標記顯示於 Skill 清單與綁定狀態列。
-- **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈為什麼 script 型 skill 要做這麼多檢核〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
+- **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈Script 型 skill 的限制〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
 
-### 為什麼 script 型 skill 要做這麼多檢核
+### Script 型 skill 的限制
 
-inline skill 的 sample code 只是範本：每次執行時，host 的 AI 會讀 `SKILL.md`、依當次請求改寫程式再執行，寫得不夠精確還有機會被「修正」。**script 型 skill 沒有這層緩衝**：EAA 用 `run_skill_script` 原封不動地執行那支 script，只傳入命令列參數，再用程式（不是 AI）判讀結果。任何一個小偏差，都會直接變成「每次都失敗」或「失敗卻被當成成功」。所以 Generator 在素材變成 script **之前**就把這些問題擋下來，而不是讓使用者部署後才發現：
+**為什麼一般 agent 平台的 script skill 不能直接放上 EAA**：這類 skill 預設跑它的是一個有 shell 的 AI，AI 讀完 `SKILL.md` 自己組指令、自己讀輸出，出錯還能臨場補救。EAA 不給 AI shell，只提供受限的 `run_skill_script`：script 原封不動地執行、只收命令列參數，成功或失敗先由程式判定，AI 只看到截斷後的 stdout 預覽。inline skill 沒有這個問題，因為它的 sample code 只是範本，host 的 AI 每次會依請求改寫，寫得不夠精確還有機會被「修正」；script 沒有這層緩衝。所以直接放上 EAA 通常不會當場報錯，而是跑不起來，或結果被判錯：
+
+| 一般 agent 平台的假設 | EAA 的做法 | 直接放上去的結果 |
+| --- | --- | --- |
+| 可以有多支 script、shell 檔、helper 模組，檔名隨意 | 每個 skill 只能執行一支 Python script，路徑固定為 `scripts/<skill 名稱>.py` | script 不會被執行（`not_found` / `unsupported`） |
+| AI 自己組 shell 指令：pipe、轉址、stdin、位置參數 | 只能透過 `run_skill_script` 傳入一串字串參數；沒有 shell，也沒有 stdin | `python x.py file \| jq` 這類用法做不到；會停下來問使用者的 script 會一直等到逾時 |
+| 在使用者的電腦上跑：有本機檔案、CLI 登入狀態、已裝好的套件，也能臨時裝套件 | 在獨立行程與工作目錄執行；環境變數先濾掉平台 secret，只帶部署設定與 OBO token | 找不到檔案、登入狀態或套件；`ModuleNotFoundError` 本身就算失敗 |
+| 輸出給 AI 看，進度訊息、表格、log 可以混在 stdout | exit 非 0 即失敗；exit 0 時掃描 stdout 的錯誤樣式，命中就改判失敗 | 印一行「0 failed」，成功也被判成失敗；錯誤只印到 stderr 再 exit 0，失敗反被當成成功 |
+| exit code 與「缺資料」怎麼回報沒有約定，由 AI 臨場理解 | 固定約定：0 = 成功或需補資料（`[NEEDS_INFO]`）、1 = 部署設定有誤、3 = 下游系統失敗 | argparse 參數錯誤會 exit 2，`--help` 把說明印到 stdout，host 都接不住 |
+| 路由對不對，實際跑一次就知道 | 路由測試（`route_only`）不執行 script，只記錄 AI 本來要傳的參數 | script 沒有宣告 `--flag`，就無法檢查 AI 傳的參數對不對 |
+| `SKILL.md` 寫給會自己摸索的 AI 看 | 儲存前必須通過 EAA 的 `lint_skill_package`，且 EAA 的兩個 script 旗標都要開 | 段落與宣告格式不符，存不進知識庫 |
+
+下表是 Generator 在素材變成 script **之前**檢查的具體規則，讓這些問題在 Generator 裡就被擋下，而不是部署後才發現：
 
 | 檢核 | 不檢查會發生什麼 |
 | --- | --- |
