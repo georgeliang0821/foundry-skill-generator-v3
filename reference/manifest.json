@@ -186,6 +186,16 @@
       ]
     },
     {
+      "source": "code_executor.py",
+      "symbol": "HARD_ERROR_PATTERNS",
+      "file": "backend/eaa_platform.py",
+      "restated_as": "CONTENT_ERROR_HARD_PATTERNS",
+      "relation": "equal",
+      "review": [
+        "backend/skill_lint.py"
+      ]
+    },
+    {
       "source": "mi_proxy.py",
       "symbol": "MI_ENV_KEYS",
       "file": "backend/eaa_platform.py",
@@ -238,7 +248,8 @@
       "session_id",
       "uploads",
       "skills_referenced",
-      "loaded_resources"
+      "loaded_resources",
+      "requested_scripts"
     ],
     "ignored": {
       "success": "Pass/fail is decided from skills_referenced, not from the runtime's own verdict.",
@@ -247,8 +258,7 @@
       "task_description": "Async job lifecycle only.",
       "existing_job": "Async job lifecycle only.",
       "message": "Non-success control field; status already drives the Generator's branching.",
-      "reason": "Non-success control field; status already drives the Generator's branching.",
-      "requested_scripts": "The Generator does not author scripts/, so TEST has no script call to assert; revisit if Script-type skills are generated."
+      "reason": "Non-success control field; status already drives the Generator's branching."
     }
   },
   "validation": {

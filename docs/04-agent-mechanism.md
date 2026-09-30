@@ -159,6 +159,7 @@ Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層�
 | `record_variables` | PREPARE | 寫入三類歸口變數（現有 ACA 變數、OBO registry scopes、執行期 Runtime）。 |
 | `update_prepare_checklist` | PREPARE | 更新準備期 Checklist 子項 (definition_clear 等)，附帶實質佐證文字。 |
 | `propose_neighbor_edit` | PREPARE / REFINE | 對鄰近 Peer Skill 提交 V4A 補丁，修剪 description 或補 When NOT to Use。 |
+| `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script。見 7.5 節。 |
 | `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter，每 session 僅限一次）。 |
 | `propose_patch` | REFINE / TEST | 提交極小區間 of V4A git-like Patch（依 Anchor 替換代碼或內文）。 |
 | `rename_skill` | REFINE / TEST | 改名。後端直接改寫 frontmatter `name`，並把 Blob 資料夾、SQL 列與所有授權搬到新名稱，舊名刪除。frontmatter `name` 不得用 `propose_patch` 修改。 |
@@ -328,7 +329,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 > 🔒 **執行模式（`mode`）：**
 >
-> - 選擇測試一律以 `mode="route_only"` 送出：capability 的正負樣本與 scenario 的每一層都是，**沒有任何一層會執行技能**。Router 照常路由、回傳它本來會執行的腳本，但不執行、不寫入，因此負面樣本不會誤觸有寫入行為的 skill，也不會因為缺 runtime 變數而只拿到 `[NEEDS_INFO]`。
+> - 選擇測試一律以 `mode="route_only"` 送出：capability 的正負樣本與 scenario 的每一層都是，**沒有任何一層會執行技能**。Router 照常路由、回傳它本來會執行的腳本，但不執行、不寫入，因此負面樣本不會誤觸有寫入行為的 skill。若查詢缺少必要輸入，runtime 可能不產生腳本，而是依 skill 契約直接回 `[NEEDS_INFO]`；回應（去掉前導空白後）以 `[NEEDS_INFO]` 開頭即屬此類，這是**正確處理缺漏欄位的合法結果**，不是錯誤。
 > - scenario 的 **L3（Child reachability）不發自己的請求**，改為對 L2 的回應做斷言。要證明 payload 契約成立確實得真的跑一次，但路由測試不得有副作用，因此這裡只驗證樣本是否路由到已宣告的 child。
 > - scenario 的 L2 探針會在 body 頂層額外送 `scenario`（該 scenario 自己的名稱）。runtime 收到後只會把該 skill `metadata.children` 指名的 skill 交給 model，其餘的即使使用者有權限也看不到——這重現了正式環境的條件。不送的話 runtime 不過濾、整池都給，`metadata.children` 漏寫或打錯字的 skill 照樣被路由到，L3 會假性通過。前提是該 skill 已存回 Blob，否則 runtime 查不到這個名字，一樣退回不過濾。capability 測試送空字串，因為能力層 skill 是跨情境共用的。
 > - runtime 必須在回應頂層回顯同一個 `mode`。缺漏或不符會**中止整批**並回 HTTP 502，沒有降級開關。
@@ -337,8 +338,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
 >
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
-> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。
-> - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings，[prompts/04_test.md](../prompts/04_test.md) 則明令大腦**不得重新推導**已印出的結論，只需照抄成 `what_to_change` 項目。
+> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。以 `[NEEDS_INFO]` 開頭的回應不是程式碼，判定函式為 `is_needs_info_response()`（[skill_lint.py](../backend/skill_lint.py)），會略過 lint。
+> - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings；`[NEEDS_INFO]` 回應則由 `_format_needs_info_responses()` 另列於 `### Needs-info responses`，只顯示第一行，不列入審查。對於已印出的結論，[prompts/04_test.md](../prompts/04_test.md) 明令大腦**不得重新推導**，只需照抄成 `what_to_change` 項目。
 > - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）、未檢查回傳碼（A12）與 EAA 平台規則（D4–D6、A15，見下方）全數下放給 lint。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。
 
@@ -418,6 +419,9 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Open Fix List** | **D** | | | ✓ | ✓ | | 呼叫 `_format_open_fixes`。把最新一次 `record_reflection` 的 `what_to_change` 逐項列成 `[x]`/`[ ]` 待辦清單，未清空前禁止重跑 TEST。詳見 [3.3 節](#33-refine打磨精修與局部修正) |
 | **Research Summary** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 經 Agent 查證好的網路研究結論。 |
 | **Current Draft** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前已被接受的 `SKILL.md` 快照本體 |
+| **Form Stage Addenda** | **B** | △ | △ | △ | △ | △ | `FORM_STAGE_ADDENDA`，接在 stage prompt（與 `KIND_STAGE_ADDENDA`）之後。依 `_form_prompt_key()` 選用，見 [6.2 節](#62-prompt-分層與-skill-形式) |
+| **Skill Form** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | `_format_skill_form()`。只在 capability session 有 `code` 素材或形式已鎖定為 script 時出現；列出 form / locked / 未滿足條件 / 取代失敗原因 |
+| **Bundled Script** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | `_format_bundled_script()`，只在 form = script。與某份 code 素材完全相同時只指向該素材 id，否則附上全文（例如 MODIFY）；標明唯讀 |
 
 ### 6.1 送出前的 Handlebars 跳脫
 
@@ -431,6 +435,37 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 - **只跳脫 system，不跳脫 user。** user 訊息不經渲染，若一併跳脫，反斜線會原樣留在模型眼前，破壞[第 7 節](#7-素材materials的三層可信度合約)的素材保真度。
 - **放在 `agent.py` 的傳輸邊界，不放進 `build_system_prompt()`。** 跳脫是 Foundry 的傳輸細節而非提示詞內容；寫進組裝函式會讓反斜線滲進它的既有單元測試斷言與 Agent Graph 預覽（[第 8 節](#8-agent-graph流程視覺化輔助工具)）。
+
+### 6.2 Prompt 分層與 skill 形式
+
+`build_system_prompt()` 的檔案層依序是：
+
+1. `00_global_system.md`
+2. stage prompt（`STAGE_PROMPT_MAP`，可依 `SkillKind` 由 `KIND_PROMPT_OVERRIDES` 整份替換）
+3. `KIND_STAGE_ADDENDA`（依 `SkillKind` 附加，例如 scenario 的 PREPARE / TEST）
+4. `FORM_STAGE_ADDENDA`（依 skill 形式附加，與 `SkillKind` 正交）
+5. 共用的 `09_best_practices.md`、`10_format_spec*.md`，之後才是 runtime state 與上表的 D 類區塊；`11_output_rules.md` 由 `agent.py` 載入，`12_input_sources.md` 放在最後、allowed exits 之前
+
+第 4 層的 key 由 `_form_prompt_key()` 決定：
+
+| key | 條件 | PREPARE | DRAFT | REFINE | TEST | DONE |
+| --- | --- | --- | --- | --- | --- | --- |
+| `script_candidate` | 形式未鎖定、capability、NEW、至少一份 `code` 素材、EAA script 旗標開啟 | `01_prepare_script_addendum.md` | | | | |
+| `script` | `session.skill_form == "script"` | （無） | `02_draft_script_addendum.md` + `13_script_save.md` | 同 DRAFT | `04_test_script_addendum.md` + `13_script_save.md` | `13_script_save.md` |
+| （無） | 其他（含 inline、scenario、旗標關閉） | | | | | |
+
+`13_script_save.md` 規定儲存收到 409 `script_flags_off` 時：等平台開啟旗標後再存一次，**絕不建議改成 inline**。
+
+**旗標關閉的提示不是 addendum**。`01_prepare_script_flags_off.md` 只有一行，由 `SKILL_FORM_FLAGS_OFF_NOTE` 接在 `## Skill Form` 區塊的 `eaa_flags` 那一行後面（「除非使用者問起，否則不要提 script 形式」）。因此旗標關閉又有 `code` 素材時，prompt 只多出區塊標題、`form: inline` 與這一行旗標說明，不載入任何 addendum。ACA 查詢**失敗**（`aca_env_error` 有值、沒有結果）時改接 `01_prepare_script_lookup_failed.md`（`SKILL_FORM_LOOKUP_FAILED_NOTE`）：告知使用者形式暫時無法判定、離開 PREPARE 前會重查。
+
+`## Skill Form` 區塊（`_format_skill_form()`）：
+
+- 只在 capability session 有 `code` 素材，或形式已鎖定為 script 時出現。
+- `eaa_flags` 未滿足時只列這一條（其他條件此時都無意義），不寫 `locked`。
+- 其餘情況列 `form`、`locked`，未鎖定時列出每一項未滿足的條件（`check (rule): message`，只陳述失敗了什麼、不給修法）。
+- 鎖定為 script 且新的 `code` 素材沒能取代 script 時，加一段「The code material did not replace the script; the previous script is kept:」與原因。
+
+新增 prompt 檔一定要登記在上述某個 map，否則不會被載入。行為隨形式不同時，加 addendum 而不是複製整份 stage prompt。
 
 ---
 
@@ -496,6 +531,103 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | 忠實度掃描 | 只掃 Tier 1/2（見 [7.3](#73-產出後的忠實度掃描僅警告不阻擋)） | 不掃 |
 
 原則：DRAFT／REFINE 需要引用的內容（程式碼、API 規格、欄位名、業務背景）一律放素材並選對 kind；對話只用來下當回合的指示或回答問題。PREPARE 期間模型寫進 Prepare Brief 的內容會延續到後續 Stage，但原文細節不會。
+
+### 7.5 Code 素材與 script 形式
+
+一份 Tier 1 `code` 素材除了被重現成 inline sample code，也可以**原樣**成為 skill 附帶的 `scripts/<name>.py`（script 形式）。v1 固定為 `SKILL.md` 加上**恰好一支** script，檔名等於 frontmatter `name`。
+
+**成為 script 的條件**（`evaluate_skill_form()`，全部成立才是 script，否則 inline 並列出每一項未滿足的 `check`）：
+
+| check | 條件 |
+| --- | --- |
+| `skill_kind` | capability（scenario 沒有自己的 script） |
+| `mode` | NEW（MODIFY 沿用 Blob 上的形式；IMPORT 不適用） |
+| `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)） |
+| `code_material` | 恰好一份 `code` 素材 |
+| `parses` | 該素材可被 `ast` 解析 |
+| `script_lint` | `script_only_errors()` 沒有 error（S4/S5/S6/S7/S10/S10b/S11/S12/S13；S12 擋 inline 範本：字面 `request_inputs` dict 打包成腳本後每次都用同一組值；S13 擋讀 `globals()`：bundled script 是獨立行程，沒有 host 注入的變數）。S4 訊息附上該行原始碼；`[NEEDS_INFO]` 之後的純文字另有專屬訊息（說明要放進其後的 JSON，EAA 會先去掉標記行再 `json.loads` 其餘 stdout） |
+| `inputs` | `variables` 中每個 `kind=runtime`、`source=request` 的變數都有對應的 `add_argument`（`dest`，或 `--target-tables` → `TARGET_TABLES`）。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
+| `covers_operations` | 使用者在 `variables_ok` 確認「code 素材涵蓋本 skill 的所有操作」（`script_covers_operations`），**且** `variables_ok` 已確認 |
+
+**鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文。之後不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式。
+
+**Generator 不改 script**。REFINE 的 patch 只作用在 `SKILL.md`；UI 的 Files 分頁把 script 顯示為唯讀。要換 script 只能換 `code` 素材：
+
+| 何時 | code 素材的內容有變（新增 / 修改 / 刪除 / kind 在 code 與其他之間切換 / 對話附上） | 結果 |
+| --- | --- | --- |
+| 未鎖定 | 任何變動 | 重置 `script_covers_operations`、`variables_ok` 與其 evidence，需要重新確認 |
+| 鎖定為 inline | 任何變動 | 不影響形式 |
+| 鎖定為 script | 剛好一份 `code` 素材、內容與現有 script 不同，且 `script_readiness_problems()`（可解析、`script_only_errors()` 乾淨、`inputs`）為空 | **取代** `current_skill.script`，並寫入一則 system 訊息要 Agent 請使用者確認新程式碼仍涵蓋所有操作（**不**重置 `variables_ok`） |
+| 鎖定為 script | 其他情況（兩份以上、無法解析、有 lint error、request 輸入沒有 flag） | 保留原本的 script；原因出現在 `## Skill Form` 與 `GET /skill-form` 的 `replacement_problems`，UI 的 Materials 分頁也會列出 |
+
+內容完全相同的 PUT 不算變動。五個入口（`POST` / `PUT` / `DELETE /materials`、chat 附上素材、接受 `propose_material_patch`）都走 `apply_code_material_change()`。
+
+**Agent 調整 code 素材**（`propose_material_patch`）：只在 PREPARE、`_form_prompt_key() == "script_candidate"`、恰好一份 `code` 素材且該素材在 prompt 中未被截斷時可用；scenario skill 由 `KIND_ONLY_TOOLS` 擋下。提出時（`apply_tool_effect`）與接受時（`tool-result`，對**當下**的素材內容）都跑 `_checked_material_patch()`：
+
+- patch 套不上、沒有改動、改完無法解析 → 可重送的錯誤。
+- 改寫判定（[backend/material_patch.py](../backend/material_patch.py) `rewrite_reasons()`）：原素材無法解析、刪改了任何外部呼叫、或邊界以外的原始行改動超過 `MAX_CHANGED_RATIO`（0.5，忽略縮排，搬進 `main()` 不算）→ 拒絕，並要求 Agent 不要再送 patch，改請使用者選擇維持 inline 或自行撰寫 script（草稿只能出現在對話中）。
+  - 邊界語句以 AST 判定，不計入比例：`import`；至少有一個呼叫、且**每個**呼叫都在白名單（`print`、`json.dumps`、argparse API、`sys.exit` / `SystemExit`）內的語句（所以 `print(json.dumps(delete_all()))` 不算邊界）；只捕捉 `SystemExit` / `ArgumentError` 的 `try` / `except`；輸入綁定賦值（讀 `parse_args()` 結果、`os.environ`、`os.getenv`、`globals()`，其餘呼叫只能是純轉換或兩版完全相同的純 helper，例如 `_to_list`）；只讀輸入的 helper（例如 `_runtime`）整段；註解行。
+  - 比例只看原始的非邊界行保留多少，新增的行（例如收集失敗清單）不會拉高比例。
+- 殘留判定：`script_readiness_problems()` 對 patch 後的程式碼仍有任何問題（`script_lint` 或 `inputs`）→ 拒絕，逐條列出 finding（含 patch 後行號與原始碼），要求 Agent 在**一個** patch 內全部修正。
+- 重試上限：提出時被 gate 拒絕（套不上、無改動、無法解析、改寫、殘留問題）會累加 `session.material_patch_rejections`，階段或資格不符不計。每次拒絕訊息都附 `Refusal N of 3`；可重送的拒絕另外說明「素材完全沒有被修改，下一個 patch 要以原素材為基準並包含先前所有修正，且不必再問使用者」。`propose_material_patch` 的恢復指引不附加「詢問使用者」的通用尾句。第 3 次拒絕即宣告達到 `MAX_MATERIAL_PATCH_REJECTIONS`，之後的提案直接被拒，並要求 Agent 停止提案、告訴使用者維持 inline 並列出每條 finding。code 素材內容一變（含接受 patch）計數歸零。
+- 重試不是後端迴圈：每次拒絕以 system 訊息交回 Agent，由 Agent 在下一輪依訊息重送；後端只負責判定、計數與停止。
+
+**範例**：一支 EAA 每日用量報表腳本，單價由 `--price-input` / `--price-output` 等參數傳入。原本的 `parse_pricing()` 有三個問題：`ArgumentParser` 保留 `--help`（S10b）、`parse_args()` 沒有處理 argparse 的 exit 2（S10），以及缺值時呼叫 `p.error(...)`（同樣是 exit 2）。另外，單價格式錯誤時 `_price()` 拋出的 `ValueError` 會讓程式以 traceback 結束。Agent 提出的 patch 只改這幾處：
+
+```diff
+ def parse_pricing() -> dict:
+-    p = argparse.ArgumentParser(description="EAA daily usage report (prices in USD per 1M tokens)")
++    p = argparse.ArgumentParser(
++        description="EAA daily usage report (prices in USD per 1M tokens)",
++        add_help=False,
++    )
+     ...
+-    args = p.parse_args()
++    try:
++        args = p.parse_args()
++    except SystemExit:
++        print("[NEEDS_INFO] missing=PRICE_INPUT,PRICE_OUTPUT")
++        print(json.dumps({
++            "reason": "Provide valid --price-input and --price-output values; optional cached-input and cache-write prices must also be valid numeric USD-per-1M-token values when supplied."
++        }, ensure_ascii=False))
++        raise SystemExit(0)
+     if not args.price_input or not args.price_output:
+-        p.error("必須提供 input 與 output 單價（--price-input / --price-output 或對應環境變數）")
++        print("[NEEDS_INFO] missing=PRICE_INPUT,PRICE_OUTPUT")
++        print(json.dumps({
++            "reason": "必須提供 input 與 output 單價（--price-input 與 --price-output）。"
++        }, ensure_ascii=False))
++        raise SystemExit(0)
+-    return {
+-        "unit": "USD per 1M tokens",
+-        "input": _price(args.price_input),
+-        ...
+-    }
++    try:
++        return {
++            "unit": "USD per 1M tokens",
++            "input": _price(args.price_input),
++            ...
++        }
++    except ValueError:
++        print("[NEEDS_INFO] missing=PRICE_INPUT,PRICE_OUTPUT")
++        print(json.dumps({
++            "reason": "所有提供的單價必須是有效數字，單位為 USD per 1M tokens。"
++        }, ensure_ascii=False))
++        raise SystemExit(0)
+```
+
+- **改了什麼**：參數錯誤、缺值、格式錯誤三條路徑，都改成「`[NEEDS_INFO]` 一行 + 一個帶 `reason` 的 JSON + exit 0」，host 就能依 `reason` 修正參數或詢問使用者；`add_help=False` 讓 `--help` 不再把用法印到 stdout。
+- **沒改什麼**：單價的欄位、`_price()` 的換算、報表計算與所有外部呼叫都原封不動。重新包成 `try` 的 `return` 區塊只改了縮排，比例計算忽略縮排，不算改動；新增的 `print` / `json.dumps` / `SystemExit` 都是邊界語句。
+- **Gate 會擋下的寫法**：只加 `add_help=False`、漏掉 `try` / `except SystemExit`（殘留 S10）；`[NEEDS_INFO]` 後面再印一行純文字（S4）；把 `p.error(...)` 換成印到 stderr 後 `sys.exit(2)`（S5：exit code 只能是 0 / 1 / 3）。
+
+Agent 端的寫法由 [prompts/01_prepare_script_addendum.md](../prompts/01_prepare_script_addendum.md) 規範：一個 patch 修掉 `## Skill Form` 列出的所有 finding（依 finding 引用的原始碼找行，不數行號）；`[NEEDS_INFO]` 後的說明放進其後的 JSON；回報失敗的診斷要進結果 JSON 並 exit 3，不能只移到 stderr；request 輸入改用 argparse，並用 `ArgumentParser(add_help=False)`、把 `parse_args()` 包在 `try` / `except SystemExit`（S10 / S10b）；被拒的 patch 不會套用，下一個要以原素材為基準；只有工具回報達到上限時才停止，不自行推斷。
+
+提出時被拒走一般的 `tool_effect_rejected`；接受時被拒回 409 `material_patch_rejected`，素材不變。接受成功後素材 `origin="agent_patch"`，`user_content` 保留第一次被改前的使用者原文；覆蓋確認照上表重置，並寫入 system 訊息要求使用者先實際執行一次。`## Materials` 的素材標頭會加上 `origin=agent_patch, not run by the user`。使用者之後自行編輯素材（`PUT`）即回到 `origin="user"`。沒有 undo；是否已執行只靠 prompt 與 UI 標記，後端不擋 `script_covers_operations`。
+
+**儲存**：script 型 session 每次儲存都重新查 EAA 旗標，關閉時回 409 `script_flags_off`（可恢復，不寫入）；script 與 `SKILL.md` 一起送 EAA `lint_skill_package`。見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)。
+
+**路由測試**：旗標開啟的 runtime 會在回應帶 `requested_scripts`。Generator 檢查每筆 `args` 必須是字串陣列，且本 skill 的每個 `--flag` 都是 script 宣告過的（S3 accepted set），結果以 `valid` / `problems` 存在 `TestResult.requested_scripts`，並列在 `## Latest Test Run` 與 Tests 分頁。
 
 ---
 

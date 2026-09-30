@@ -23,6 +23,13 @@ PRIVATE_SEGMENT = "_private"
 # dbo.skills.CK_skill_name_format: [a-z0-9-] only, no leading/trailing hyphen.
 MAX_SKILL_NAME_LEN = 64
 
+# EAA runs only `scripts/<frontmatter name>.py` and refuses a skill with any other file there.
+SCRIPTS_DIR = "scripts"
+
+
+class VersionConflict(RuntimeError):
+    """The stored SKILL.md changed since the caller last read it."""
+
 
 def compute_hash(*parts: str) -> str:
     h = hashlib.sha256()
@@ -51,6 +58,14 @@ def blob_prefix_of(skill_name: str, owner_upn: str | None = None) -> str:
 
 def blob_path_of(skill_name: str, owner_upn: str | None = None) -> str:
     return f"{blob_prefix_of(skill_name, owner_upn)}SKILL.md"
+
+
+def script_relpath_of(skill_name: str) -> str:
+    return f"{SCRIPTS_DIR}/{safe_skill_name(skill_name)}.py"
+
+
+def script_blob_path_of(skill_name: str, owner_upn: str | None = None) -> str:
+    return f"{blob_prefix_of(skill_name, owner_upn)}{script_relpath_of(skill_name)}"
 
 
 def _frontmatter_field_regex(block: str, key: str) -> str:
@@ -170,6 +185,7 @@ class SkillStore(Protocol):
     def load_skill(self, name: str) -> SkillFiles: ...
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles: ...
     def delete_skill(self, name: str) -> None: ...
+    def has_script(self, name: str) -> bool: ...
 
 
 class LocalSkillStore:
@@ -195,6 +211,7 @@ class LocalSkillStore:
                     version_hash=files.version_hash,
                     blob_store_id=self.id,
                     skill_kind=infer_skill_kind(files.skill_md),
+                    has_script=files.script is not None,
                 )
             )
         log_event("skill_store.local.list.done", count=len(entries), store_id=self.id, duration_ms=elapsed_ms(started))
@@ -216,11 +233,13 @@ class LocalSkillStore:
         current = self._skills.get(safe)
         if expected_version_hash and current and current.version_hash != expected_version_hash:
             log_event("skill_store.local.save.version_mismatch", level="warning", skill_name=safe)
-            raise RuntimeError("Version hash mismatch; reload latest skill before saving.")
+            raise VersionConflict("Version hash mismatch; reload latest skill before saving.")
         saved = files.model_copy(deep=True)
         saved.name = safe
         saved.version_hash = compute_hash(saved.skill_md)
         saved.blob_path = blob_path_of(safe)
+        if saved.script is None and current is not None:
+            saved.script = current.script
         self._skills[safe] = saved
         log_event(
             "skill_store.local.save.done",
@@ -234,6 +253,10 @@ class LocalSkillStore:
         safe = safe_skill_name(name)
         existed = self._skills.pop(safe, None) is not None
         log_event("skill_store.local.delete.done", skill_name=safe, existed=existed)
+
+    def has_script(self, name: str) -> bool:
+        current = self._skills.get(safe_skill_name(name))
+        return current is not None and current.script is not None
 
 
 class AzureBlobSkillStore:
@@ -317,7 +340,8 @@ class AzureBlobSkillStore:
         started = now_ms()
         entries: list[SkillIndexEntry] = []
         container = self._container()
-        blobs = container.list_blobs(name_starts_with=f"{self.prefix}/") if self.prefix else container.list_blobs()
+        blobs = list(container.list_blobs(name_starts_with=f"{self.prefix}/") if self.prefix else container.list_blobs())
+        relative_names = {self._strip_prefix(str(blob.name)) for blob in blobs}
         for blob in blobs:
             name = str(blob.name)
             if not name.endswith("/SKILL.md"):
@@ -326,6 +350,7 @@ class AzureBlobSkillStore:
             content = client.download_blob().readall().decode("utf-8")
             parsed_name, description = parse_frontmatter(content)
             relative_name = self._strip_prefix(name)
+            skill_dir = relative_name.rsplit("/", 1)[0]
             entries.append(
                 SkillIndexEntry(
                     name=parsed_name or relative_name.split("/", 1)[0],
@@ -333,6 +358,7 @@ class AzureBlobSkillStore:
                     version_hash=str(getattr(blob, "etag", "") or ""),
                     blob_store_id=self.id,
                     skill_kind=infer_skill_kind(content),
+                    has_script=f"{skill_dir}/{script_relpath_of(skill_dir.rsplit('/', 1)[-1])}" in relative_names,
                 )
             )
         sorted_entries = sorted(entries, key=lambda e: e.name)
@@ -360,17 +386,35 @@ class AzureBlobSkillStore:
             name=safe,
             skill_md=skill_md,
             version_hash=str(props.etag),
+            script=self._read_script(safe),
         )
         log_event(
             "skill_store.azure.load.done",
             skill_name=safe,
             version_hash=files.version_hash,
+            has_script=files.script is not None,
             duration_ms=elapsed_ms(started),
         )
         return files
 
+    def _script_path(self, name: str) -> str:
+        return self._blob_name(safe_skill_name(name), script_relpath_of(name))
+
+    def _read_script(self, safe: str) -> str | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            data = self._container().get_blob_client(self._script_path(safe)).download_blob().readall()
+        except ResourceNotFoundError:
+            return None
+        return data.decode("utf-8")
+
+    def has_script(self, name: str) -> bool:
+        return bool(self._container().get_blob_client(self._script_path(name)).exists())
+
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
         from azure.core import MatchConditions
+        from azure.core.exceptions import ResourceModifiedError
         from azure.storage.blob import ContentSettings
 
         safe = safe_skill_name(files.name)
@@ -392,6 +436,17 @@ class AzureBlobSkillStore:
                 content_settings=ContentSettings(content_type="text/markdown; charset=utf-8"),
                 **kwargs,
             )
+            props = skill_blob.get_blob_properties()
+            # Last write before updated_at bumps: EAA caches SKILL.md but fetches the script every turn.
+            if files.script is not None:
+                container.get_blob_client(self._script_path(safe)).upload_blob(
+                    files.script.encode("utf-8"),
+                    overwrite=True,
+                    content_settings=ContentSettings(content_type="text/x-python; charset=utf-8"),
+                )
+        except ResourceModifiedError as exc:
+            log_event("skill_store.azure.save.version_mismatch", level="warning", skill_name=safe)
+            raise VersionConflict("SKILL.md changed on Blob since it was loaded; reload latest skill before saving.") from exc
         except Exception as exc:
             log_exception(
                 "skill_store.azure.save.failed",
@@ -401,7 +456,6 @@ class AzureBlobSkillStore:
                 duration_ms=elapsed_ms(started),
             )
             raise
-        props = skill_blob.get_blob_properties()
         saved = files.model_copy(deep=True)
         saved.name = safe
         saved.version_hash = str(props.etag)
@@ -418,24 +472,24 @@ class AzureBlobSkillStore:
     def delete_skill(self, name: str) -> None:
         started = now_ms()
         safe = safe_skill_name(name)
-        skill_path = self._skill_path(safe)
         container = self._container()
-        try:
-            container.delete_blob(skill_path)
-            log_event(
-                "skill_store.azure.delete.done",
-                skill_name=safe,
-                skill_path=skill_path,
-                duration_ms=elapsed_ms(started),
-            )
-        except Exception as exc:  # noqa: BLE001 -- missing blob is a no-op.
-            log_event(
-                "skill_store.azure.delete.missing",
-                level="warning",
-                skill_name=safe,
-                skill_path=skill_path,
-                error=str(exc),
-            )
+        for path in (self._skill_path(safe), self._script_path(safe)):
+            try:
+                container.delete_blob(path)
+                log_event(
+                    "skill_store.azure.delete.done",
+                    skill_name=safe,
+                    skill_path=path,
+                    duration_ms=elapsed_ms(started),
+                )
+            except Exception as exc:  # noqa: BLE001 -- missing blob is a no-op.
+                log_event(
+                    "skill_store.azure.delete.missing",
+                    level="warning",
+                    skill_name=safe,
+                    skill_path=path,
+                    error=str(exc),
+                )
 
 
 @dataclass
@@ -472,6 +526,9 @@ class CachedSkillStore:
         self.store.delete_skill(name)
         self._index = None
         self._expires_at = None
+
+    def has_script(self, name: str) -> bool:
+        return self.store.has_script(name)
 
 
 def make_skill_store() -> CachedSkillStore:

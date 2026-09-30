@@ -70,6 +70,12 @@ def test_constant_members_reads_sets_tuples_and_comma_strings() -> None:
     assert constant_members(content, "m.py", "missing") is None
 
 
+def test_constant_members_reads_annotated_dict_keys() -> None:
+    content = b'P: Dict[str, str] = {r"a": "x", r"b": "y"}\nQ = {1: "x"}\n'
+    assert constant_members(content, "m.py", "P") == ["a", "b"]
+    assert constant_members(content, "m.py", "Q") is None
+
+
 @pytest.mark.parametrize(("relation", "ours", "expected"), [
     ("equal", '{"a", "b"}', []),
     ("equal", '{"a"}', ["upstream has ['b'] that OURS lacks"]),

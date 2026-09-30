@@ -285,6 +285,30 @@ def test_prompt_dedupes_identical_prepared_code() -> None:
     assert "From: q1; q2" in prompt
 
 
+def test_needs_info_response_is_listed_apart_from_prepared_code() -> None:
+    session = Session(current_stage=Stage.TEST)
+    session.test_runs.append(
+        ModelTestRun(
+            skill_version_hash="abc123",
+            positive_results=[
+                ModelTestResult(
+                    query="q1",
+                    expected_skill="demo",
+                    actual_skill="demo",
+                    passed=True,
+                    apim_response="  [NEEDS_INFO] missing=DRY_RUN\nPlease provide DRY_RUN.",
+                ),
+            ],
+            positive_hit_rate=1.0,
+        )
+    )
+    section = _format_latest_test_run(session) or ""
+    assert "### Needs-info responses" in section
+    assert "- From: q1 -> `[NEEDS_INFO] missing=DRY_RUN`" in section
+    assert "### Prepared code" not in section
+    assert "```python" not in section
+
+
 def test_prompt_includes_done_reentry_guidance() -> None:
     session = Session(current_stage=Stage.DONE)
     prompt = build_system_prompt(session)

@@ -40,6 +40,10 @@
   --danger:  #b53224;
   --danger-soft: #fbe5e1;
 
+  /* Skill form (bundled script vs inline sample code) */
+  --form-script: #5b4a8a;
+  --form-script-soft: #eee9f7;
+
   /* Visible-phase palette (Agent Graph + stepper) */
   --phase-prepare: #c4663a;
   --phase-draft:   #8b6cb8;
@@ -3335,3 +3339,38 @@ textarea:focus, input:focus, select:focus {
 .fr-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); margin-bottom: 2px; }
 .fr-find { background: #fdecea; border-left: 3px solid #c0392b; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; font-size: 12px; border-radius: 4px; }
 .fr-replace { background: #e7f6ec; border-left: 3px solid #2e7d52; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; font-size: 12px; border-radius: 4px; }
+/* Skill form: bundled script vs inline sample code */
+.material-form-tag,
+.form-state,
+.binding-script {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.material-form-tag { margin-top: 4px; }
+.material-form-tag.form-script,
+.form-state.form-script,
+.binding-script { background: var(--form-script-soft); border-color: var(--form-script); color: var(--form-script); }
+.material-form-tag.form-inline,
+.form-state.form-inline { background: var(--surface-2); color: var(--text-2); }
+.material-form-tag.form-unused { background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }
+.material-form-tag.form-agent-edited { margin-left: 4px; background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }
+.binding-script { margin-left: 6px; }
+.skill-form-note { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--warning); border-radius: var(--r-sm); background: var(--warning-soft); font-size: var(--fs-xs); color: var(--text-1); }
+.skill-form-note.skill-form-info { border-left-color: var(--brand-400); background: var(--surface-2); }
+.skill-form-note ul { margin: 4px 0 0; padding-left: 18px; }
+.skill-form-covers { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
+.skill-form-covers input[type="checkbox"] { width: auto; margin: 0; }
+.file-switch { display: flex; gap: 4px; margin-top: 8px; }
+.file-switch-tab { padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--text-2); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--fs-xs); cursor: pointer; }
+.file-switch-tab.active { border-color: var(--form-script); background: var(--form-script-soft); color: var(--form-script); font-weight: 600; }
+#editor[readonly] { background: var(--surface-2); }
+.requested-scripts ul { margin: 4px 0 0; padding-left: 18px; }
+.requested-script-state { font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; }
+.requested-script.valid .requested-script-state { color: var(--success); }
+.requested-script.invalid .requested-script-state { color: var(--danger); }

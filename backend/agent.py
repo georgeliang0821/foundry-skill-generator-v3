@@ -106,6 +106,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "propose_material_patch",
+        "description": (
+            "Propose a V4A patch to the single code material so it can ship verbatim as the "
+            "bundled script. PREPARE only, and only while `## Skill Form` is not locked. Adapt the "
+            "edges only: argparse inputs, stdout JSON / [NEEDS_INFO], stderr, exit codes. Never "
+            "change an external call, auth or business logic; a patch that does is rejected as a "
+            "rewrite. The user reviews the diff before it is applied."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "material_id": {"type": "string"},
+                "patch": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["material_id", "patch", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "rename_skill",
         "description": (
             "Rename this skill. The backend rewrites the frontmatter `name` itself and moves "
@@ -302,6 +322,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "required": ["name", "kind"],
                         "additionalProperties": False,
                     },
+                },
+                "script_covers_operations": {
+                    "type": "boolean",
+                    "description": "Capability skills with exactly one code material: true only when you and the user confirmed that the code covers EVERY operation of this skill. It is one of the conditions for the script form, and it cannot change once the form is locked at PREPARE -> DRAFT. Omit to leave it unchanged.",
                 },
             },
             "required": ["variables"],

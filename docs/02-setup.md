@@ -197,6 +197,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 > `MCP_ENDPOINT` 本身不是選用的：儲存時要用它呼叫 EAA 的 `lint_skill_package`（見 [EAA skill lint](#eaa-skill-lint儲存必要)）。選用的是 ACA 查詢這個功能。
 
+> **Script 型 skill 需要 ACA 查詢**。是否能產出 script 型 skill（見下方 [Script 型 skill 的 EAA 旗標](#script-型-skill-的-eaa-旗標)）是從這個查詢結果的 `architectural_config` 判斷的；四個變數沒填齊，旗標一律視為關閉，所有 skill 都只會是 inline 形式。
+
 | 變數 | 說明 |
 | --- | --- |
 | `MCP_ENDPOINT` | MCP 伺服器根 URL（`/mcp`），提供「列出 ACA 環境變數」的工具；例如 `https://eaa.foundryeaa.org/mcp` |
@@ -227,7 +229,7 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 | `MCP_ENDPOINT` | 是 | EAA MCP 根 URL（`/mcp`）；身分與 ACA 查詢相同，見上方「呼叫 MCP 用的身分」 |
 | `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`。只影響本機 lint 的 D7 INFO；EAA 端用的是 ACA 上的值 |
 
-- 目前只送 `SKILL.md` 一個檔案，因為 Generator 只產出它。日後支援 `scripts/*.py` 時，必須在同一次呼叫一起送，MI scope 等跨檔檢核才準。
+- Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。有 script 但 EAA 回報的 `ruleset_version` 低於 `1.1`（還沒有 script 檢核）時回 **HTTP 503** 拒絕儲存，因為無法驗證。
 - **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
 - `status == "failed"`（request 或 package 不合法）或 `valid == false`（有 lint ERROR）回 **HTTP 400**，訊息列出 EAA 的 `error` / `errors`。
 - `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
@@ -235,6 +237,21 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 - 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
 - pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
 - 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
+
+#### Script 型 skill 的 EAA 旗標
+
+Script 型 skill（`SKILL.md` 加上一支 `scripts/<name>.py`）只有在 EAA 會執行 script 時才有意義。判斷依據是 ACA 查詢結果 `architectural_config` 裡的兩個旗標，**兩個都要是 `true`**（字串比對不分大小寫；缺值視為 `false`）：
+
+| 旗標 | 意義 |
+| --- | --- |
+| `DYNAMIC_SKILLS_ENABLED` | EAA 從 Blob 動態載入 skill |
+| `SKILL_SCRIPTS_ENABLED` | EAA 執行 skill 附帶的 script |
+
+- **PREPARE**：旗標關閉時，新 skill 只能是 inline；Materials 與 Checklist 只顯示這一個原因（其他條件此時都無意義）。
+- **查詢失敗 ≠ 旗標關閉**：ACA 查詢失敗（例如 Container App 冷啟動時回 404「Unavailable」）時，`eaa_flags` 顯示「Could not read the EAA script flags」，Agent 會告知使用者形式暫時無法判定。離開 PREPARE 前（`request_stage_transition` 到 DRAFT）若是有 `code` 素材的新 capability skill 且尚未讀到旗標，會以 `reason="form_lock"` 重查一次：重查後旗標開啟 → 這一次轉移被擋下（`FormLockDeferred`），讓 Agent 先與使用者處理 script 形式；仍失敗 → 以 inline 鎖定，並寫入 system 訊息說明原因。
+- **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），旗標若已關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags` 列出關閉的旗標，**什麼都不寫入**。處理方式是請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定，見 [04-agent-mechanism.md](04-agent-mechanism.md#75-code-素材與-script-形式)）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。
+- 其他 script 相關的 409：`script_form_mismatch`（inline session 想覆寫 Blob 上已有 script 的 skill，不可恢復）、`version_conflict`（Blob 上的 `SKILL.md` 在載入後被改過，例如 Gatekeeper Addendum）。
+- Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，只有 scenario `script_flags_on` 會把旗標打開。
 
 ### 3.2 Azure SQL 連線與驗證策略
 

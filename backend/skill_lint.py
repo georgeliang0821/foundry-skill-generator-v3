@@ -9,7 +9,9 @@ module finds used to ship silently.
 
 Rules are namespaced by the layer they apply to: ``A*`` for capability skills
 (the artifact that actually runs), ``B*`` for scenario skills (the artifact
-that instructs the host) and ``I*`` for the verified-actor identity contract.
+that instructs the host), ``I*`` for the verified-actor identity contract and
+``S*`` for script-form capability skills, whose code is a bundled script run
+with argv rather than a sample block the runtime rewrites.
 Only A1 is an error -- a python block that does not parse is never intentional
 and the host executes it verbatim. Everything else is a warning, because a
 content check that can reject a draft would be worse than the drift it catches.
@@ -28,12 +30,14 @@ report its own absence (A11).
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import dataclass
 from typing import Collection, Iterable, Mapping, Sequence
 
 from .models import SkillKind
 from .eaa_platform import (
+    CONTENT_ERROR_HARD_PATTERNS,
     MI_ENV_KEYS,
     MI_HARD_DENIED_RESOURCES,
     MI_IDENTITY_SELECTORS,
@@ -51,6 +55,13 @@ from .sections import h2_sections, normalize_section
 ENV_SECTION = "Environment Variables"
 OBO_SECTION = "OBO Token Scopes"
 INPUTS_SECTION = "Required Inputs"
+# Script form: ACA variables and OBO tokens are declared here instead of ENV/OBO.
+PREREQUISITES_SECTION = "Prerequisites"
+# Script form: the exit-code table and the output field tables.
+RESULT_SECTION = "Reading the Result"
+# Written by EAA's gatekeeper, not by the generator.
+GATEKEEPER_ADDENDUM_SECTION = "Gatekeeper Addendum"
+SCRIPT_EXIT_CODES = frozenset({0, 1, 3})
 # The platform injects this after a successful OBO exchange; a skill never
 # declares it as an ACA variable and never accepts it from the caller.
 IDENTITY_SECTION = "身分使用規範"
@@ -67,6 +78,9 @@ _PY_FENCE_RE = re.compile(r"```(?:python|py)[^\n]*\n(.*?)```", re.DOTALL | re.IG
 _HEADING_RE = re.compile(r"^(#{2,3})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 # Declared variables are written as a backticked ALL-CAPS token in a bullet.
 _DECLARED_NAME_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
+_PREREQ_BULLET_RE = re.compile(r"^[-*+][ \t]+`([A-Z_][A-Z0-9_]*)`")
+_ANY_BULLET_RE = re.compile(r"^[ \t]*[-*+][ \t]")
+_OPTIONAL_RE = re.compile(r"\boptional\b", re.IGNORECASE)
 _NEEDS_INFO_RE = re.compile(r"\[NEEDS_INFO\][ \t]*missing=([A-Za-z0-9_,\- ]+)")
 # The f-string prefix a `needs_info(code, ...)` helper prints; the code itself is
 # a placeholder, so the regex above finds nothing and only the AST can resolve it.
@@ -271,6 +285,45 @@ def _declared_names(section_body: str) -> list[str]:
     )
 
 
+def _h2_body(skill_md: str, name: str) -> str:
+    wanted = normalize_section(name)
+    return "\n".join(
+        body for title, body in h2_sections(skill_md or "") if wanted in normalize_section(title)
+    )
+
+
+def _without_gatekeeper_addendum(skill_md: str) -> str:
+    """The file minus ``## Gatekeeper Addendum``, which the generator does not author."""
+    wanted = normalize_section(GATEKEEPER_ADDENDUM_SECTION)
+    head = (skill_md or "").partition("\n## ")[0]
+    kept = [
+        f"## {title}\n{body}"
+        for title, body in h2_sections(skill_md or "")
+        if wanted not in normalize_section(title)
+    ]
+    return "\n".join([head, *kept])
+
+
+def _prerequisites(skill_md: str) -> dict[str, bool]:
+    """Script form: name -> optional, from each top-level bullet's leading backticked name.
+
+    Nested bullets are the details of their parent (permissions, notes), so an
+    "optional" there does not make the parent variable optional.
+    """
+    found: dict[str, bool] = {}
+    current: str | None = None
+    for line in _h2_body(skill_md, PREREQUISITES_SECTION).splitlines():
+        match = _PREREQ_BULLET_RE.match(line)
+        if match:
+            current = match.group(1)
+            found.setdefault(current, False)
+        elif not line.strip() or _ANY_BULLET_RE.match(line):
+            current = None
+        if current is not None and _OPTIONAL_RE.search(line):
+            found[current] = True
+    return found
+
+
 # ---------------------------------------------------------------------------
 # AST helpers
 # ---------------------------------------------------------------------------
@@ -382,6 +435,25 @@ def _raised_names(tree: ast.AST) -> list[str]:
         if name and name != "SystemExit":
             names.append(name)
     return _unique(names)
+
+
+def _handler_names(handler: ast.ExceptHandler) -> list[str]:
+    """Exception class names an ``except`` clause names; empty for a bare ``except``."""
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return [
+        kind.id if isinstance(kind, ast.Name) else kind.attr
+        for kind in kinds
+        if isinstance(kind, (ast.Name, ast.Attribute))
+    ]
+
+
+def _caught_names(tree: ast.AST) -> set[str]:
+    return {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler)
+        for name in _handler_names(node)
+    }
 
 
 def _has_ancestor(node: ast.AST, parents: Mapping[ast.AST, ast.AST], kind: type) -> bool:
@@ -671,66 +743,90 @@ def _lint_capability(
     skill_md: str,
     code_override: str | None = None,
     registry_keys: Collection[str] = STATIC_OBO_REGISTRY_KEYS,
+    script: str | None = None,
 ) -> list[LintIssue]:
     issues: list[LintIssue] = []
     try:
         bindings = parse_input_bindings(skill_md)
     except ValueError as exc:
         return [LintIssue(rule="A13", severity="error", message=str(exc))]
-    code = _python_code(skill_md) if code_override is None else code_override
+    script_form = script is not None
+    if script_form:
+        code = script
+    else:
+        code = _python_code(skill_md) if code_override is None else code_override
     if not code.strip():
-        if bindings is not None:
+        if bindings is not None and not script_form:
             return [LintIssue(rule="A14", severity="error", message="An explicit input-bindings contract requires a Python sample that binds and validates its inputs.")]
         return issues
 
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
+        where = (
+            "The bundled script is not valid Python"
+            if script_form
+            else "The sample code block is not valid Python"
+        )
         return [
             LintIssue(
                 rule="A1",
                 severity="error",
                 message=(
-                    "The sample code block is not valid Python: "
+                    f"{where}: "
                     f"{exc.msg} (line {exc.lineno}). The host executes this block verbatim."
                 ),
                 detail=f"line {exc.lineno}: {exc.msg}",
             )
         ]
 
-    issues.extend(_check_variable_closure(skill_md, tree))
-    if bindings is not None:
+    issues.extend(_check_variable_closure(skill_md, tree, script=script_form))
+    if bindings is not None and not script_form:
         issues.extend(_check_input_bindings(skill_md, tree, code, template=code_override is None))
-    issues.extend(_check_explicit_raises(tree))
-    issues.extend(_check_needs_info_documented(skill_md, code, tree))
-    issues.extend(_check_main_signature(tree))
-    issues.extend(_check_runtime_input_channel(skill_md, tree))
-    issues.extend(_check_runtime_needs_info_codes(skill_md, tree, code))
+    issues.extend(_check_explicit_raises(tree, script=script_form))
+    if script_form:
+        issues.extend(_check_needs_info_exit_row(skill_md, code))
+    else:
+        issues.extend(_check_needs_info_documented(skill_md, code, tree))
+        issues.extend(_check_main_signature(tree))
+        issues.extend(_check_runtime_input_channel(skill_md, tree))
+        issues.extend(_check_runtime_needs_info_codes(skill_md, tree, code))
     issues.extend(_check_caller_field_contract(skill_md, tree))
     issues.extend(_check_uncaught_sql_throw(tree))
     issues.extend(_check_unchecked_call_result(tree))
-    issues.extend(_check_deployment_config(skill_md, tree, code))
+    issues.extend(_check_deployment_config(skill_md, tree, code, script=script_form))
     issues.extend(_check_identity_contract(skill_md, tree))
-    issues.extend(_check_managed_identity(skill_md, tree, code))
-    issues.extend(_check_mi_scopes(skill_md, tree, code))
+    issues.extend(_check_managed_identity(skill_md, tree, code, script=script_form))
+    issues.extend(_check_mi_scopes(skill_md, tree, code, script=script_form))
     issues.extend(_check_mi_acquisition(tree, code))
-    issues.extend(_check_reserved_credentials_keys(skill_md, tree, registry_keys))
+    issues.extend(_check_reserved_credentials_keys(skill_md, tree, registry_keys, script=script_form))
+    if script_form:
+        issues.extend(_lint_script(skill_md, tree, code))
     return issues
 
 
-def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
+def _check_variable_closure(skill_md: str, tree: ast.AST, *, script: bool = False) -> list[LintIssue]:
     """A2 -- declared variables and the keys the code reads must be the same set."""
-    bindings = parse_input_bindings(skill_md)
-    runtime_names = (
-        [binding.credentials_key or binding.name for binding in bindings if binding.source == "credentials"]
-        if bindings is not None else _declared_names(_section_body(skill_md, INPUTS_SECTION))
-    )
-    declared = _unique(
-        _declared_names(_section_body(skill_md, ENV_SECTION))
-        + _declared_names(_section_body(skill_md, OBO_SECTION))
-        + runtime_names
-        + _declared_names(_section_body(skill_md, IDENTITY_SECTION))
-    )
+    if script:
+        declared = list(_prerequisites(skill_md))
+        declared_in = f"`## {PREREQUISITES_SECTION}`"
+        declared_where = f"no bullet of `## {PREREQUISITES_SECTION}`"
+        reader = "the script"
+    else:
+        bindings = parse_input_bindings(skill_md)
+        runtime_names = (
+            [binding.credentials_key or binding.name for binding in bindings if binding.source == "credentials"]
+            if bindings is not None else _declared_names(_section_body(skill_md, INPUTS_SECTION))
+        )
+        declared = _unique(
+            _declared_names(_section_body(skill_md, ENV_SECTION))
+            + _declared_names(_section_body(skill_md, OBO_SECTION))
+            + runtime_names
+            + _declared_names(_section_body(skill_md, IDENTITY_SECTION))
+        )
+        declared_where = "none of Required Inputs / Environment Variables / OBO Token Scopes"
+        declared_in = "the variable sections"
+        reader = "the sample code"
     used = _env_keys(tree)
     used_folded = {key.upper() for key in used}
     declared_folded = {name.upper() for name in declared}
@@ -742,7 +838,7 @@ def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
                 LintIssue(
                     rule="A2",
                     message=(
-                        f"`{name}` is declared in the variable sections but the sample code "
+                        f"`{name}` is declared in {declared_in} but {reader} "
                         "never reads it from `os.environ`."
                     ),
                     detail=name,
@@ -757,8 +853,8 @@ def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
                 LintIssue(
                     rule="A2",
                     message=(
-                        f"The sample code reads `os.environ` key `{key}`, which is declared in "
-                        "none of Required Inputs / Environment Variables / OBO Token Scopes. "
+                        f"{reader[0].upper()}{reader[1:]} reads `os.environ` key `{key}`, which is "
+                        f"declared in {declared_where}. "
                         "Declare it -- deleting the read is not the fix, it removes the channel "
                         "the value arrives through."
                     ),
@@ -768,9 +864,16 @@ def _check_variable_closure(skill_md: str, tree: ast.AST) -> list[LintIssue]:
     return issues
 
 
-def _check_explicit_raises(tree: ast.AST) -> list[LintIssue]:
-    """A3 -- a non-``SystemExit`` raise exits non-zero, i.e. reads as a deployment error."""
+def _check_explicit_raises(tree: ast.AST, *, script: bool = False) -> list[LintIssue]:
+    """A3 -- a non-``SystemExit`` raise exits non-zero, i.e. reads as a deployment error.
+
+    A script owns its whole control flow, so a raise its own ``except`` catches
+    never reaches the interpreter.
+    """
     names = _raised_names(tree)
+    if script:
+        caught = _caught_names(tree)
+        names = [name for name in names if name not in caught]
     if not names:
         return []
     return [
@@ -820,11 +923,49 @@ def _check_needs_info_documented(skill_md: str, code: str, tree: ast.AST) -> lis
     ]
 
 
-def _runtime_env_reads(skill_md: str, tree: ast.AST) -> list[str]:
+def needs_info_exit_row(skill_md: str) -> bool:
+    """Script form: the exit-code table in ``## Reading the Result`` covers ``needs_info``.
+
+    Either a row of its own (first cell names ``needs_info``) or the exit-0 row
+    naming it among its meanings. Only the row is required, not a list of
+    ``missing=`` codes: a script reports whichever argument it could not use, and
+    the host reads the field from the JSON that follows.
+    """
+    for line in _h2_body(skill_md, RESULT_SECTION).splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.replace("`", "").strip().lower() for cell in line.strip().strip("|").split("|")]
+        if "needs_info" in cells[0]:
+            return True
+        if re.match(r"0\b", cells[0]) and any("needs_info" in cell for cell in cells[1:]):
+            return True
+    return False
+
+
+def _check_needs_info_exit_row(skill_md: str, code: str) -> list[LintIssue]:
+    """A4 (script form) -- a script that prints ``[NEEDS_INFO]`` documents that exit."""
+    if "[NEEDS_INFO]" not in code or needs_info_exit_row(skill_md):
+        return []
+    return [
+        LintIssue(
+            rule="A4",
+            # Topology C2 blocks save on the same check.
+            severity="error",
+            message=(
+                "The script can print `[NEEDS_INFO]`, but the exit-code table in "
+                f"`## {RESULT_SECTION}` has no `status` = `needs_info` row. The caller has no way "
+                "to tell a missing argument from a finished run. Add a row whose first cell is "
+                "`` 0, `status` = `needs_info` ``."
+            ),
+            detail=RESULT_SECTION,
+        )
+    ]
+
+
+def _runtime_env_reads(skill_md: str, tree: ast.AST, *, script: bool = False) -> list[str]:
     """Env keys that carry CALLER data: not deployment config, not the identity."""
     reserved = {VERIFIED_UPN_VAR}
-    reserved.update(name.upper() for name in _declared_names(_section_body(skill_md, ENV_SECTION)))
-    reserved.update(name.upper() for name in _declared_names(_section_body(skill_md, OBO_SECTION)))
+    reserved.update(name.upper() for name in _deployment_names(skill_md, script=script))
     return [key for key in _env_keys(tree) if key.upper() not in reserved]
 
 
@@ -1164,26 +1305,56 @@ def _dedupe_issues(issues: Sequence[LintIssue]) -> list[LintIssue]:
 # ---------------------------------------------------------------------------
 
 
-def _deployment_names(skill_md: str) -> list[str]:
+def _deployment_names(skill_md: str, *, script: bool = False) -> list[str]:
+    if script:
+        return list(_prerequisites(skill_md))
     return _unique(
         _declared_names(_section_body(skill_md, ENV_SECTION))
         + _declared_names(_section_body(skill_md, OBO_SECTION))
     )
 
 
-def _check_deployment_config(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
+def _has_literal_default(node: ast.AST) -> bool:
+    """``os.environ.get(NAME, <literal>)`` / ``os.getenv(NAME, <literal>)``."""
+    if not isinstance(node, ast.Call):
+        return False
+    default = node.args[1] if len(node.args) > 1 else next(
+        (kw.value for kw in node.keywords if kw.arg == "default"), None
+    )
+    return isinstance(default, ast.Constant) and default.value is not None
+
+
+def _check_deployment_config(
+    skill_md: str, tree: ast.AST, code: str, *, script: bool = False
+) -> list[LintIssue]:
     """D1-D3 -- deployment config must fail loudly, never look like a missing caller input.
 
     ``[NEEDS_INFO]`` + exit 0 tells the host "ask the caller and retry". A broken
     deployment or a broken OBO chain is not something a caller can supply, so
     every shape that routes it there makes the host retry forever against an
     environment nobody was told is misconfigured.
+
+    Script form only: a variable ``## Prerequisites`` marks optional may be read
+    with a literal default. An OBO token never may -- its absence is always a
+    broken deployment.
     """
-    names = _deployment_names(skill_md)
+    names = _deployment_names(skill_md, script=script)
     if not names:
         return []
     strict, lenient = _env_reads_for(tree, names)
     issues: list[LintIssue] = []
+
+    if script:
+        optional = {name.upper() for name, is_optional in _prerequisites(skill_md).items() if is_optional}
+        lenient = [
+            node
+            for node in lenient
+            if not (
+                _has_literal_default(node)
+                and node.args[0].value.upper() in optional
+                and not node.args[0].value.upper().endswith("_ACCESS_TOKEN")
+            )
+        ]
 
     lenient_keys = _unique(
         arg.value
@@ -1234,7 +1405,7 @@ def _check_deployment_config(skill_md: str, tree: ast.AST, code: str) -> list[Li
             )
         )
 
-    if issues and DEPLOYMENT_SECTION not in skill_md:
+    if issues and not script and DEPLOYMENT_SECTION not in skill_md:
         issues.append(
             LintIssue(
                 rule="D1",
@@ -1255,18 +1426,26 @@ def _check_deployment_config(skill_md: str, tree: ast.AST, code: str) -> list[Li
 # ---------------------------------------------------------------------------
 
 
-def _check_platform_secrets(skill_md: str, code_override: str | None) -> list[LintIssue]:
+def _check_platform_secrets(
+    skill_md: str, code_override: str | None, script: str | None = None
+) -> list[LintIssue]:
     """D4 -- EAA strips these secrets from the skill's environment."""
-    text = skill_md if code_override is None else code_override
+    if script is not None:
+        text = f"{skill_md}\n{script}"
+        sections: tuple[str, ...] = (PREREQUISITES_SECTION, INPUTS_SECTION)
+    elif code_override is None:
+        text = skill_md
+        sections = (ENV_SECTION, OBO_SECTION, INPUTS_SECTION)
+    else:
+        text = code_override
+        sections = ()
     read = [key for key in _unique(_ENV_READ_TEXT_RE.findall(text or "")) if key in PLATFORM_SECRET_DENYLIST]
-    declared: list[str] = []
-    if code_override is None:
-        declared = [
-            name
-            for section in (ENV_SECTION, OBO_SECTION, INPUTS_SECTION)
-            for name in _declared_names(_section_body(skill_md, section))
-            if name in PLATFORM_SECRET_DENYLIST
-        ]
+    declared = [
+        name
+        for section in sections
+        for name in _declared_names(_section_body(skill_md, section))
+        if name in PLATFORM_SECRET_DENYLIST
+    ]
     return [
         LintIssue(
             rule="D4",
@@ -1341,9 +1520,15 @@ def _passes_default_credential(tree: ast.AST) -> bool:
     )
 
 
-def _check_managed_identity(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
-    """D6 -- a Managed Identity skill must say so in code AND in `## OBO Token Scopes`."""
-    obo_body = _section_body(skill_md, OBO_SECTION)
+def _check_managed_identity(
+    skill_md: str, tree: ast.AST, code: str, *, script: bool = False
+) -> list[LintIssue]:
+    """D6 -- a Managed Identity skill must say so in code AND in `## OBO Token Scopes`.
+
+    Script form states it in `## Prerequisites` instead.
+    """
+    auth_section = PREREQUISITES_SECTION if script else OBO_SECTION
+    obo_body = _section_body(skill_md, auth_section)
     if not (_MI_CREDENTIAL_RE.search(code) or _DEFAULT_CREDENTIAL.lower() in obo_body.lower()):
         return []
     issues: list[LintIssue] = []
@@ -1388,12 +1573,12 @@ def _check_managed_identity(skill_md: str, tree: ast.AST, code: str) -> list[Lin
             rule="D6",
             severity="error",
             message=(
-                f"`## {OBO_SECTION}` must state how the skill authenticates, e.g. "
+                f"`## {auth_section}` must state how the skill authenticates, e.g. "
                 "\"Authenticate with DefaultAzureCredential() (platform Managed Identity).\" "
                 "The runtime writes its own script from the prose, so a sample that is right "
                 "is not enough."
             ),
-            detail=OBO_SECTION,
+            detail=auth_section,
         ))
     return issues
 
@@ -1422,8 +1607,11 @@ def _code_token_scopes(tree: ast.AST) -> list[str]:
     return _unique(literals)
 
 
-def _check_mi_scopes(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]:
+def _check_mi_scopes(
+    skill_md: str, tree: ast.AST, code: str, *, script: bool = False
+) -> list[LintIssue]:
     """D7 -- EAA's MI gate hands out a token only for resources in `metadata.mi_scopes`."""
+    auth_section = PREREQUISITES_SECTION if script else OBO_SECTION
     uses_mi = bool(_MI_CALL_RE.search(code))
     scopes = declared_mi_scopes(skill_md)
     if not uses_mi and not scopes:
@@ -1498,17 +1686,17 @@ def _check_mi_scopes(skill_md: str, tree: ast.AST, code: str) -> list[LintIssue]
                 ),
                 detail=resource,
             ))
-    normalized = _normalize(_section_body(skill_md, OBO_SECTION))
+    normalized = _normalize(_section_body(skill_md, auth_section))
     missing = [r for r in resources if r not in normalized]
     if uses_mi and ("mi_scopes" not in normalized or missing):
         issues.append(LintIssue(
             rule="D7",
             severity="error",
             message=(
-                f"`## {OBO_SECTION}` must name the declared resources, e.g. \"以 `DefaultAzureCredential()`"
+                f"`## {auth_section}` must name the declared resources, e.g. \"以 `DefaultAzureCredential()`"
                 f"（平台 Managed Identity）驗證，已宣告 `metadata.mi_scopes: [{', '.join(resources)}]`\"."
             ),
-            detail=OBO_SECTION,
+            detail=auth_section,
         ))
     return issues
 
@@ -1572,12 +1760,15 @@ def _check_mi_acquisition(tree: ast.AST, code: str) -> list[LintIssue]:
 
 
 def _check_reserved_credentials_keys(
-    skill_md: str, tree: ast.AST, registry_keys: Collection[str]
+    skill_md: str, tree: ast.AST, registry_keys: Collection[str], *, script: bool = False
 ) -> list[LintIssue]:
     """A15 -- EAA drops caller-supplied credentials keys with reserved names."""
     bindings = parse_input_bindings(skill_md)
     if bindings is not None:
         names = [b.credentials_key or b.name for b in bindings if b.source == "credentials"]
+    elif script:
+        # Script arguments arrive as argv; only an undeclared env read is left for credentials.
+        names = _runtime_env_reads(skill_md, tree, script=True)
     else:
         platform = {VERIFIED_UPN_VAR}
         for section in (ENV_SECTION, OBO_SECTION, IDENTITY_SECTION):
@@ -1601,6 +1792,1076 @@ def _check_reserved_credentials_keys(
                 detail=name,
             ))
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Script-form rules (S2-S12)
+# ---------------------------------------------------------------------------
+# S1 (path, extra files, name, scenario) is EAA's lint_skill_package's to judge.
+
+_FLAG_RE = re.compile(r"(?<![\w-])(--[A-Za-z0-9][A-Za-z0-9_-]*)")
+_TOKEN_LIKE_FLAG_RE = re.compile(
+    r"token|secret|passw(?:or)?d|api[-_]?key|bearer|credential", re.IGNORECASE
+)
+_EAA_RUNS_RE = re.compile(r"eaa_runs", re.IGNORECASE)
+_NEEDS_INFO_PREFIX = "[NEEDS_INFO]"
+
+
+def is_needs_info_response(text: str) -> bool:
+    """A route_only response where the runtime asked for missing input instead of preparing code."""
+    return (text or "").lstrip().startswith(_NEEDS_INFO_PREFIX)
+
+_PARSE_ARGS_ATTRS = frozenset(
+    {"parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args"}
+)
+_SYSTEM_EXIT_CATCHERS = frozenset({"SystemExit", "BaseException"})
+_CONTENT_ERROR_RES = tuple(
+    (pattern, re.compile(pattern, re.IGNORECASE)) for pattern in CONTENT_ERROR_HARD_PATTERNS
+)
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+@dataclass
+class _ScriptModel:
+    """What every S rule needs to know about the script's control flow."""
+
+    tree: ast.AST
+    parents: dict[ast.AST, ast.AST]
+    consts: dict[str, int]
+    # Functions whose return value is the exit code: ``sys.exit(main(...))``.
+    exit_funcs: frozenset[str]
+    # Functions (not exit functions) that print the ``[NEEDS_INFO]`` line themselves.
+    needs_info_helpers: frozenset[str]
+    source: str = ""
+
+    def function_of(self, node: ast.AST) -> ast.AST | None:
+        current = self.parents.get(node)
+        while current is not None and not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            current = self.parents.get(current)
+        return current
+
+
+def _script_model(tree: ast.AST, source: str = "") -> _ScriptModel:
+    parents = _parents(tree)
+    exit_funcs = frozenset(
+        expr.func.id
+        for node in ast.walk(tree)
+        for expr in [_exit_expr(node)]
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
+    )
+    helpers = frozenset(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name not in exit_funcs
+        and any(_is_needs_info_print(sub) for sub in _own_nodes(node))
+    )
+    return _ScriptModel(tree, parents, _module_int_constants(tree), exit_funcs, helpers, source)
+
+
+def _own_nodes(scope: ast.AST) -> Iterable[ast.AST]:
+    """Every node of a function body, nested functions and classes excluded."""
+    stack = list(getattr(scope, "body", []))
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(c for c in ast.iter_child_nodes(node) if not isinstance(c, _SCOPE_NODES))
+
+
+def _is_int(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and type(node.value) is int
+
+
+def _module_int_constants(tree: ast.AST) -> dict[str, int]:
+    """Module-level ``NAME = <int>``, including ``A, B = 0, 3``."""
+    consts: dict[str, int] = {}
+    for node in getattr(tree, "body", []):
+        pairs: list[tuple[ast.AST, ast.AST]] = []
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
+            pairs.append((node.target, node.value))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, (ast.Tuple, ast.List))
+                    and isinstance(node.value, (ast.Tuple, ast.List))
+                    and len(target.elts) == len(node.value.elts)
+                ):
+                    pairs.extend(zip(target.elts, node.value.elts))
+                else:
+                    pairs.append((target, node.value))
+        for target, value in pairs:
+            if isinstance(target, ast.Name) and _is_int(value):
+                consts[target.id] = value.value
+    return consts
+
+
+def _is_module_attr(node: ast.AST, module: str, attr: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == attr
+        and isinstance(node.value, ast.Name)
+        and node.value.id == module
+    )
+
+
+_NO_EXIT = object()
+
+
+def _exit_expr(node: ast.AST):
+    """The exit-code expression of ``sys.exit(x)`` / ``raise SystemExit(x)`` (None = no argument).
+
+    Returns ``_NO_EXIT`` when ``node`` is not an exit at all.
+    """
+    if isinstance(node, ast.Raise) and node.exc is not None:
+        exc = node.exc
+        if isinstance(exc, ast.Name) and exc.id == "SystemExit":
+            return None
+        if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name) and exc.func.id == "SystemExit":
+            return exc.args[0] if exc.args else None
+        return _NO_EXIT
+    if isinstance(node, ast.Call):
+        func = node.func
+        if (
+            _is_module_attr(func, "sys", "exit")
+            or _is_module_attr(func, "os", "_exit")
+            or (isinstance(func, ast.Name) and func.id in {"exit", "quit"})
+        ):
+            return node.args[0] if node.args else None
+    return _NO_EXIT
+
+
+def _exit_code(expr: ast.AST | None, consts: Mapping[str, int]) -> int | None:
+    """The literal exit status, or None when it cannot be resolved statically."""
+    if expr is None:
+        return 0
+    if isinstance(expr, ast.Constant):
+        if expr.value is None:
+            return 0
+        if type(expr.value) is int:
+            return expr.value
+        return 1 if isinstance(expr.value, str) else None
+    if isinstance(expr, ast.Name):
+        return consts.get(expr.id)
+    return None
+
+
+def _stmt_exit(stmt: ast.stmt, s: _ScriptModel, func: ast.AST | None) -> tuple[str, int | None] | None:
+    """How ``stmt`` leaves the current path: ``("exit", code)``, ``("return"|"raise"|"jump", None)``."""
+    if isinstance(stmt, ast.Return):
+        if getattr(func, "name", None) in s.exit_funcs:
+            return "exit", _exit_code(stmt.value, s.consts)
+        return "return", None
+    if isinstance(stmt, (ast.Continue, ast.Break)):
+        return "jump", None
+    target = stmt if isinstance(stmt, ast.Raise) else stmt.value if isinstance(stmt, ast.Expr) else None
+    if target is None:
+        return None
+    expr = _exit_expr(target)
+    if expr is _NO_EXIT:
+        return ("raise", None) if isinstance(stmt, ast.Raise) else None
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in s.exit_funcs:
+        return "exit", None
+    return "exit", _exit_code(expr, s.consts)
+
+
+def _block_terminates(block: Sequence[ast.stmt], s: _ScriptModel, func: ast.AST | None) -> bool:
+    return bool(block) and _stmt_exit(block[-1], s, func) is not None
+
+
+def _is_sys_stream(node: ast.AST | None, stream: str) -> bool:
+    # A bare name covers `from sys import stdout` / `stderr`.
+    return _is_module_attr(node, "sys", stream) or (isinstance(node, ast.Name) and node.id == stream)
+
+
+def _is_stdout_print(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "print":
+        target = next((kw.value for kw in node.keywords if kw.arg == "file"), None)
+        return target is None or _is_sys_stream(target, "stdout")
+    return isinstance(func, ast.Attribute) and func.attr == "write" and _is_sys_stream(func.value, "stdout")
+
+
+def _is_stderr_write(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "print":
+        target = next((kw.value for kw in node.keywords if kw.arg == "file"), None)
+        return _is_sys_stream(target, "stderr") if target is not None else False
+    return isinstance(func, ast.Attribute) and func.attr == "write" and _is_sys_stream(func.value, "stderr")
+
+
+def _source_excerpt(s: _ScriptModel, node: ast.AST) -> str:
+    """`` (`first source line`)`` for a message, or ``""`` when the source is unknown."""
+    segment = ast.get_source_segment(s.source, node) if s.source else None
+    if not segment:
+        return ""
+    line = " ".join(segment.split())
+    if len(line) > 100:
+        line = line[:97] + "..."
+    return f" (`{line}`)"
+
+
+def _literal_prefix(node: ast.AST) -> str | None:
+    """The literal text a string expression starts with."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        prefix = []
+        for part in node.values:
+            if not (isinstance(part, ast.Constant) and isinstance(part.value, str)):
+                break
+            prefix.append(part.value)
+        return "".join(prefix)
+    return None
+
+
+def _is_needs_info_print(node: ast.AST) -> bool:
+    if not (_is_stdout_print(node) and node.args):
+        return False
+    prefix = _literal_prefix(node.args[0])
+    return prefix is not None and prefix.lstrip().startswith(_NEEDS_INFO_PREFIX)
+
+
+def _emits_needs_info(stmt: ast.AST, s: _ScriptModel) -> str:
+    """``"print"`` / ``"helper"`` when ``stmt`` prints the marker directly / via a helper, else ``""``."""
+    for node in ast.walk(stmt):
+        if _is_needs_info_print(node):
+            return "print"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in s.needs_info_helpers:
+                return "helper"
+    return ""
+
+
+def _is_json_dumps(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    return _is_module_attr(node.func, "json", "dumps") or (
+        isinstance(node.func, ast.Name) and node.func.id == "dumps"
+    )
+
+
+def _assigned_values(s: _ScriptModel, name: str, near: ast.AST) -> list[ast.AST]:
+    """Values bound to ``name`` in the scope around ``near``."""
+    scope = s.function_of(near) or s.tree
+    values: list[ast.AST] = []
+    for node in _own_nodes(scope):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
+        ):
+            values.append(node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                values.append(node.value)
+    return values
+
+
+def _locate(child: ast.AST, parent: ast.AST) -> tuple[str, list] | None:
+    for field, value in ast.iter_fields(parent):
+        if isinstance(value, list) and any(item is child for item in value):
+            return field, value
+    return None
+
+
+def _index_of(child: ast.AST, block: list) -> int:
+    return next(i for i, item in enumerate(block) if item is child)
+
+
+def _statement_of(node: ast.AST, s: _ScriptModel) -> ast.AST:
+    while not isinstance(node, ast.stmt) and s.parents.get(node) is not None:
+        node = s.parents[node]
+    return node
+
+
+def _stmt_prints(stmt: ast.AST) -> list[ast.Call]:
+    stack = [stmt]
+    found: list[ast.Call] = []
+    while stack:
+        node = stack.pop()
+        if _is_stdout_print(node):
+            found.append(node)
+        stack.extend(c for c in ast.iter_child_nodes(node) if not isinstance(c, _SCOPE_NODES))
+    return found
+
+
+def _prior_prints(stmt: ast.stmt, s: _ScriptModel, func: ast.AST | None) -> list[ast.Call]:
+    """Stdout writes ``stmt`` can make on a path that continues past it.
+
+    A branch that ends in ``return`` / exit / ``raise`` never reaches the next
+    statement, so what it prints cannot precede anything after it.
+    """
+    def block(stmts: Sequence[ast.stmt]) -> list[ast.Call]:
+        if _block_terminates(stmts, s, func):
+            return []
+        return [call for st in stmts for call in _prior_prints(st, s, func)]
+
+    if isinstance(stmt, _SCOPE_NODES):
+        return []
+    if isinstance(stmt, ast.If):
+        return block(stmt.body) + block(stmt.orelse)
+    if isinstance(stmt, ast.Try):
+        found = [call for st in stmt.body for call in _prior_prints(st, s, func)]
+        for handler in stmt.handlers:
+            found += block(handler.body)
+        return found + block(stmt.orelse) + block(stmt.finalbody)
+    if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith)):
+        found = [call for st in stmt.body for call in _prior_prints(st, s, func)]
+        return found + [call for st in getattr(stmt, "orelse", []) for call in _prior_prints(st, s, func)]
+    return _stmt_prints(stmt)
+
+
+def _print_count(stmts: Sequence[ast.stmt], s: _ScriptModel, func: ast.AST | None) -> int:
+    """Most stdout lines one pass through ``stmts`` can write (a loop counts as many)."""
+    total = 0
+    for stmt in stmts:
+        if isinstance(stmt, _SCOPE_NODES):
+            continue
+        if isinstance(stmt, ast.If):
+            total += max(_print_count(stmt.body, s, func), _print_count(stmt.orelse, s, func))
+        elif isinstance(stmt, ast.Try):
+            total += sum(_print_count(b, s, func) for b in (stmt.body, stmt.orelse, stmt.finalbody))
+        elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+            total += 2 * _print_count(stmt.body, s, func) + _print_count(stmt.orelse, s, func)
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            total += _print_count(stmt.body, s, func)
+        else:
+            total += len(_stmt_prints(stmt))
+        if _stmt_exit(stmt, s, func) is not None:
+            break
+    return total
+
+
+def _needs_info_path(
+    marker: ast.Call, s: _ScriptModel
+) -> tuple[list[ast.Call], int, tuple[str, int | None] | None]:
+    """(stdout writes that can precede the marker, lines after it, how the path ends)."""
+    func = s.function_of(marker)
+    child = _statement_of(marker, s)
+    parent = s.parents.get(child)
+    prior: list[ast.Call] = []
+    after = 0
+    ending: tuple[str, int | None] | None = None
+    ended = False
+    while parent is not None:
+        located = _locate(child, parent)
+        if located and isinstance(child, ast.stmt):
+            field, block = located
+            index = _index_of(child, block)
+            for stmt in block[:index]:
+                prior += _prior_prints(stmt, s, func)
+            if not ended:
+                for stmt in block[index + 1 :]:
+                    after += _print_count([stmt], s, func)
+                    ending = _stmt_exit(stmt, s, func)
+                    if ending is not None:
+                        ended = True
+                        break
+            if isinstance(parent, ast.Try) and field != "body":
+                for stmt in parent.body:
+                    prior += _prior_prints(stmt, s, func)
+        elif located and isinstance(parent, ast.Try) and located[0] == "handlers":
+            for stmt in parent.body:
+                prior += _prior_prints(stmt, s, func)
+        if parent is func or isinstance(parent, ast.Module):
+            break
+        child, parent = parent, s.parents.get(parent)
+    return prior, after, ending
+
+
+def _check_script_fence(skill_md: str) -> list[LintIssue]:
+    """S2 -- a script-form SKILL.md carries no Python block for the runtime to rewrite."""
+    if not _PY_FENCE_RE.search(_without_gatekeeper_addendum(skill_md)):
+        return []
+    return [
+        LintIssue(
+            rule="S2",
+            severity="error",
+            message=(
+                "A script-form SKILL.md contains a Python code block. The host runs the bundled "
+                "script with `run_skill_script`; a sample block invites it to write its own code "
+                "instead. Describe the arguments in `## Required Inputs` and remove the block."
+            ),
+            detail="python fence",
+        )
+    ]
+
+
+def _argument_flags(tree: ast.AST) -> list[str]:
+    return _unique(
+        arg.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        for arg in node.args
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value.startswith("--")
+    )
+
+
+def _documented_flags(skill_md: str) -> list[str]:
+    """``--flag`` names in the first column of the ``## Required Inputs`` table."""
+    flags: list[str] = []
+    for line in _h2_body(skill_md, INPUTS_SECTION).splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        first = line.strip().strip("|").split("|")[0]
+        for span in _BACKTICK_TOKEN_RE.findall(first):
+            flags += _FLAG_RE.findall(span)
+    return _unique(flags)
+
+
+def _flagless_input_rows(skill_md: str) -> list[str]:
+    """First cells of ``## Required Inputs`` table rows that name no ``--flag``."""
+    rows: list[str] = []
+    header = True
+    for line in _h2_body(skill_md, INPUTS_SECTION).splitlines():
+        if not line.lstrip().startswith("|"):
+            header = True
+            continue
+        cells = line.strip().strip("|").split("|")
+        if header:
+            header = False
+            continue
+        if all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells):
+            continue
+        first = cells[0]
+        if not any(_FLAG_RE.findall(span) for span in _BACKTICK_TOKEN_RE.findall(first)):
+            rows.append(first.strip())
+    return rows
+
+
+def _check_script_args(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
+    """S3 -- the argument table, every flag the prose names, and ``add_argument`` agree."""
+    accepted = _argument_flags(s.tree)
+    documented = _documented_flags(skill_md)
+    issues: list[LintIssue] = []
+    for cell in _flagless_input_rows(skill_md):
+        issues.append(LintIssue(
+            rule="S3",
+            severity="error",
+            message=(
+                f"The `## {INPUTS_SECTION}` row `{cell}` names no backticked `--flag` in its first "
+                "column. A bundled script receives business inputs only as arguments, so the host "
+                "has no way to pass this one."
+            ),
+            detail=cell,
+        ))
+    for flag in documented:
+        if flag not in accepted:
+            issues.append(LintIssue(
+                rule="S3",
+                severity="error",
+                message=(
+                    f"`## {INPUTS_SECTION}` lists `{flag}`, but the script never declares it with "
+                    "`add_argument`. Every call that passes it fails."
+                ),
+                detail=flag,
+            ))
+    for flag in accepted:
+        if flag not in documented:
+            issues.append(LintIssue(
+                rule="S3",
+                message=(
+                    f"The script accepts `{flag}`, but the first column of the "
+                    f"`## {INPUTS_SECTION}` table does not list it. The host cannot pass an "
+                    "argument it was never told exists."
+                ),
+                detail=flag,
+            ))
+    mentioned = _unique(
+        flag for span in _BACKTICK_TOKEN_RE.findall(skill_md or "") for flag in _FLAG_RE.findall(span)
+    )
+    for flag in mentioned:
+        if flag not in accepted and flag not in documented:
+            issues.append(LintIssue(
+                rule="S3",
+                severity="error",
+                message=(
+                    f"SKILL.md names the argument `{flag}`, which the script does not declare. "
+                    "The host follows the prose, so the call fails."
+                ),
+                detail=flag,
+            ))
+    return issues
+
+
+def _prints_after_marker(s: _ScriptModel) -> set[int]:
+    """ids of the stdout writes that can follow a ``[NEEDS_INFO]`` print on its own path."""
+    found: set[int] = set()
+    for marker in ast.walk(s.tree):
+        if not _is_needs_info_print(marker):
+            continue
+        func = s.function_of(marker)
+        child = _statement_of(marker, s)
+        parent = s.parents.get(child)
+        ended = False
+        while parent is not None and not ended:
+            located = _locate(child, parent)
+            if located and isinstance(child, ast.stmt):
+                block = located[1]
+                for stmt in block[_index_of(child, block) + 1 :]:
+                    found.update(id(call) for call in _stmt_prints(stmt))
+                    if _stmt_exit(stmt, s, func) is not None:
+                        ended = True
+                        break
+            if parent is func or isinstance(parent, ast.Module):
+                break
+            child, parent = parent, s.parents.get(parent)
+    return found
+
+
+def _check_stdout_shape(s: _ScriptModel) -> list[LintIssue]:
+    """S4 -- stdout carries one ``json.dumps`` document, optionally after ``[NEEDS_INFO]``."""
+    issues: list[LintIssue] = []
+    after_marker = _prints_after_marker(s)
+    prints = sorted(
+        (node for node in ast.walk(s.tree) if _is_stdout_print(node)), key=lambda node: node.lineno
+    )
+    for node in prints:
+        if _is_needs_info_print(node):
+            continue
+        if len(node.args) == 1 and (
+            _is_json_dumps(node.args[0])
+            or (
+                isinstance(node.args[0], ast.Name)
+                and any(_is_json_dumps(v) for v in _assigned_values(s, node.args[0].id, node))
+            )
+        ):
+            continue
+        where = f"Line {node.lineno}{_source_excerpt(s, node)}"
+        if id(node) in after_marker:
+            message = (
+                f"{where} prints plain text after the `[NEEDS_INFO]` line. EAA strips the marker "
+                "line and parses the rest of stdout as one JSON document, so text there leaves the "
+                "host an unparsed string instead of the result. Put the explanation into the JSON "
+                "object printed after the marker (for example a `reason` field), or send it to "
+                "`sys.stderr`."
+            )
+        else:
+            message = (
+                f"{where} writes to stdout something other than a `json.dumps(...)` "
+                "document or the `[NEEDS_INFO]` line. stdout is the machine-readable result: the "
+                "host parses it as one JSON document and EAA scans it for error words. Extra text "
+                "stops stdout parsing as JSON, and words in it such as `failed` or `Error:` can make "
+                "a successful run count as a failure. Send diagnostics to `sys.stderr`, which EAA "
+                "keeps for debugging but does not scan on a successful run."
+            )
+        issues.append(LintIssue(rule="S4", severity="error", message=message, detail=f"line {node.lineno}"))
+    return issues
+
+
+def _check_injected_globals(s: _ScriptModel) -> list[LintIssue]:
+    """S13 -- a bundled script never finds host-injected variables in ``globals()``."""
+    return [
+        LintIssue(
+            rule="S13",
+            severity="error",
+            message=(
+                f"Line {node.lineno}{_source_excerpt(s, _statement_of(node, s))} reads values from `globals()`. Inline "
+                "sample code gets its inputs declared into the module by the host; a bundled script "
+                "runs as its own process with only its arguments and environment, so this read never "
+                "finds a value. Take business inputs as `--flag` arguments; deployment settings may "
+                "stay in environment variables."
+            ),
+            detail=f"line {node.lineno}",
+        )
+        for node in ast.walk(s.tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "globals"
+    ]
+
+
+def _documented_exit_codes(skill_md: str) -> set[int]:
+    codes: set[int] = set()
+    for line in _h2_body(skill_md, RESULT_SECTION).splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        match = re.match(r"\s*(\d+)\b", line.strip().strip("|").split("|")[0].replace("`", ""))
+        if match:
+            codes.add(int(match.group(1)))
+    return codes
+
+
+def _check_exit_codes(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
+    """S5 -- the script exits only 0, 1 or 3, and the exit-code table documents each."""
+    sites: list[tuple[ast.AST, int | None]] = []
+    for node in ast.walk(s.tree):
+        expr = _exit_expr(node)
+        if expr is _NO_EXIT:
+            continue
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in s.exit_funcs:
+            continue
+        sites.append((node, _exit_code(expr, s.consts)))
+    for node in ast.walk(s.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in s.exit_funcs:
+            sites += [
+                (ret, _exit_code(ret.value, s.consts))
+                for ret in _own_nodes(node)
+                if isinstance(ret, ast.Return)
+            ]
+    documented = _documented_exit_codes(skill_md)
+    issues: list[LintIssue] = []
+    reported: set[object] = set()
+    for node, code in sorted(sites, key=lambda item: getattr(item[0], "lineno", 0)):
+        line = getattr(node, "lineno", 0)
+        if code is None:
+            issues.append(LintIssue(
+                rule="S5",
+                message=(
+                    f"The exit status at line {line} cannot be resolved to a literal. Use an "
+                    "integer or a module-level integer constant so the exit contract can be checked."
+                ),
+                detail=f"line {line}",
+            ))
+        elif code not in SCRIPT_EXIT_CODES and code not in reported:
+            reported.add(code)
+            issues.append(LintIssue(
+                rule="S5",
+                severity="error",
+                message=(
+                    f"The script can exit with status {code} (line {line}). A script skill exits "
+                    "0 (success, `[NEEDS_INFO]` or a business rejection), 1 (configuration) or 3 "
+                    "(downstream failure); 2 is what argparse uses and EAA reports it as a failure."
+                ),
+                detail=str(code),
+            ))
+        elif code in SCRIPT_EXIT_CODES and code not in documented and ("doc", code) not in reported:
+            reported.add(("doc", code))
+            issues.append(LintIssue(
+                rule="S5",
+                message=(
+                    f"The script can exit with status {code}, but the exit-code table in "
+                    f"`## {RESULT_SECTION}` has no row for it."
+                ),
+                detail=str(code),
+            ))
+    return issues
+
+
+def _check_needs_info_output(s: _ScriptModel) -> list[LintIssue]:
+    """S6 -- ``[NEEDS_INFO]`` is the first stdout line, at most one JSON follows, exit 0."""
+    issues: list[LintIssue] = []
+    for node in ast.walk(s.tree):
+        if not _is_needs_info_print(node):
+            continue
+        prior, after, ending = _needs_info_path(node, s)
+        line = node.lineno
+        if prior:
+            issues.append(LintIssue(
+                rule="S6",
+                severity="error",
+                message=(
+                    f"`[NEEDS_INFO]` at line {line} is not the first stdout line: line "
+                    f"{prior[0].lineno} can print before it on the same path. The host reads the "
+                    "marker from the first line."
+                ),
+                detail=f"line {line}",
+            ))
+        if after > 1:
+            issues.append(LintIssue(
+                rule="S6",
+                severity="error",
+                message=(
+                    f"After `[NEEDS_INFO]` at line {line} the script can print {after} more "
+                    "stdout lines; at most one JSON object may follow the marker."
+                ),
+                detail=f"line {line}",
+            ))
+        if ending is not None:
+            kind, code = ending
+            if (kind == "exit" and code not in (0, None)) or kind == "raise":
+                status = f"exits {code}" if kind == "exit" else "raises, which exits 1"
+                issues.append(LintIssue(
+                    rule="S6",
+                    severity="error",
+                    message=(
+                        f"The path that prints `[NEEDS_INFO]` at line {line} {status}. A "
+                        "`[NEEDS_INFO]` run must exit 0, or EAA reports a failure instead of "
+                        "asking for the missing input."
+                    ),
+                    detail=f"line {line}",
+                ))
+    return issues
+
+
+def _check_script_tokens(s: _ScriptModel) -> list[LintIssue]:
+    """S7 -- an OBO token comes from the environment by index, never from an argument."""
+    issues: list[LintIssue] = []
+    for node in ast.walk(s.tree):
+        if not (isinstance(node, ast.Call) and node.args and _is_env_read_call(node)):
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            if first.value.upper().endswith("_ACCESS_TOKEN"):
+                issues.append(LintIssue(
+                    rule="S7",
+                    severity="error",
+                    message=(
+                        f"`{first.value}` is read with `.get()` / `os.getenv()`. Read OBO tokens "
+                        f"with `os.environ[\"{first.value}\"]` so a missing token exits 1 as a "
+                        "configuration error instead of reaching Graph as an empty string."
+                    ),
+                    detail=first.value,
+                ))
+    for flag in _argument_flags(s.tree):
+        if _TOKEN_LIKE_FLAG_RE.search(flag):
+            issues.append(LintIssue(
+                rule="S7",
+                severity="error",
+                message=(
+                    f"The script accepts `{flag}`. Arguments are written by the host model; a "
+                    "token or secret must come from the platform environment, never from argv."
+                ),
+                detail=flag,
+            ))
+    return issues
+
+
+def _check_eaa_runs_mention(skill_md: str) -> list[LintIssue]:
+    """S8 -- the run directory is the platform's business, not the host's."""
+    if not _EAA_RUNS_RE.search(_without_gatekeeper_addendum(skill_md)):
+        return []
+    return [
+        LintIssue(
+            rule="S8",
+            message=(
+                "SKILL.md mentions `eaa_runs`. Where the platform runs the script is not part of "
+                "the skill's contract; the host only needs the arguments and the result."
+            ),
+            detail="eaa_runs",
+        )
+    ]
+
+
+def _check_output_keys_documented(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
+    """S9 -- keys of a dict literal sent through ``json.dumps`` appear in ``## Reading the Result``."""
+    documented = _h2_body(skill_md, RESULT_SECTION)
+    keys: list[str] = []
+    for node in ast.walk(s.tree):
+        if not (_is_json_dumps(node) and node.args):
+            continue
+        arg = node.args[0]
+        values = [arg] if isinstance(arg, ast.Dict) else (
+            _assigned_values(s, arg.id, node) if isinstance(arg, ast.Name) else []
+        )
+        for value in values:
+            if isinstance(value, ast.Dict):
+                keys += [
+                    k.value for k in value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                ]
+    return [
+        LintIssue(
+            rule="S9",
+            message=(
+                f"The script outputs the key `{key}`, but `## {RESULT_SECTION}` never names it. "
+                "The host can only act on fields it was told about."
+            ),
+            detail=key,
+        )
+        for key in _unique(keys)
+        if f"`{key}`" not in documented
+    ]
+
+
+def _system_exit_handler(node: ast.AST, s: _ScriptModel) -> ast.ExceptHandler | None:
+    child, parent = node, s.parents.get(node)
+    while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(parent, ast.Try) and any(stmt is child for stmt in parent.body):
+            for handler in parent.handlers:
+                if handler.type is None or set(_handler_names(handler)) & _SYSTEM_EXIT_CATCHERS:
+                    return handler
+        child, parent = parent, s.parents.get(parent)
+    return None
+
+
+def _handler_asks(handler: ast.ExceptHandler, s: _ScriptModel) -> bool:
+    """The handler's path prints ``[NEEDS_INFO]`` and ends in exit 0.
+
+    A handler that does not end its own path falls through to the statements
+    after its ``try``, which is where the fixture's ``except NeedsInfo`` prints.
+    """
+    func = s.function_of(handler)
+    stmts = list(handler.body)
+    if not _block_terminates(stmts, s, func):
+        owner = s.parents.get(handler)
+        holder = s.parents.get(owner) if owner is not None else None
+        located = _locate(owner, holder) if holder is not None else None
+        if located:
+            block = located[1]
+            stmts += block[_index_of(owner, block) + 1 :]
+    emitted = False
+    for stmt in stmts:
+        how = _emits_needs_info(stmt, s)
+        if how == "helper":
+            return True
+        emitted = emitted or how == "print"
+        ending = _stmt_exit(stmt, s, func)
+        if ending is not None:
+            kind, code = ending
+            return emitted and not (kind == "raise" or (kind == "exit" and code not in (0, None)))
+    return emitted
+
+
+def _check_parse_args_guard(s: _ScriptModel) -> list[LintIssue]:
+    """S10 -- an argparse failure becomes ``[NEEDS_INFO]`` + exit 0, never argparse's exit 2."""
+    issues: list[LintIssue] = []
+    for node in ast.walk(s.tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _PARSE_ARGS_ATTRS
+        ):
+            continue
+        handler = _system_exit_handler(node, s)
+        if handler is not None:
+            if _handler_asks(handler, s):
+                continue
+            raised = [
+                exc.func.id if isinstance(exc, ast.Call) else exc.id
+                for sub in _own_nodes(handler)
+                if isinstance(sub, ast.Raise)
+                for exc in [sub.exc]
+                if isinstance(exc, ast.Name) or (isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name))
+            ]
+            if any(
+                _handler_asks(other, s)
+                for other in ast.walk(s.tree)
+                if isinstance(other, ast.ExceptHandler)
+                and other is not handler
+                and set(_handler_names(other)) & (set(raised) - {"SystemExit"})
+            ):
+                continue
+        where = (
+            f"the `except SystemExit` at line {handler.lineno} neither prints `[NEEDS_INFO]` and "
+            "exits 0 nor raises an exception whose handler does"
+            if handler is not None
+            else "it is not inside `try` / `except SystemExit`"
+        )
+        issues.append(LintIssue(
+            rule="S10",
+            severity="error",
+            message=(
+                f"`{node.func.attr}` at line {node.lineno}: {where}. argparse exits 2 on a bad "
+                "argument, which EAA reports as a failed run; turn it into `[NEEDS_INFO]` + exit 0 "
+                "so the host can fix the call."
+            ),
+            detail=f"line {node.lineno}",
+        ))
+    return issues
+
+
+def _check_help_disabled(s: _ScriptModel) -> list[LintIssue]:
+    """S10b -- ``--help`` prints usage to stdout, which must carry JSON only."""
+    issues: list[LintIssue] = []
+    for node in ast.walk(s.tree):
+        if not (isinstance(node, ast.Call) and _call_name(node) == "ArgumentParser"):
+            continue
+        if any(
+            kw.arg == "add_help" and isinstance(kw.value, ast.Constant) and kw.value.value is False
+            for kw in node.keywords
+        ):
+            continue
+        issues.append(LintIssue(
+            rule="S10b",
+            severity="error",
+            message=(
+                f"`ArgumentParser` at line {node.lineno} keeps `--help`, which prints usage text to "
+                "stdout and exits 0. Pass `add_help=False`."
+            ),
+            detail=f"line {node.lineno}",
+        ))
+    return issues
+
+
+def _render_json(node: ast.AST) -> str:
+    """Approximately what ``json.dumps`` writes for a literal; unknown values become null."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (str, int, float, bool)) or node.value is None:
+            return json.dumps(node.value, ensure_ascii=False)
+        return "null"
+    if isinstance(node, ast.JoinedStr):
+        return json.dumps(_render_text(node), ensure_ascii=False)
+    if isinstance(node, ast.Dict):
+        entries = [
+            f"{json.dumps(str(k.value), ensure_ascii=False)}: {_render_json(v)}"
+            for k, v in zip(node.keys, node.values)
+            if isinstance(k, ast.Constant)
+        ]
+        return "{" + ", ".join(entries) + "}"
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return "[" + ", ".join(_render_json(e) for e in node.elts) + "]"
+    return "null"
+
+
+def _render_text(node: ast.JoinedStr) -> str:
+    return "".join(
+        part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str)
+    )
+
+
+def _exit_zero_texts(s: _ScriptModel) -> list[tuple[int, str]]:
+    """Literal text the script can print on a path that does not end in a non-zero exit."""
+    excluded: set[int] = set()
+    for node in ast.walk(s.tree):
+        func = s.function_of(node)
+        blocks: list[Sequence[ast.stmt]] = []
+        if isinstance(node, ast.If):
+            blocks = [node.body, node.orelse]
+        elif isinstance(node, ast.ExceptHandler):
+            blocks = [node.body]
+        for block in blocks:
+            ending = _stmt_exit(block[-1], s, func) if block else None
+            if ending and ending[0] == "exit" and ending[1] not in (0, None):
+                excluded.update(id(sub) for stmt in block for sub in ast.walk(stmt))
+        if _is_stderr_write(node) or (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+        ):
+            excluded.update(id(sub) for sub in ast.walk(node))
+
+    texts: list[tuple[int, str]] = []
+    for node in ast.walk(s.tree):
+        if id(node) in excluded:
+            continue
+        parent = s.parents.get(node)
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Dict) and not isinstance(parent, ast.Dict):
+            texts.append((line, _render_json(node)))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    key = json.dumps(target.slice.value, ensure_ascii=False)
+                    texts.append((line, "{" + f"{key}: {_render_json(node.value)}" + "}"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict":
+            entries = [
+                f"{json.dumps(kw.arg)}: {_render_json(kw.value)}" for kw in node.keywords if kw.arg
+            ]
+            texts.append((line, "{" + ", ".join(entries) + "}"))
+        elif isinstance(node, ast.JoinedStr):
+            texts.append((line, _render_text(node)))
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and not isinstance(parent, (ast.JoinedStr, ast.FormattedValue))
+        ):
+            texts.append((line, node.value))
+    return texts
+
+
+def _check_exit_zero_content(s: _ScriptModel) -> list[LintIssue]:
+    """S11 -- exit-0 output must not trip EAA's HARD content-error patterns."""
+    issues: list[LintIssue] = []
+    seen: set[tuple[str, int]] = set()
+    for line, text in _exit_zero_texts(s):
+        for pattern, compiled in _CONTENT_ERROR_RES:
+            match = compiled.search(text)
+            if not match or (pattern, line) in seen:
+                continue
+            seen.add((pattern, line))
+            issues.append(LintIssue(
+                rule="S11",
+                severity="error",
+                message=(
+                    f"Line {line} can put `{match.group(0)}` into the output of an exit-0 run. EAA "
+                    f"scans that output with `{pattern}` and turns a hit into a failed run. Rename "
+                    "the key or reword the text; real failures exit 3."
+                ),
+                detail=f"line {line}: {pattern}",
+            ))
+    return issues
+
+
+def _check_inline_template(s: _ScriptModel) -> list[LintIssue]:
+    """S12 -- a literal ``request_inputs`` dict is the inline template the host rewrites per query."""
+    for node in ast.walk(s.tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if isinstance(node.value, ast.Dict) and any(
+            isinstance(t, ast.Name) and t.id == "request_inputs" for t in targets
+        ):
+            return [LintIssue(
+                rule="S12",
+                severity="error",
+                message=(
+                    f"Line {node.lineno} assigns a literal `request_inputs` dict. That is inline "
+                    "sample code: a template the host rewrites with each request's values. A "
+                    "bundled script runs unchanged, so these values would apply to every run "
+                    "whatever the user asked; script form takes business inputs as `--flag` arguments."
+                ),
+                detail=f"line {node.lineno}",
+            )]
+    return []
+
+
+def _lint_script(skill_md: str, tree: ast.AST, source: str = "") -> list[LintIssue]:
+    s = _script_model(tree, source)
+    return (
+        _check_script_fence(skill_md)
+        + _check_script_args(skill_md, s)
+        + _check_stdout_shape(s)
+        + _check_injected_globals(s)
+        + _check_exit_codes(skill_md, s)
+        + _check_needs_info_output(s)
+        + _check_script_tokens(s)
+        + _check_eaa_runs_mention(skill_md)
+        + _check_output_keys_documented(skill_md, s)
+        + _check_parse_args_guard(s)
+        + _check_help_disabled(s)
+        + _check_exit_zero_content(s)
+        + _check_inline_template(s)
+    )
+
+
+def script_only_errors(script: str) -> list[LintIssue]:
+    """Error-level S rules decidable without a SKILL.md (S4, S5 code set, S6, S7, S10, S10b, S11, S12, S13).
+
+    Raises ``SyntaxError`` when the script does not parse.
+    """
+    s = _script_model(ast.parse(script), script)
+    issues = (
+        _check_stdout_shape(s)
+        + _check_injected_globals(s)
+        + _check_exit_codes("", s)
+        + _check_needs_info_output(s)
+        + _check_script_tokens(s)
+        + _check_parse_args_guard(s)
+        + _check_help_disabled(s)
+        + _check_exit_zero_content(s)
+        + _check_inline_template(s)
+    )
+    return [issue for issue in issues if issue.severity == "error"]
+
+
+def script_argument_flags(script: str) -> list[str]:
+    """The ``--flag`` names the script declares with ``add_argument`` (the S3 accepted set)."""
+    return _argument_flags(ast.parse(script))
+
+
+def script_argument_names(script: str) -> set[str]:
+    """Upper-cased ``dest`` of every ``add_argument`` (``--target-tables`` -> ``TARGET_TABLES``)."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(script)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
+            continue
+        dest = next((kw.value for kw in node.keywords if kw.arg == "dest"), None)
+        if isinstance(dest, ast.Constant) and isinstance(dest.value, str):
+            names.add(dest.value.upper())
+            continue
+        flags = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        long_flag = next((f for f in flags if f.startswith("--")), None)
+        chosen = long_flag or (flags[0] if flags else None)
+        if chosen:
+            names.add(chosen.lstrip("-").replace("-", "_").upper())
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -1919,6 +3180,7 @@ def lint_skill(
     host_capabilities: Sequence[str] = (),
     code_override: str | None = None,
     obo_registry_keys: Collection[str] | None = None,
+    script: str | None = None,
 ) -> list[LintIssue]:
     """Return every content issue in the artifact. Only A1 is an error.
 
@@ -1927,17 +3189,24 @@ def lint_skill(
     prose, so it is a different artifact from the sample code and nothing else
     ever looked at it; the declarations it is reconciled against still come from
     ``skill_md``.
+
+    ``script`` marks a script-form skill: the bundled ``scripts/<name>.py`` is the
+    code, declarations come from ``## Prerequisites`` / ``## Required Inputs``,
+    and the S rules apply. It takes precedence over ``code_override``.
     """
     if not (skill_md or "").strip():
         return []
+    if kind is SkillKind.SCENARIO:
+        script = None
+    platform_code = script if script is not None else code_override
     platform = (
-        _check_platform_secrets(skill_md, code_override)
-        + _check_credential_placeholder(skill_md, code_override)
-        + _check_execution_environment(skill_md, code_override)
+        _check_platform_secrets(skill_md, platform_code, script)
+        + _check_credential_placeholder(skill_md, platform_code)
+        + _check_execution_environment(skill_md, platform_code)
     )
     if kind is SkillKind.SCENARIO:
         return _lint_scenario(
             skill_md, child_full_md=child_full_md, host_capabilities=host_capabilities
         ) + platform
     registry = frozenset(obo_registry_keys) if obo_registry_keys else STATIC_OBO_REGISTRY_KEYS
-    return _lint_capability(skill_md, code_override, registry) + platform
+    return _lint_capability(skill_md, code_override, registry, script) + platform

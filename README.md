@@ -2,10 +2,25 @@
 
 # Foundry Skill Generator Using Chat
 
-對話式 Skill 產生器（FastAPI + 原生 JavaScript），最終產出物為一份 `SKILL.md`。
+對話式 Skill 產生器（FastAPI + 原生 JavaScript），最終產出物為一份 `SKILL.md`（script 型另附一支 `scripts/<name>.py`）。
 本專案為**本機執行**的解決方案，串接 Microsoft Foundry、Microsoft Entra、Azure SQL 與 Azure Blob。
 
 ## 重大變更 (What's New) 2026-10
+
+### Script 型 skill
+
+使用者附上**唯一一份** Python `code` 素材、確認它涵蓋所有操作，且目標 EAA 已開啟 script 執行時，產出物改為 `SKILL.md` 加上**原樣**出貨的 `scripts/<name>.py`；其他情況維持原本的 inline 形式。
+
+> ⚠️ **使用前提**：目標 EAA 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`，且 `lint_skill_package` 的 ruleset ≥ 1.1；否則只會產出 inline 型。
+
+| 項目 | 變更 | 詳細說明 |
+| --- | --- | --- |
+| **產出形式** | 依素材與 EAA 旗標自動判斷，進 DRAFT 後鎖定，不支援 inline ↔ script 互轉。Generator 不修改 script；要換 script，請更換 `code` 素材。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
+| **檢查** | script 須通過專屬 lint（S 系列：stdout 只輸出 JSON、`[NEEDS_INFO]` 以 exit 0 結束等），並與 `SKILL.md` 一起送 EAA lint。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
+| **儲存** | script 型每次儲存都重新確認 EAA 旗標。**所有 skill** 覆寫時都會比對 Blob 版本，載入後被改過（例如 Gatekeeper Addendum）就回 409，不會覆蓋。 | [02-setup.md](docs/02-setup.md#script-型-skill-的-eaa-旗標)、[03-architecture.md](docs/03-architecture.md) |
+| **介面** | Materials、Checklist（Output form）、Files 分頁（`SKILL.md \| scripts/<name>.py`）與 Skill 清單（`[script]`）顯示目前形式與未滿足的條件。 | [01-overview.md](docs/01-overview.md) |
+
+### 安全性調整
 
 配合 EAA 上線的安全性調整：`/run` 驗證 Bearer token、skill 執行環境過濾、腳本改以隔離 uid 執行，以及 Managed Identity 閘門（S3）。
 

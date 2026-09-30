@@ -1,0 +1,209 @@
+{
+ "expense-report-draft-v1": {
+  "kind": "capability",
+  "lint": [
+   {
+    "rule": "A9",
+    "severity": "warning",
+    "message": "`main` takes `payload`. The host executes this block verbatim as a script, so nothing ever calls `main` with an argument: a parameter writes an unconfirmed host mechanism into the artifact as a settled contract, and the value it names can never arrive. Caller data reaches the skill as a serialized JSON string in an environment variable -- read it inside `main` via `os.environ`.",
+    "detail": "payload"
+   },
+   {
+    "rule": "A10",
+    "severity": "warning",
+    "message": "The sample code consumes caller fields (`invoices`, `applicant_alias`, `itemCode`, `amount`) but never reads a runtime input from the environment, so nothing the caller sends can reach it. The host passes caller data as a serialized JSON string in a `credentials` entry, which arrives as an environment variable: declare that variable in `## Required Inputs` and read it with `os.environ`.",
+    "detail": "invoices, applicant_alias, itemCode, amount"
+   }
+  ],
+  "topology": []
+ },
+ "hr-leave-request-v2": {
+  "kind": "capability",
+  "lint": [
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`leave_type` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "leave_type"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`reason` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "reason"
+   }
+  ],
+  "topology": []
+ },
+ "hr-leave-requests": {
+  "kind": "capability",
+  "lint": [
+   {
+    "rule": "A3",
+    "severity": "warning",
+    "message": "The sample code raises `ValueError`. A raise that is not `SystemExit` exits non-zero, which the host reads as a DEPLOYMENT failure. A missing caller input belongs in `[NEEDS_INFO]` + `SystemExit(0)`, and a business rejection belongs in the error taxonomy; only `aca_env` / `obo_token` absence may exit non-zero.",
+    "detail": "ValueError"
+   },
+   {
+    "rule": "A4",
+    "severity": "warning",
+    "message": "The sample code can print `[NEEDS_INFO] missing=CALENDAR_EVENTS`, but `CALENDAR_EVENTS` appears in neither `## Required Inputs` nor a section dedicated to the `[NEEDS_INFO]` contract. The caller has no way to learn what to send.",
+    "detail": "CALENDAR_EVENTS"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`leave_type` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "leave_type"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`start_date` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "start_date"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`end_date` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "end_date"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "The sample code puts `reason` into a query, but `## Required Inputs` never names it. The caller has no way to learn the field exists, let alone which values it accepts.",
+    "detail": "reason"
+   },
+   {
+    "rule": "A5",
+    "severity": "warning",
+    "message": "A SQL statement raises `THROW` / `RAISERROR` but the executing call is not inside a `try`. The driver exception escapes and turns a business condition into a non-zero exit the host reports as a broken skill.",
+    "detail": ""
+   }
+  ],
+  "topology": [
+   {
+    "rule": "C2",
+    "severity": "error",
+    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill points at that section by name, so it must exist on its own."
+   }
+  ]
+ },
+ "hr-leave-system": {
+  "kind": "capability",
+  "lint": [
+   {
+    "rule": "A2",
+    "severity": "warning",
+    "message": "The sample code reads `os.environ` key `hr_leave_json`, which is declared in none of Required Inputs / Environment Variables / OBO Token Scopes. Declare it -- deleting the read is not the fix, it removes the channel the value arrives through.",
+    "detail": "hr_leave_json"
+   },
+   {
+    "rule": "A2",
+    "severity": "warning",
+    "message": "The sample code reads `os.environ` key `HR_LEAVE_JSON`, which is declared in none of Required Inputs / Environment Variables / OBO Token Scopes. Declare it -- deleting the read is not the fix, it removes the channel the value arrives through.",
+    "detail": "HR_LEAVE_JSON"
+   },
+   {
+    "rule": "A3",
+    "severity": "warning",
+    "message": "The sample code raises `ValueError`. A raise that is not `SystemExit` exits non-zero, which the host reads as a DEPLOYMENT failure. A missing caller input belongs in `[NEEDS_INFO]` + `SystemExit(0)`, and a business rejection belongs in the error taxonomy; only `aca_env` / `obo_token` absence may exit non-zero.",
+    "detail": "ValueError"
+   },
+   {
+    "rule": "A8",
+    "severity": "warning",
+    "message": "The contract limits `leave_type` to `annual`, `welfare`, `sick`, `personal`, but the code never checks the value before querying with it. An illegal value has to be a `[NEEDS_INFO]` line; letting it through returns an empty result the skill then reports as a business condition.",
+    "detail": "leave_type"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`start_date` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "start_date"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`end_date` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "end_date"
+   },
+   {
+    "rule": "A7",
+    "severity": "warning",
+    "message": "`reason` reaches a query with a contract that states its TYPE but not its VALUE DOMAIN. Give the legal values verbatim as they go on the wire, or the format/unit/casing, or say the field is free text. A caller working from the user's own words will send those words.",
+    "detail": "reason"
+   }
+  ],
+  "topology": [
+   {
+    "rule": "C2",
+    "severity": "error",
+    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill points at that section by name, so it must exist on its own."
+   }
+  ]
+ },
+ "leave-request-orchestration": {
+  "kind": "scenario",
+  "lint": [],
+  "topology": []
+ },
+ "leave-workflow": {
+  "kind": "scenario",
+  "lint": [],
+  "topology": []
+ },
+ "ms-graph-room-finder": {
+  "kind": "capability",
+  "lint": [],
+  "topology": []
+ },
+ "ms-graph-room-finder+code_override": {
+  "kind": "capability",
+  "lint": [
+   {
+    "rule": "A2",
+    "severity": "warning",
+    "message": "`CLS` is declared in the variable sections but the sample code never reads it from `os.environ`.",
+    "detail": "CLS"
+   },
+   {
+    "rule": "A2",
+    "severity": "warning",
+    "message": "The sample code reads `os.environ` key `GRAPH_ACCESS_TOKEN`, which is declared in none of Required Inputs / Environment Variables / OBO Token Scopes. Declare it -- deleting the read is not the fix, it removes the channel the value arrives through.",
+    "detail": "GRAPH_ACCESS_TOKEN"
+   },
+   {
+    "rule": "A3",
+    "severity": "warning",
+    "message": "The sample code raises `GraphError`, `NeedsInfo`. A raise that is not `SystemExit` exits non-zero, which the host reads as a DEPLOYMENT failure. A missing caller input belongs in `[NEEDS_INFO]` + `SystemExit(0)`, and a business rejection belongs in the error taxonomy; only `aca_env` / `obo_token` absence may exit non-zero.",
+    "detail": "GraphError, NeedsInfo"
+   },
+   {
+    "rule": "A9",
+    "severity": "warning",
+    "message": "`main` takes `argv`. The host executes this block verbatim as a script, so nothing ever calls `main` with an argument: a parameter writes an unconfirmed host mechanism into the artifact as a settled contract, and the value it names can never arrive. Caller data reaches the skill as a serialized JSON string in an environment variable -- read it inside `main` via `os.environ`.",
+    "detail": "argv"
+   },
+   {
+    "rule": "A11",
+    "severity": "warning",
+    "message": "The sample code reads the runtime input `GRAPH_ACCESS_TOKEN` from the environment but can never print `[NEEDS_INFO] missing=GRAPH_ACCESS_TOKEN`. When the host omits it -- most often by putting the payload in the free-text `request` parameter instead of a `credentials` entry -- the caller gets no readable signal at all: the script exits silently or crashes on a value that was never there.",
+    "detail": "GRAPH_ACCESS_TOKEN"
+   },
+   {
+    "rule": "A11",
+    "severity": "warning",
+    "message": "The sample code reads the runtime input `DEFAULT_BUILDING` from the environment but can never print `[NEEDS_INFO] missing=DEFAULT_BUILDING`. When the host omits it -- most often by putting the payload in the free-text `request` parameter instead of a `credentials` entry -- the caller gets no readable signal at all: the script exits silently or crashes on a value that was never there.",
+    "detail": "DEFAULT_BUILDING"
+   },
+   {
+    "rule": "A15",
+    "severity": "error",
+    "message": "The caller is asked to send `GRAPH_ACCESS_TOKEN` in `credentials`, but EAA discards that key: `GRAPH_ACCESS_TOKEN` is an OBO_SCOPE_REGISTRY key, injected by the platform's OBO exchange. The value never reaches the script. Rename the input.",
+    "detail": "GRAPH_ACCESS_TOKEN"
+   }
+  ],
+  "topology": []
+ }
+}

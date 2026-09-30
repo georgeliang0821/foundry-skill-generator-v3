@@ -1,0 +1,1 @@
+The lookup failed; EAA did not say no. Tell the user once that the script form cannot be decided until the ACA environment is read, that it is read again when PREPARE ends, and that they can refresh it now. Do not promise either form.

@@ -82,6 +82,10 @@ class Material(BaseModel):
     kind: MaterialKind = MaterialKind.TEXT
     content: str
     created_at: str = Field(default_factory=utc_now_iso)
+    # "agent_patch" until the user edits the material again.
+    origin: Literal["user", "agent_patch"] = "user"
+    # The user's own text before the first agent patch.
+    user_content: str | None = None
 
 
 class MaterialUpsertRequest(BaseModel):
@@ -99,6 +103,8 @@ class ChatMessage(BaseModel):
 class SkillDraft(BaseModel):
     skill_md: str = ""
     version_hash: str = ""
+    # Script-type skills only: the user's code material, shipped verbatim as scripts/<name>.py.
+    script: str | None = None
 
 
 class ChecklistItem(BaseModel):
@@ -447,6 +453,8 @@ class PrepareBrief(BaseModel):
     variables: list[SkillVariable] = Field(default_factory=list)
     # Scenario skills only: confirmed in delegation_ok, one entry per child.
     delegation: list[Delegation] = Field(default_factory=list)
+    # Agent and user confirmed (with variables_ok) that the one code material covers every operation.
+    script_covers_operations: bool = False
     revisit: bool = False
     last_updated: int | str | None = None
 
@@ -505,6 +513,8 @@ class NeighborEdit(BaseModel):
     selected_version_id: str = ""
     saved_version_id: str = ""  # last version synced to Blob (empty = never saved)
     status: Literal["draft", "saved"] = "draft"
+    # Blob version the next save must still match, so a concurrent Gatekeeper write is not lost.
+    remote_version_hash: str = ""
 
 
 class PatchRecord(BaseModel):
@@ -546,6 +556,9 @@ class TestResult(BaseModel):
     # the file ships. Computed once at run time: recomputing it later would
     # report the current SKILL.md against a script an older one produced.
     prepared_code_lint: list[dict[str, Any]] = Field(default_factory=list)
+    # Scripts the router asked to run (runtime SKILL_SCRIPTS_ENABLED only), each with
+    # `valid` and `problems` from checking its args against the bundled script.
+    requested_scripts: list[dict[str, Any]] = Field(default_factory=list)
     request_sent: str = ""
     tokens: int | None = None
     duration_ms: int | None = None
@@ -608,6 +621,10 @@ class Session(BaseModel):
     owner_upn: str = ""
     materials: list[Material] = Field(default_factory=list)
     current_skill: SkillDraft = Field(default_factory=SkillDraft)
+    # None until locked: at PREPARE -> DRAFT for NEW, from Blob for MODIFY. Never switches after.
+    skill_form: Literal["inline", "script"] | None = None
+    # Refused propose_material_patch calls since the code material last changed.
+    material_patch_rejections: int = 0
     verify_checklist: VerifyChecklist = Field(default_factory=VerifyChecklist)
     prepare_brief: PrepareBrief = Field(default_factory=PrepareBrief)
     iteration_reflections: list[IterationReflection] = Field(default_factory=list)
@@ -797,6 +814,8 @@ class VariablesUpdateRequest(BaseModel):
     """User-driven edit of the PREPARE skill variables (no agent message)."""
 
     variables: list[SkillVariable] = Field(default_factory=list)
+    # None leaves the confirmation untouched.
+    script_covers_operations: bool | None = None
 
 
 class SkillIndexEntry(BaseModel):
@@ -805,6 +824,7 @@ class SkillIndexEntry(BaseModel):
     version_hash: str = ""
     blob_store_id: str = ""
     skill_kind: SkillKind = SkillKind.CAPABILITY
+    has_script: bool = False
 
 
 class SkillFiles(BaseModel):
@@ -812,6 +832,8 @@ class SkillFiles(BaseModel):
     skill_md: str = ""
     version_hash: str = ""
     blob_path: str = ""
+    # None on save leaves any stored script untouched.
+    script: str | None = None
 
 
 class ApplyPatchRequest(BaseModel):

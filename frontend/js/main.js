@@ -9,6 +9,7 @@ import {
   fetchFeatures,
   fetchInspect,
   fetchSessionTopology,
+  fetchSkillForm,
   getSession,
   listSessions,
   listSkills,
@@ -831,8 +832,10 @@ function renderSession() {
   renderTests();
   renderTestSampleEditor();
   renderQuestionQueueStatus();
+  syncDraftScriptNotes();
   updateActionButtons();
   applyContextTabDefault();
+  void refreshSkillForm();
 }
 
 function skillBindingState() {
@@ -882,7 +885,10 @@ function renderSkillBindingStatus() {
   const publicBadge = isPublic
     ? `<span class="binding-public" title="Public: every signed-in user can use this skill">public</span>`
     : "";
-  node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}`;
+  const scriptBadge = session?.skill_form === "script"
+    ? `<span class="binding-script" data-testid="binding-script-badge" title="Script-based skill: SKILL.md plus ${escapeHtml(scriptRelpath())}">script</span>`
+    : "";
+  node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}${scriptBadge}`;
   node.title = binding.hasRemote
     ? `Remote: ${binding.remoteName || "none"}\nRemote version: ${binding.remoteVersion || "unknown"}\nLocal version: ${binding.localVersion || "none"}`
     : "This session is not bound to a Blob skill yet.";
@@ -996,8 +1002,9 @@ function renderSkillSelector() {
   const option = (skill) => {
     const badge = skill.is_public ? " [public]" : "";
     const internalBadge = skill.is_internal ? " [internal]" : "";
+    const scriptBadge = skill.has_script ? " [script]" : "";
     const desc = skill.description ? ` - ${escapeHtml(skill.description.slice(0, 60))}` : "";
-    return `<option value="${escapeHtml(skill.name)}">${escapeHtml(skill.name)}${internalBadge}${badge}${desc}</option>`;
+    return `<option value="${escapeHtml(skill.name)}">${escapeHtml(skill.name)}${internalBadge}${scriptBadge}${badge}${desc}</option>`;
   };
   // The kind sits on the <optgroup> rather than in every label, so the Kind field
   // above reads as a consequence of the pick instead of a filter over the list.
@@ -1330,7 +1337,7 @@ const MATERIAL_KINDS = [
   {
     value: "code",
     label: "Code",
-    hint: "Tier 1 — reproduced in the sample code, and checked for drift afterwards.",
+    hint: "Tier 1 — reproduced in the sample code, and checked for drift afterwards. If it is the only code material, covers every operation and EAA runs scripts, it ships verbatim as scripts/<name>.py instead.",
   },
   {
     value: "api_spec",
@@ -1364,6 +1371,103 @@ function materialKindOptionsHtml(kind) {
 function syncMaterialKindHint(select) {
   const hint = select.closest(".material-edit")?.querySelector("[data-kind-hint]");
   if (hint) hint.textContent = materialKindHint(select.value);
+}
+
+// GET /skill-form verdict for the current session state, refetched whenever updated_at moves.
+let skillFormVerdict = null;
+let skillFormRequestKey = null;
+
+function skillFormKey() {
+  return session ? `${session.id}|${session.updated_at || ""}` : "";
+}
+
+function sessionScript() {
+  const script = session?.current_skill?.script;
+  return typeof script === "string" ? script : null;
+}
+
+function scriptRelpath(name) {
+  return `scripts/${normalizeSkillName(name || session?.remote_skill_id || inferCurrentName()) || "<name>"}.py`;
+}
+
+// Only a capability session with a code material, or one already locked as script, has a form to talk about.
+function skillFormRelevant() {
+  if (!session || session.skill_kind === "scenario") return false;
+  const hasCode = (session.materials || []).some((m) => m.kind === "code");
+  return hasCode || session.skill_form === "script";
+}
+
+function currentSkillFormVerdict() {
+  return skillFormVerdict && skillFormVerdict.key === skillFormKey() ? skillFormVerdict.data : null;
+}
+
+async function refreshSkillForm() {
+  if (!skillFormRelevant()) {
+    skillFormVerdict = null;
+    return;
+  }
+  const key = skillFormKey();
+  if (skillFormVerdict?.key === key || skillFormRequestKey === key) return;
+  skillFormRequestKey = key;
+  try {
+    const data = await fetchSkillForm(session.id);
+    if (skillFormKey() !== key) return;
+    skillFormVerdict = { key, data };
+    renderMaterials();
+    renderChecklist();
+  } catch (err) {
+    appLog(`Skill form lookup failed: ${err.message}`);
+  } finally {
+    if (skillFormRequestKey === key) skillFormRequestKey = null;
+  }
+}
+
+// With the EAA flags off, or inline template code (S12), nothing short of different code makes it a script.
+function unmetFormChecks(verdict) {
+  const failures = Array.isArray(verdict?.failures) ? verdict.failures : [];
+  const blocker = failures.find((f) => f.check === "eaa_flags") || failures.find((f) => f.rule === "S12");
+  return blocker ? [blocker] : failures;
+}
+
+function formChecksListHtml(checks) {
+  return `<ul>${checks.map((f) => `<li><code>${escapeHtml(f.check)}${f.rule ? ` (${escapeHtml(f.rule)})` : ""}</code> ${escapeHtml(f.message || "")}</li>`).join("")}</ul>`;
+}
+
+// Badge for one saved code material: does it ship as the bundled script or not.
+function codeMaterialFormBadge(m) {
+  if (m.kind !== "code" || !skillFormRelevant()) return "";
+  const badge = (cls, text, title) => `<span class="material-form-tag ${cls}" data-testid="material-form-badge" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
+  if (session.skill_form === "script") {
+    return m.content === sessionScript()
+      ? badge("form-script", "script", `Shipped verbatim as ${scriptRelpath()}.`)
+      : badge("form-unused", "not the script", "The bundled script was kept; see the reasons below the table.");
+  }
+  if (session.skill_form === "inline") return badge("form-inline", "inline", "This skill is locked to the inline form.");
+  const verdict = currentSkillFormVerdict();
+  if (!verdict) return "";
+  return verdict.form === "script"
+    ? badge("form-script", "script", `Will ship verbatim as ${scriptRelpath()} when the draft starts.`)
+    : badge("form-inline", "inline", "Reference for the inline sample code; what script form would need is listed below the table.");
+}
+
+function materialOriginBadge(m) {
+  if (m.origin !== "agent_patch") return "";
+  return `<span class="material-form-tag form-agent-edited" data-testid="material-origin-badge" title="The agent adapted this code and you accepted the diff. Run it once with real inputs; editing the material yourself clears this mark.">edited by agent &middot; not run</span>`;
+}
+
+function skillFormMaterialsNote() {
+  if (!skillFormRelevant()) return "";
+  const verdict = currentSkillFormVerdict();
+  if (!verdict) return "";
+  if (session.skill_form === "script") {
+    const problems = Array.isArray(verdict.replacement_problems) ? verdict.replacement_problems : [];
+    if (!problems.length) return "";
+    return `<div class="skill-form-note" data-testid="skill-form-unmet"><strong>The code material did not replace the bundled script; the previous script is kept:</strong>${formChecksListHtml(problems)}</div>`;
+  }
+  if (session.skill_form) return "";
+  const unmet = unmetFormChecks(verdict);
+  if (!unmet.length) return "";
+  return `<div class="skill-form-note skill-form-info" data-testid="skill-form-unmet"><strong>This code is reference for the inline sample code; no action is needed for that. To ship it verbatim as the bundled script instead, it would need:</strong>${formChecksListHtml(unmet)}</div>`;
 }
 
 function materialAddBarHtml() {
@@ -1423,7 +1527,7 @@ function renderMaterials() {
     const expandAttrs = id ? `data-action="expand" data-material-id="${escapeHtml(id)}"` : "data-action=\"expand\" disabled";
     return `<tr class="material-item" data-source="saved" data-material-id="${escapeHtml(id)}" data-testid="saved-material-item">
       <td class="material-cell-index">${i + 1}</td>
-      <td class="material-cell-kind"><span class="material-kind-tag">${escapeHtml(m.kind || "text")}</span></td>
+      <td class="material-cell-kind"><span class="material-kind-tag">${escapeHtml(m.kind || "text")}</span>${codeMaterialFormBadge(m)}${materialOriginBadge(m)}</td>
       <td class="material-cell-content"><span class="material-preview">${escapeHtml(previewText(m.content))}</span></td>
       <td class="material-cell-actions">
         <button type="button" class="icon-only-button" title="Enlarge / view full content" ${expandAttrs}>${svgIcon("i-expand")}</button>
@@ -1443,7 +1547,7 @@ function renderMaterials() {
   const materialTable = (rowsHtml) => `<table class="material-table"><thead><tr><th class="material-cell-index">#</th><th class="material-cell-kind">Kind</th><th>Content</th><th class="material-cell-actions">Actions</th></tr></thead><tbody>${rowsHtml}</tbody></table>`;
   const sections = [];
   if (saved.length) {
-    sections.push(`<div class="material-section" data-section="saved"><h3 class="material-section-title">${svgIcon("i-paper-clip")} Saved in this session <span class="material-count" data-testid="saved-material-count">${saved.length}</span></h3>${materialTable(saved.map((m, i) => renderSavedRow(m, i)).join(""))}</div>`);
+    sections.push(`<div class="material-section" data-section="saved"><h3 class="material-section-title">${svgIcon("i-paper-clip")} Saved in this session <span class="material-count" data-testid="saved-material-count">${saved.length}</span></h3>${materialTable(saved.map((m, i) => renderSavedRow(m, i)).join(""))}${skillFormMaterialsNote()}</div>`);
   }
   if (pending.length) {
     sections.push(`<div class="material-section" data-section="pending"><h3 class="material-section-title">${svgIcon("i-paper-clip")} Will send next <span class="material-count" data-testid="pending-material-count">${pending.length}</span></h3>${materialTable(pending.map((m, i) => renderPendingRow(m, i)).join(""))}</div>`);
@@ -2024,6 +2128,29 @@ function variableHeaderHtml(bucket) {
   </div>`;
 }
 
+// The coverage confirmation is the one script-form condition the user owns; the backend locks it at PREPARE -> DRAFT.
+function renderSkillFormRow() {
+  if (!skillFormRelevant()) return "";
+  const locked = Boolean(session.skill_form);
+  const verdict = currentSkillFormVerdict();
+  const form = session.skill_form || verdict?.form || "inline";
+  const unmet = locked ? [] : unmetFormChecks(verdict);
+  const blocked = unmet.some((f) => f.check === "eaa_flags" || f.rule === "S12");
+  const covers = Boolean(session.prepare_brief?.script_covers_operations);
+  const hint = locked
+    ? `Fixed when the draft started${form === "script" ? `: SKILL.md plus ${scriptRelpath()}, the code material verbatim` : ""}. Switching between inline and script is not supported.`
+    : "Script form ships the single code material verbatim as scripts/<name>.py instead of inline sample code. It is decided when the draft starts.";
+  const coversBox = blocked
+    ? ""
+    : `<label class="skill-form-covers"><input type="checkbox" data-script-covers data-testid="script-covers-checkbox"${covers ? " checked" : ""}${locked ? " disabled" : ""} /> The code material covers every operation of this skill</label>`;
+  return `<div class="var-group skill-form-row" data-testid="skill-form-row">
+      <div class="var-group-head"><strong>Output form</strong> <span class="form-state form-${escapeHtml(form)}" data-testid="skill-form-state">${escapeHtml(form)}${locked ? " \u00b7 locked" : ""}</span></div>
+      <p class="spl-hint">${escapeHtml(hint)}</p>
+      ${coversBox}
+      ${unmet.length ? `<div class="skill-form-note skill-form-info">${formChecksListHtml(unmet)}</div>` : ""}
+    </div>`;
+}
+
 function renderVariablesPanel(activeSub = null) {
   const sections = VAR_BUCKETS.map((b) => {
     const rows = variablesForBucket(b);
@@ -2040,6 +2167,7 @@ function renderVariablesPanel(activeSub = null) {
     </div>`;
   }).join("");
   return `<div class="variables-editor" data-variables-editor>
+    ${renderSkillFormRow()}
     ${sections}
     <div class="spl-actions">
       <button type="button" class="icon-button primary" data-var-save>Save variables</button>
@@ -2258,7 +2386,10 @@ async function saveBriefVariables() {
   const status = document.querySelector("[data-var-status]");
   if (status) status.textContent = "Saving\u2026";
   try {
-    session = await updateVariables(session.id, { variables });
+    const payload = { variables };
+    const covers = document.querySelector("[data-variables-editor] [data-script-covers]");
+    if (covers && !covers.disabled) payload.script_covers_operations = covers.checked;
+    session = await updateVariables(session.id, payload);
     persistSessionState();
     renderSession();
   } catch (err) {
@@ -2663,11 +2794,48 @@ function renderEnvChecklist(item) {
 function renderEditor() {
   if (!session) return;
   const draft = session.current_skill || {};
-  activeTab = "skill";
+  const script = sessionScript();
+  if (script === null) activeTab = "skill";
+  renderFileSwitch(script);
+  const editor = el("editor");
+  if (activeTab === "script") {
+    // The generator never edits the script; replacing it means adding a new code material.
+    editor.readOnly = true;
+    editor.value = script;
+    el("editorLabel").textContent = "Source (read-only)";
+    renderScriptPreview(script);
+    return;
+  }
+  editor.readOnly = false;
+  el("editorLabel").textContent = "Source";
   const value = draft.skill_md || "";
-  el("editor").value = value;
-  el("editor").placeholder = "SKILL.md will appear here after Draft.";
+  editor.value = value;
+  editor.placeholder = "SKILL.md will appear here after Draft.";
   renderMarkdownPreview(value);
+}
+
+function renderFileSwitch(script) {
+  const node = el("fileSwitch");
+  if (!node) return;
+  el("filesSubtitle").textContent = script === null
+    ? "Single artifact. Environment guidance and sample code live inside this Markdown."
+    : "SKILL.md plus a bundled script. The script is the code material, verbatim, and is read-only here.";
+  node.classList.toggle("hidden", script === null);
+  if (script === null) {
+    node.innerHTML = "";
+    return;
+  }
+  node.innerHTML = [["skill", "SKILL.md"], ["script", scriptRelpath()]].map(([key, label]) => {
+    const selected = activeTab === key;
+    return `<button type="button" role="tab" class="file-switch-tab${selected ? " active" : ""}" aria-selected="${selected}" data-file-tab="${key}" data-testid="file-tab-${key}">${escapeHtml(label)}</button>`;
+  }).join("");
+}
+
+function renderScriptPreview(script) {
+  const node = el("markdownPreview");
+  if (!node) return;
+  const code = hljs ? hljs.highlight(script, { language: "python", ignoreIllegals: true }).value : escapeHtml(script);
+  node.innerHTML = `<pre data-testid="script-preview"><code class="hljs language-python">${code}</code></pre>`;
 }
 
 function splitFrontmatter(markdownText) {
@@ -3834,6 +4002,22 @@ function modeBadgeHtml(result) {
   return `<span class="sample-mode ${routeOnly ? "mode-route-only" : "mode-execute"}">${escapeHtml(mode)} - ${escapeHtml(note)}</span>`;
 }
 
+// Scripts the router asked the runtime to run, checked server-side against the bundled script's flags.
+function renderRequestedScripts(result) {
+  const entries = Array.isArray(result.requested_scripts) ? result.requested_scripts : [];
+  if (!entries.length) return "";
+  const rows = entries.map((entry) => {
+    const problems = Array.isArray(entry.problems) ? entry.problems : [];
+    return `<li class="requested-script ${entry.valid ? "valid" : "invalid"}" data-testid="requested-script">
+      <code>${escapeHtml(entry.script || entry.skill || "(unnamed)")}</code>
+      <code>${escapeHtml(JSON.stringify(entry.args ?? null))}</code>
+      <span class="requested-script-state">${entry.valid ? "valid" : "invalid"}</span>
+      ${problems.length ? `<ul>${problems.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}</ul>` : ""}
+    </li>`;
+  }).join("");
+  return `<div class="sample-block requested-scripts" data-testid="requested-scripts"><strong>Requested scripts</strong><ul>${rows}</ul></div>`;
+}
+
 function renderSampleResult(result, index, kind = "") {
   const state = result.passed === true ? "passed" : result.passed === false ? "failed" : "unknown";
   const stateText = result.passed === true ? "PASS" : result.passed === false ? "FAIL" : "ERROR";
@@ -3864,6 +4048,7 @@ function renderSampleResult(result, index, kind = "") {
       ${result.duration_ms ? `<span>${escapeHtml(result.duration_ms)}ms</span>` : ""}
     </div>
     ${result.error ? `<div class="sample-error">${escapeHtml(result.error)}</div>` : ""}
+    ${renderRequestedScripts(result)}
     ${renderLongText("APIM response", result.apim_response, { open: result.passed === false })}
     ${renderLongText("APIM raw JSON", raw)}
     ${result.apim_uploads?.length ? `<div class="sample-block"><strong>Uploads</strong><pre>${escapeHtml(result.apim_uploads.join("\n"))}</pre></div>` : ""}
@@ -4065,7 +4250,7 @@ function renderToolCall(call) {
 
   // Lightweight, informational tool calls fold into a single inline "Agent
   // actions" card so they read in chronological order under the assistant reply.
-  if (!["propose_skill_draft", "propose_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(call.tool)) {
+  if (!["propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(call.tool)) {
     dbgLog("render", `-> folded into activity card: ${call.tool}`);
     appendActivityRow(call);
     return;
@@ -4091,6 +4276,7 @@ function renderToolCall(call) {
         <p class="draft-public-hint">Leave this off to keep the skill private; you can change it later from Skill access.</p>
       </div>
       <p class="patch-note">Lowercase letters, digits and hyphens only, no leading or trailing hyphen, 64 characters max. Renaming after this point moves the Blob folder, the SQL row and every grant.</p>
+      <p class="patch-note draft-script-note" data-draft-script-note data-testid="draft-script-note" hidden></p>
       <p class="patch-note card-error" hidden></p>
       <div class="tool-actions"></div>`;
     const nameInput = card.querySelector("[data-testid='draft-name-input']");
@@ -4103,6 +4289,7 @@ function renderToolCall(call) {
         nameInput.setSelectionRange(caret, caret);
       }
       nameError.hidden = true;
+      syncDraftScriptNotes();
     });
     card.querySelector(".tool-actions").appendChild(
       actionButton("Accept SKILL.md", async () => {
@@ -4132,6 +4319,20 @@ function renderToolCall(call) {
       <div class="tool-actions"></div>`;
     const actions = card.querySelector(".tool-actions");
     actions.appendChild(actionButton("Accept patch", async () => acceptTool(call, { action: "accept" })));
+    actions.appendChild(actionButton("Reject", async () => acceptTool(call, { action: "reject" })));
+  } else if (call.tool === "propose_material_patch") {
+    card.classList.add("patch-card");
+    card.dataset.testid = "material-patch-card";
+    card.innerHTML = `<div class="patch-summary"><strong>${svgIcon("i-adjustments")} Code material edit proposed</strong><span>${escapeHtml(args.material_id || "code material")}</span></div>
+      <p>${escapeHtml(args.reason || "Adapt the code material so it can ship as the bundled script.")}</p>
+      <details class="patch-diff" open>
+        <summary>Review diff</summary>
+        ${renderPatchDiff(args.patch || "")}
+      </details>
+      <p class="patch-note">Accepting replaces your code material with the patched version. Run the patched code once with real inputs before confirming it covers every operation.</p>
+      <div class="tool-actions"></div>`;
+    const actions = card.querySelector(".tool-actions");
+    actions.appendChild(actionButton("Accept edit", async () => acceptTool(call, { action: "accept" })));
     actions.appendChild(actionButton("Reject", async () => acceptTool(call, { action: "reject" })));
   } else if (call.tool === "rename_skill") {
     card.classList.add("patch-card");
@@ -4169,8 +4370,20 @@ function renderToolCall(call) {
   }
 
   appendConversationTool(card);
+  if (call.tool === "propose_skill_draft") syncDraftScriptNotes();
   resetActivityGroup();
   dbgLog("render", `actionable card mounted: ${call.tool}`, { call_id: call.call_id });
+}
+
+// A draft card can render before the state_update that locks the form arrives, so notes are synced on every render.
+function syncDraftScriptNotes() {
+  const isScript = session?.skill_form === "script";
+  document.querySelectorAll("[data-draft-script-note]").forEach((note) => {
+    note.hidden = !isScript;
+    if (!isScript) return;
+    const name = note.closest("[data-testid='draft-card']")?.querySelector("[data-testid='draft-name-input']")?.value;
+    note.innerHTML = `Script-based skill: accepting also saves <code>${escapeHtml(scriptRelpath(name))}</code>, the code material verbatim. It is not edited in this session.`;
+  });
 }
 
 function renderQuestionBlock() {
@@ -4547,9 +4760,18 @@ async function acceptTool(call, result) {
     setToolCardBusy(call.call_id, false);
     if (call.tool === "request_test_run") setTestStatus({ status: "failed" });
     const detail = parseApiErrorDetail(err);
+    if (detail?.kind === "script_flags_off") {
+      removeConversationStatus(runningNode);
+      appendConversationStatus(scriptFlagsOffText(detail), { failed: true });
+      return false;
+    }
     if (call.tool === "propose_patch" && detail?.recoverable) {
       appendConversationStatus(`Patch was not applied: ${detail.guidance || detail.error}`, { failed: true });
       await sendChatPayload(detail.retry_prompt || patchRetryPrompt(detail), []);
+      return;
+    }
+    if (call.tool === "propose_material_patch" && detail?.recoverable) {
+      appendConversationStatus(`Code material was not changed: ${detail.guidance || detail.error}`, { failed: true });
       return;
     }
     if (call.tool === "propose_skill_draft" && detail?.recoverable && ["invalid_skill_name", "skill_name_conflict"].includes(detail.kind)) {
@@ -4595,6 +4817,15 @@ function parseApiErrorDetail(err) {
 
 function isOrphanDecisionError(err) {
   return err?.status === 409 && err?.detail?.kind === "orphaned_children";
+}
+
+// Recoverable: the flags are an EAA deployment setting, so the fix is to turn them on and save again.
+function scriptFlagsOffText(detail) {
+  return `Skill was not saved: ${detail?.message || "the EAA script flags are off."}`;
+}
+
+function isScriptFlagsOffError(err) {
+  return err?.status === 409 && err?.detail?.kind === "script_flags_off";
 }
 
 function chooseOrphanAction(err) {
@@ -4969,6 +5200,10 @@ async function saveCurrentSkillToBlob() {
   try {
     session = await saveSessionSkill(session.id, { name });
   } catch (err) {
+    if (isScriptFlagsOffError(err)) {
+      appendConversationStatus(scriptFlagsOffText(err.detail), { failed: true });
+      return false;
+    }
     const orphanAction = chooseOrphanAction(err);
     if (!orphanAction) {
       if (isOrphanDecisionError(err)) {
@@ -5247,7 +5482,7 @@ async function sendChatPayload(message, materials, options = {}) {
           removeConversationStatus(thinkingNode);
           responseStarted = true;
         }
-        if (["ask_user_input", "request_positive_samples", "propose_skill_draft", "propose_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(data.tool)) {
+        if (["ask_user_input", "request_positive_samples", "propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(data.tool)) {
           responseHasInteractiveTool = true;
         }
         if (data.tool === "stage_transition" || data.tool === "request_stage_transition") {
@@ -5689,6 +5924,12 @@ bind("skillKindSelect", "change", () => {
 });
 bind("chatForm", "submit", sendMessage);
 bind("editor", "input", updateDraftFromEditor);
+bind("fileSwitch", "click", (event) => {
+  const tab = event.target.closest("[data-file-tab]")?.dataset.fileTab;
+  if (!tab || tab === activeTab) return;
+  activeTab = tab;
+  renderEditor();
+});
 bind("positiveSamplesInput", "input", persistTestSampleEditorState);
 bind("negativeSamplesInput", "input", persistTestSampleEditorState);
 (() => {
@@ -6007,7 +6248,7 @@ bind("saveDraftBtn", "click", async () => {
     const name = session.target_skill_id || inferCurrentName();
     const makePublic = draftPublicChoice();
     if (makePublic === null) return;
-    await acceptTool(call, { action: "accept", name });
+    if (await acceptTool(call, { action: "accept", name }) === false) return;
     appendConversationStatus(`Saved ${name} to the skill store.`);
     if (makePublic) await publishAfterDraftAccept(name);
     return;
@@ -6018,6 +6259,10 @@ bind("saveDraftBtn", "click", async () => {
     try {
       session = await saveSessionSkill(session.id, { name });
     } catch (err) {
+      if (isScriptFlagsOffError(err)) {
+        appendConversationStatus(scriptFlagsOffText(err.detail), { failed: true });
+        return;
+      }
       const orphanAction = chooseOrphanAction(err);
       if (!orphanAction) {
         if (isOrphanDecisionError(err)) {

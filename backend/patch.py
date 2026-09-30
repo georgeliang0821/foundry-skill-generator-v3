@@ -245,7 +245,7 @@ def apply_find_replace(content: str, find: str, replace: str) -> str:
     if len(matches) > 1:
         raise PatchError("find text matches more than once (whitespace-normalized); provide more context.")
     if not matches:
-        raise PatchError("find text not found in the current SKILL.md.")
+        raise PatchError("find text not found in the current content.")
     i = matches[0]
     # find_lines[0] is non-blank (leading blanks were trimmed), so it is the
     # reference point for how far off the model's indentation was.

@@ -44,6 +44,7 @@ from .sections import (
     match_section,
     normalize_section,
 )
+from .skill_lint import RESULT_SECTION, needs_info_exit_row
 
 # Every top-level frontmatter key is republished verbatim into the host skill
 # catalog on every listing, so metadata size is a recurring context cost.
@@ -139,11 +140,13 @@ def validate_topology(
     mode: Mode,
     expected_name: str | None = None,
     child_resolver: Callable[[str], str | None] | None = None,
+    script: str | None = None,
 ) -> list[TopologyIssue]:
     """Check a SKILL.md against the topology rules for its layer.
 
     ``child_resolver`` maps a child skill name to its SKILL.md, or None when it
     does not exist or the caller has no access. T7 is skipped when it is None.
+    ``script`` is the bundled script of a script-form capability skill.
     """
     issues: list[TopologyIssue] = []
 
@@ -181,7 +184,7 @@ def validate_topology(
     _check_children_shape(frontmatter, kind, add)
     _check_skill_type(frontmatter, add)
     _check_metadata_size(frontmatter, add)
-    _check_section_contract(stripped, kind, add)
+    _check_section_contract(stripped, kind, add, script)
 
     if kind is SkillKind.SCENARIO:
         _check_scenario_body(stripped, add)
@@ -454,7 +457,7 @@ def _check_restated_inputs(
 # ---------------------------------------------------------------------------
 
 
-def _check_section_contract(skill_md: str, kind: SkillKind, add) -> None:
+def _check_section_contract(skill_md: str, kind: SkillKind, add, script: str | None = None) -> None:
     titles = h2_titles(skill_md)
 
     for first, second in ambiguous_titles(titles):
@@ -468,10 +471,10 @@ def _check_section_contract(skill_md: str, kind: SkillKind, add) -> None:
     _check_preamble(skill_md, add)
 
     if kind is SkillKind.CAPABILITY:
-        _check_pointable_sections(skill_md, add)
+        _check_pointable_sections(skill_md, add, script)
 
 
-def _check_pointable_sections(skill_md: str, add) -> None:
+def _check_pointable_sections(skill_md: str, add, script: str | None = None) -> None:
     """C2 -- what a parent points at must be its own ``##`` section."""
     for hashes, title in _DEEP_HEADING_RE.findall(skill_md or ""):
         folded = normalize_section(title)
@@ -482,6 +485,16 @@ def _check_pointable_sections(skill_md: str, add) -> None:
                 "sections; deeper headings are folded into the `##` above them and cannot be "
                 "requested on their own.",
             )
+
+    if script is not None:
+        if "[NEEDS_INFO]" in script and not needs_info_exit_row(skill_md):
+            add(
+                "C2",
+                "The script prints `[NEEDS_INFO]`, but the exit-code table in "
+                f"`## {RESULT_SECTION}` has no `status` = `needs_info` row. Add a row whose first "
+                "cell is `` 0, `status` = `needs_info` ``.",
+            )
+        return
 
     code = "\n".join(_PY_FENCE_RE.findall(skill_md or ""))
     codes = list(

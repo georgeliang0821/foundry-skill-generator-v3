@@ -31,12 +31,14 @@ from .blob_store import (
     MAX_SKILL_NAME_LEN,
     CachedSkillStore,
     LocalSkillStore,
+    VersionConflict,
     compute_hash,
     make_skill_store,
     parse_frontmatter,
     parse_frontmatter_meta,
     replace_frontmatter_name,
     safe_skill_name,
+    script_relpath_of,
 )
 from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
 from .e2e import (
@@ -44,6 +46,7 @@ from .e2e import (
     e2e_enabled,
     e2e_scenario_skill_files,
     e2e_skill_files,
+    fake_aca_env_result,
     fake_agent_enabled,
     fake_lint_enabled,
     fake_run_selection_tests,
@@ -51,7 +54,8 @@ from .e2e import (
     get_scenario,
     set_scenario,
 )
-from .material_fidelity import fidelity_warning_count, scan_material_fidelity
+from .material_fidelity import fidelity_warning_count, materials_for_prompt, scan_material_fidelity
+from .material_patch import patch_defects, rewrite_reasons
 from .eaa_platform import (
     EaaLintRejected,
     EaaLintResult,
@@ -60,6 +64,7 @@ from .eaa_platform import (
     mi_allowlist_note,
     obo_registry_keys,
     obo_registry_mapping,
+    script_flags_off,
     split_eaa_allowlist_warnings,
 )
 from .skill_lint import lint_skill, lint_warning_count
@@ -73,6 +78,7 @@ from .models import (
     ChildrenUpdateRequest,
     CreateSessionRequest,
     Material,
+    MaterialKind,
     MaterialUpsertRequest,
     MessageRole,
     Mode,
@@ -112,8 +118,15 @@ from . import db
 from .state_machine import (
     TRANSITION_TABLE,
     QualityGateError,
+    _form_prompt_key,
+    apply_code_material_change,
+    code_material_contents,
+    evaluate_skill_form,
+    needs_flag_lookup_before_lock,
     open_fix_items,
     register_post_transition_hook,
+    script_readiness_problems,
+    script_replacement_problems,
     transition,
 )
 # ---------------------------------------------------------------------------
@@ -702,6 +715,7 @@ def _hydrate_current_skill_from_remote(session: Session) -> bool:
         return False
     session.current_skill.skill_md = files.skill_md
     session.current_skill.version_hash = files.version_hash
+    session.current_skill.script = files.script
     session.remote_skill_id = files.name
     session.remote_version_hash = files.version_hash
     session.target_skill_id = session.target_skill_id or files.name
@@ -741,6 +755,12 @@ def load_aca_env_for_session(session, *, reason: str = "manual") -> None:
     """
     from .mcp_jsonrpc import list_aca_environment_variables_jsonrpc
 
+    if e2e_enabled():
+        # load_dotenv(override=True) may have restored a real MCP_ENDPOINT; E2E never leaves the machine.
+        session.aca_env_result = fake_aca_env_result()
+        session.aca_env_error = ""
+        log_event("session.aca_env.e2e_fake", session_id=session.id, reason=reason)
+        return
     mcp_url = os.getenv("MCP_ENDPOINT", "").strip().rstrip("/")
     aca_app = os.getenv("ACA_APP_NAME", "").strip()
     aca_rg = os.getenv("ACA_RESOURCE_GROUP", "").strip()
@@ -863,8 +883,12 @@ def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
     """The runtime's own lint, fail-closed: no verdict is never a pass."""
     if fake_lint_enabled():
         return EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="e2e")
+    files = {"SKILL.md": session.current_skill.skill_md}
+    script = session.current_skill.script
+    if script is not None:
+        files[script_relpath_of(skill_name)] = script
     try:
-        result = lint_skill_package(skill_name, {"SKILL.md": session.current_skill.skill_md})
+        result = lint_skill_package(skill_name, files)
     except EaaLintUnavailable as exc:
         log_exception("skill.save.eaa_lint_unavailable", exc, session_id=session.id, skill_name=skill_name)
         raise HTTPException(status_code=503, detail=f"EAA skill lint could not run, so the skill was not saved: {exc}") from exc
@@ -875,7 +899,47 @@ def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
         log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, errors=result.errors)
         detail = "\n".join(result.errors) or "EAA reported the package invalid without listing errors."
         raise HTTPException(status_code=400, detail="EAA skill lint failed:\n" + detail)
+    if script is not None and not _ruleset_at_least(result.ruleset_version, SCRIPT_MIN_EAA_RULESET):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"EAA lint ruleset {result.ruleset_version or 'unknown'} predates the script checks "
+                f"(needs {'.'.join(map(str, SCRIPT_MIN_EAA_RULESET))}+), so a script skill cannot be verified "
+                "and was not saved."
+            ),
+        )
     return result
+
+
+# EAA lint_skill_package validates scripts/ layout and naming from this ruleset on.
+SCRIPT_MIN_EAA_RULESET = (1, 1)
+
+
+def _assert_script_flags_on(session: Session) -> None:
+    """Re-read the ACA flags at save time: a script skill saved while they are off never loads."""
+    load_aca_env_for_session(session, reason="script_save")
+    flags_off = script_flags_off(session.aca_env_result)
+    if not flags_off:
+        return
+    lookup = f" The ACA lookup failed: {session.aca_env_error}" if session.aca_env_error else ""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "kind": "script_flags_off",
+            "recoverable": True,
+            "flags": flags_off,
+            "message": (
+                f"This is a script-based skill, but {', '.join(flags_off)} is not true on the EAA "
+                f"deployment, so EAA would refuse to load it. It was not saved.{lookup} Save again "
+                "once the flags are on."
+            ),
+        },
+    )
+
+
+def _ruleset_at_least(version: str, minimum: tuple[int, int]) -> bool:
+    match = re.match(r"\s*(\d+)\.(\d+)", version or "")
+    return bool(match) and (int(match.group(1)), int(match.group(2))) >= minimum
 
 
 def _finalize_skill_rename(
@@ -970,6 +1034,7 @@ def save_skill_dual_write(
         mode=Mode(session.mode),
         expected_name=skill_name,
         child_resolver=_session_child_resolver(session),
+        script=session.current_skill.script,
     )
     errors = [issue for issue in issues if issue.severity is Severity.ERROR]
     if errors:
@@ -988,6 +1053,9 @@ def save_skill_dual_write(
     if lint_errors:
         detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in lint_errors)
         raise HTTPException(status_code=400, detail=f"Skill lint failed:\n{detail}")
+
+    if session.current_skill.script is not None:
+        _assert_script_flags_on(session)
 
     # The runtime's own lint. Fail closed: no verdict is never a pass.
     eaa_lint = _eaa_lint(session, skill_name)
@@ -1045,6 +1113,23 @@ def save_skill_dual_write(
     old_row = skills_repo.get_skill(old_name) if is_rename else None
     if existing is not None:
         acl_mod.assert_can_access(user_upn, skill_name)
+    script = session.current_skill.script
+    if script is None and existing is not None and store.has_script(skill_name):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "script_form_mismatch",
+                "recoverable": False,
+                "message": (
+                    f"`{skill_name}` is a script-based skill, but this session has no script. "
+                    "Switching a skill between inline and script form is not supported; "
+                    "modify it in a session opened on that skill instead."
+                ),
+            },
+        )
+    # Overwriting the skill this session loaded must not clobber a concurrent write (e.g. a
+    # Gatekeeper Addendum); a rename writes a new path, and a first save has nothing to match.
+    expected_version = session.remote_version_hash if old_name == skill_name else ""
     # Saving is a content action. Visibility is owned solely by
     # PATCH /api/skills/{name}/visibility, so it is only ever inherited here --
     # on a rename from the row being renamed, since the new name has none yet.
@@ -1054,6 +1139,7 @@ def save_skill_dual_write(
         name=skill_name,
         skill_md=session.current_skill.skill_md,
         version_hash=session.current_skill.version_hash,
+        script=script,
     )
     log_event(
         "skill.save.start",
@@ -1063,8 +1149,24 @@ def save_skill_dual_write(
         existed_in_sql=existing is not None,
         is_public=is_public,
         skill_md_bytes=len(files.skill_md.encode("utf-8")),
+        script_bytes=len(script.encode("utf-8")) if script is not None else 0,
+        if_match=bool(expected_version),
     )
-    saved = store.save_skill(files)
+    try:
+        saved = store.save_skill(files, expected_version)
+    except VersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "version_conflict",
+                "recoverable": True,
+                "message": (
+                    f"`{skill_name}` changed on Blob since this session loaded it (for example a "
+                    "Gatekeeper Addendum was added), so saving would overwrite that change. "
+                    "Reload the skill and reapply your edit."
+                ),
+            },
+        ) from exc
     try:
         # A rename must carry the old row's internal flag across, otherwise a
         # hidden capability child reappears in the host catalog under its new name.
@@ -1289,6 +1391,7 @@ def _dispatch_selection_tests(
             delegated_token=delegated_token,
             kind=kind,
             delegation=session.prepare_brief.delegation if session else None,
+            script=session.current_skill.script if session else None,
         )
     if kind is not SkillKind.SCENARIO or session is None:
         return run_selection_tests(
@@ -1297,6 +1400,7 @@ def _dispatch_selection_tests(
             negative_samples,
             version_hash=version_hash,
             delegated_token=delegated_token,
+            script=session.current_skill.script if session is not None else None,
         )
     return run_selection_tests(
         skill_content,
@@ -1447,9 +1551,169 @@ def patch_error_detail(call, exc: PatchError) -> dict[str, Any]:
 # the recoverable tool_effect_rejected path with guidance instead of crashing.
 KIND_ONLY_TOOLS: dict[str, SkillKind] = {
     "record_variables": SkillKind.CAPABILITY,
+    "propose_material_patch": SkillKind.CAPABILITY,
     "record_delegation": SkillKind.SCENARIO,
     "propose_child_edit": SkillKind.SCENARIO,
 }
+
+_MATERIAL_PATCH_REWRITE_GUIDANCE = (
+    "propose_material_patch only adapts a script's edges (argparse inputs, stdout JSON / "
+    "[NEEDS_INFO], stderr, exit codes), and this change is a rewrite. Do not retry with another "
+    "patch. Tell the user this code would need a rewrite to ship as the bundled script and let "
+    "them choose: keep the inline form, or write the script themselves. You may show a draft in "
+    "the chat, but never put it into a material."
+)
+
+MATERIAL_PATCHED_MESSAGE = (
+    "Code material `{material_id}` was patched by propose_material_patch and the user has NOT run "
+    "the patched code yet. Ask the user to run it once with real inputs and report the result. "
+    "The coverage confirmation was reset; do not record script_covers_operations=true until the "
+    "user confirms the patched code works."
+)
+
+MAX_MATERIAL_PATCH_REJECTIONS = 3
+
+_MATERIAL_PATCH_INCOMPLETE_GUIDANCE = (
+    "Fix every one of these in ONE new patch: a patch that leaves any of them does not make the "
+    "code shippable as the bundled script. If one cannot be fixed at the edges, stop patching and "
+    "tell the user the code stays inline sample code, quoting the source line of each finding."
+)
+
+_MATERIAL_PATCH_RETRY_GUIDANCE = (
+    "Nothing was applied: the material is still exactly the text in its <<<BEGIN MATERIAL>>> "
+    "block. Write the next patch against that unchanged text and include every fix from the "
+    "refused patch, not only the new ones. The user already agreed to adapt the code, so send the "
+    "corrected patch now without asking again."
+)
+
+_MATERIAL_PATCH_LIMIT_GUIDANCE = (
+    "propose_material_patch was refused {count} times for this code material. Do not propose "
+    "another patch. Tell the user this code stays inline sample code and list every unmet "
+    "condition in `## Skill Form`, quoting the source line each finding names. The user may still "
+    "edit the code material themselves."
+)
+
+
+class FormLockDeferred(ValueError):
+    """PREPARE -> DRAFT held back once: the EAA flags were only just read and allow a script."""
+
+
+FORM_LOCK_DEFERRED_MESSAGE = (
+    "PREPARE did not end yet. The EAA flags could not be read earlier in this session; they were "
+    "read just now and EAA runs script skills, so this code material may still ship as the "
+    "bundled script. `## Skill Form` now lists what that needs. Tell the user, go through it with "
+    "them (coverage in `variables_ok`, adapting the code if they want), and request the "
+    "transition again once they have decided. Leaving PREPARE locks the form."
+)
+
+
+class MaterialPatchRefused(ValueError):
+    """A patch the gate refused; counts toward MAX_MATERIAL_PATCH_REJECTIONS."""
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _material_patch_refusal(exc: MaterialPatchRefused, count: int) -> str:
+    if count >= MAX_MATERIAL_PATCH_REJECTIONS:
+        return (
+            f"{exc} Refusal {count} of {MAX_MATERIAL_PATCH_REJECTIONS}: the limit is reached. "
+            + _MATERIAL_PATCH_LIMIT_GUIDANCE.format(count=count)
+        )
+    tail = f" Refusal {count} of {MAX_MATERIAL_PATCH_REJECTIONS}."
+    return f"{exc}{tail} {_MATERIAL_PATCH_RETRY_GUIDANCE}" if exc.retryable else f"{exc}{tail}"
+
+
+def _checked_material_patch(session: Session, material_id: str, patch: str) -> tuple[int, str]:
+    """Validate a propose_material_patch against the session as it is now; returns (index, patched content)."""
+    if session.current_stage != Stage.PREPARE.value:
+        raise ValueError(f"propose_material_patch only allowed in PREPARE (current={session.current_stage}).")
+    if _form_prompt_key(session) != "script_candidate":
+        raise ValueError(
+            "propose_material_patch is only available while a new capability skill with a code "
+            "material is still choosing its form and the EAA script flags are on."
+        )
+    codes = code_material_contents(session)
+    if len(codes) != 1:
+        raise ValueError(f"propose_material_patch needs exactly one code material; there are {len(codes)}.")
+    index = next((i for i, m in enumerate(session.materials) if m.id == material_id), None)
+    if index is None or MaterialKind(session.materials[index].kind) is not MaterialKind.CODE:
+        raise ValueError(f"`{material_id}` is not this session's code material.")
+    if any(truncated for m, _, truncated in materials_for_prompt(session.materials) if m.id == material_id):
+        raise ValueError(
+            "The code material is truncated in your prompt, so a patch cannot be checked against "
+            "it. Ask the user to shorten the material instead."
+        )
+    before = session.materials[index].content
+    try:
+        updated, _ = apply_v4a_to_content(before, patch)
+    except PatchError as exc:
+        raise MaterialPatchRefused(
+            f"The patch did not apply to material `{material_id}`: {exc} Re-copy the unchanged "
+            "context lines VERBATIM from its <<<BEGIN MATERIAL>>> block."
+        ) from exc
+    defects = patch_defects(before, updated)
+    if defects:
+        raise MaterialPatchRefused(" ".join(defects))
+    reasons = rewrite_reasons(before, updated)
+    if reasons:
+        raise MaterialPatchRefused(" ".join(reasons) + " " + _MATERIAL_PATCH_REWRITE_GUIDANCE, retryable=False)
+    remaining = script_readiness_problems(session, updated)
+    if remaining:
+        raise MaterialPatchRefused(
+            "The patched code still cannot ship as the bundled script:\n"
+            + "\n".join(
+                f"- {p.check}{f' ({p.rule})' if p.rule else ''}: {p.message}" for p in remaining
+            )
+            + "\n" + _MATERIAL_PATCH_INCOMPLETE_GUIDANCE
+        )
+    return index, updated
+
+
+def _accept_material_patch(session: Session, call) -> None:
+    material_id = str(call.args.get("material_id", ""))
+    try:
+        index, updated = _checked_material_patch(session, material_id, str(call.args.get("patch", "")))
+    except ValueError as exc:
+        session.conversation.append(
+            ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=f"Material patch was not applied: {exc}",
+                metadata={"tool": call.tool, "call_id": call.call_id, "recoverable_error": str(exc)},
+            )
+        )
+        session.touch()
+        persist_session(session)
+        raise HTTPException(status_code=409, detail={
+            "error": str(exc),
+            "kind": "material_patch_rejected",
+            "recoverable": True,
+            "guidance": str(exc),
+        }) from exc
+    material = session.materials[index]
+    codes_before = code_material_contents(session)
+    session.materials[index] = material.model_copy(update={
+        "content": updated,
+        "origin": "agent_patch",
+        "user_content": material.content if material.user_content is None else material.user_content,
+    })
+    apply_code_material_change(session, codes_before)
+    session.conversation.append(
+        ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=MATERIAL_PATCHED_MESSAGE.format(material_id=material_id),
+            metadata={"material_patched": material_id},
+        )
+    )
+    session.touch()
+    log_event(
+        "tool_result.material_patch.applied",
+        session_id=session.id,
+        material_id=material_id,
+        chars_before=len(material.content),
+        chars_after=len(updated),
+    )
 
 # dbo.skills.CK_skill_name_format. safe_skill_name() would silently mangle a bad
 # name into something the user never asked for, so a rename is rejected instead.
@@ -1591,6 +1855,7 @@ def _session_lint(session: Session, skill_md: str) -> list:
             for capability in (entry.host_capabilities or [])
         ],
         obo_registry_keys=obo_registry_keys(session.aca_env_result),
+        script=session.current_skill.script,
     )
 
 
@@ -1678,7 +1943,7 @@ def _note_material_fidelity(session: Session, skill_md: str, *, tool: str) -> No
     check that can reject a draft would be worse than the drift it catches.
     """
     try:
-        issues = scan_material_fidelity(skill_md, session.materials)
+        issues = scan_material_fidelity(skill_md, session.materials, script=session.current_skill.script)
     except Exception as exc:  # noqa: BLE001 - a broken scan must never break a turn
         log_exception("material_fidelity.scan_failed", exc, session_id=session.id, tool=tool)
         return
@@ -1718,7 +1983,12 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         target = args.get("target") or args.get("target_stage")
         if not target:
             raise ValueError("stage transition requires target/target_stage")
-        transition(session, Stage(str(target).lower()), args.get("reason") or args.get("summary", ""))
+        stage = Stage(str(target).lower())
+        if stage is Stage.DRAFT and needs_flag_lookup_before_lock(session):
+            load_aca_env_for_session(session, reason="form_lock")
+            if _form_prompt_key(session) == "script_candidate":
+                raise FormLockDeferred(FORM_LOCK_DEFERRED_MESSAGE)
+        transition(session, stage, args.get("reason") or args.get("summary", ""))
         return
 
     if tool == "update_verify_checklist":
@@ -1771,6 +2041,16 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
     if tool == "propose_patch":
         if session.current_stage not in {Stage.REFINE.value, Stage.TEST.value}:
             raise ValueError(f"propose_patch only allowed in REFINE/TEST (current={session.current_stage})")
+        return
+
+    if tool == "propose_material_patch":
+        if session.material_patch_rejections >= MAX_MATERIAL_PATCH_REJECTIONS:
+            raise ValueError(_MATERIAL_PATCH_LIMIT_GUIDANCE.format(count=session.material_patch_rejections))
+        try:
+            _checked_material_patch(session, str(args.get("material_id", "")), str(args.get("patch", "")))
+        except MaterialPatchRefused as exc:
+            session.material_patch_rejections += 1
+            raise ValueError(_material_patch_refusal(exc, session.material_patch_rejections)) from exc
         return
 
     if tool == "rename_skill":
@@ -1878,6 +2158,17 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
 
     if tool == "record_variables":
         from backend.models import SkillVariable
+        brief = session.prepare_brief
+        covers = args.get("script_covers_operations")
+        if covers is not None and bool(covers) != brief.script_covers_operations:
+            if session.skill_form is not None:
+                raise ValueError(
+                    f"This skill's form is locked as {session.skill_form}; switching between inline "
+                    "and script is not supported, so script_covers_operations can no longer change."
+                )
+            brief.script_covers_operations = bool(covers)
+            brief.verify_checklist["variables_ok"] = False
+            brief.verify_evidence.pop("variables_ok", None)
         raw = args.get("variables")
         if isinstance(raw, list):
             parsed_vars: list[SkillVariable] = []
@@ -1979,6 +2270,8 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
     the agent a clear description of what it may do next so it can either
     self-correct (pick a valid transition) or ask the user how to proceed.
     """
+    if isinstance(exc, FormLockDeferred):
+        return str(exc)
     if tool in {"stage_transition", "request_stage_transition"}:
         requested = str(args.get("target") or args.get("target_stage") or "?").lower()
         try:
@@ -2009,6 +2302,9 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
             "the user answers. Retry this confirmation only after they are declared. Do NOT "
             "confirm a different checkpoint instead."
         )
+    if tool == "propose_material_patch":
+        # The refusal already says whether to resend or stop; a generic "ask the user" contradicts it.
+        return f"The 'propose_material_patch' action could not be applied: {exc}"
     return (
         f"The '{tool}' action could not be applied: {exc}. Do not repeat it unchanged. "
         "Adjust your approach or ask the user how to proceed with ask_user_input."
@@ -2053,6 +2349,8 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
             ) from exc
         session.current_skill.skill_md = files.skill_md
         session.current_skill.version_hash = files.version_hash
+        session.current_skill.script = files.script
+        session.skill_form = "script" if files.script is not None else "inline"
         session.remote_skill_id = files.name
         session.remote_version_hash = files.version_hash
         session.blob_store_id = _active_store_id()
@@ -2161,6 +2459,16 @@ def refresh_session_children(
     return session
 
 
+@app.get("/api/sessions/{session_id}/skill-form")
+def inspect_session_skill_form(session_id: str, upn: str = Depends(require_upn)) -> dict[str, Any]:
+    """Inline or script, and every unmet script-form condition while the form is still open."""
+    session = get_session_for_user(session_id, upn)
+    return {
+        **evaluate_skill_form(session).to_dict(),
+        "replacement_problems": [problem.to_dict() for problem in script_replacement_problems(session)],
+    }
+
+
 @app.get("/api/sessions/{session_id}/topology")
 def inspect_session_topology(session_id: str, upn: str = Depends(require_upn)) -> dict[str, Any]:
     session = get_session_for_user(session_id, upn)
@@ -2170,6 +2478,7 @@ def inspect_session_topology(session_id: str, upn: str = Depends(require_upn)) -
         mode=Mode(session.mode),
         expected_name=infer_skill_name(session),
         child_resolver=_session_child_resolver(session),
+        script=session.current_skill.script,
     )
     by_rule: dict[str, list[dict[str, str]]] = {}
     for issue in issues:
@@ -2192,7 +2501,9 @@ def inspect_session_topology(session_id: str, upn: str = Depends(require_upn)) -
         # own code is still a valid skill, so this must never gate anything.
         "fidelity": [
             issue.to_dict()
-            for issue in scan_material_fidelity(session.current_skill.skill_md, session.materials)
+            for issue in scan_material_fidelity(
+                session.current_skill.skill_md, session.materials, script=session.current_skill.script
+            )
         ],
         "lint": [issue.to_dict() for issue in _session_lint(session, session.current_skill.skill_md)],
     }
@@ -2281,6 +2592,8 @@ def e2e_seed_skill(payload: dict[str, Any]) -> SkillFiles:
     files = builder(str(payload.get("name") or "e2e-existing-skill"))
     if payload.get("skill_md"):
         files.skill_md = str(payload["skill_md"])
+    if payload.get("script"):
+        files.script = str(payload["script"])
     saved = store.save_skill(files)
     user_upn = str(payload.get("user_upn") or acl_mod.e2e_default_upn() or "e2e@example.com").strip().lower()
     skills_repo.upsert_skill(saved.name)
@@ -2300,7 +2613,9 @@ def e2e_read_session(session_id: str) -> Session:
 def add_session_material(session_id: str, req: MaterialUpsertRequest, upn: str = Depends(require_upn)) -> Session:
     session = get_session_for_user(session_id, upn)
     material = Material(kind=req.kind, content=req.content)
+    codes_before = code_material_contents(session)
     session.materials.append(material)
+    apply_code_material_change(session, codes_before)
     session.touch()
     persist_session(session)
     log_event(
@@ -2319,12 +2634,14 @@ def update_session_material(session_id: str, material_id: str, req: MaterialUpse
     session = get_session_for_user(session_id, upn)
     for index, existing in enumerate(session.materials):
         if existing.id == material_id:
+            codes_before = code_material_contents(session)
             session.materials[index] = Material(
                 id=existing.id,
                 kind=req.kind,
                 content=req.content,
                 created_at=existing.created_at,
             )
+            apply_code_material_change(session, codes_before)
             session.touch()
             persist_session(session)
             log_event(
@@ -2343,10 +2660,12 @@ def update_session_material(session_id: str, material_id: str, req: MaterialUpse
 def delete_session_material(session_id: str, material_id: str, upn: str = Depends(require_upn)) -> Session:
     session = get_session_for_user(session_id, upn)
     before = len(session.materials)
+    codes_before = code_material_contents(session)
     session.materials = [m for m in session.materials if m.id != material_id]
     if len(session.materials) == before:
         log_event("session.material.delete.not_found", level="warning", session_id=session.id, material_id=material_id)
         raise HTTPException(status_code=404, detail="Material not found")
+    apply_code_material_change(session, codes_before)
     session.touch()
     persist_session(session)
     log_event(
@@ -2623,7 +2942,9 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
         material_count=len(req.materials),
     )
     if req.materials:
+        codes_before = code_material_contents(session)
         session.materials.extend(req.materials)
+        apply_code_material_change(session, codes_before)
     if req.message:
         msg_meta: dict[str, Any] = {}
         if req.auto_continue:
@@ -2827,6 +3148,10 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
                         skill_name=session.remote_skill_id,
                         status_code=sync_exc.status_code,
                     )
+        elif call.tool == "propose_material_patch" and result.get("action") == "accept":
+            _accept_material_patch(session, call)
+        elif call.tool == "propose_material_patch" and result.get("action") == "reject":
+            log_event("tool_result.material_patch.rejected", session_id=session.id, call_id=call.call_id)
         elif call.tool == "rename_skill" and result.get("action") == "accept":
             new_name = safe_skill_name(str(call.args.get("new_name", "")).strip())
             before = current_content(session, "SKILL.md")
@@ -3045,6 +3370,8 @@ def save_session_skill(session_id: str, req: SaveSessionSkillRequest, upn: str =
 @app.put("/api/sessions/{session_id}/draft")
 def update_session_draft(session_id: str, draft: SkillDraft, upn: str = Depends(require_upn)) -> Session:
     session = get_session_for_user(session_id, upn)
+    # The script only ever comes from a code material or the stored skill, never from an editor.
+    draft.script = session.current_skill.script
     session.current_skill = draft
     session.current_skill.version_hash = compute_hash(session.current_skill.skill_md)
     session.touch()
@@ -3390,6 +3717,7 @@ def _get_or_init_neighbor_edit(session: Session, skill_name: str) -> NeighborEdi
         selected_version_id=original.version_id,
         saved_version_id=original.version_id,
         status="saved",
+        remote_version_hash=files.version_hash,
     )
     session.neighbor_edits.append(ne)
     return ne
@@ -3458,7 +3786,21 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
     if not _user_can_modify_skill(upn, ne.skill_name):
         raise HTTPException(status_code=403, detail=f"You cannot modify the skill: {ne.skill_name}")
     files = SkillFiles(name=ne.skill_name, skill_md=version.skill_md, version_hash=version.version_hash)
-    saved = store.save_skill(files)
+    try:
+        saved = store.save_skill(files, ne.remote_version_hash)
+    except VersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "version_conflict",
+                "recoverable": True,
+                "message": (
+                    f"`{ne.skill_name}` changed on Blob since it was opened here, so saving would "
+                    "overwrite that change. Reopen the skill and reapply your edit."
+                ),
+            },
+        ) from exc
+    ne.remote_version_hash = saved.version_hash
     try:
         existing = skills_repo.get_skill(saved.name)
         skills_repo.upsert_skill(saved.name, is_public=bool(existing and existing.is_public))
@@ -3485,7 +3827,13 @@ def update_session_variables(session_id: str, req: VariablesUpdateRequest, upn: 
     """
     session = get_session_for_user(session_id, upn)
     before_sig = _variable_content_signature(session.prepare_brief.variables)
-    apply_tool_effect(session, "record_variables", {"variables": [v.model_dump() for v in req.variables]})
+    args: dict[str, Any] = {"variables": [v.model_dump() for v in req.variables]}
+    if req.script_covers_operations is not None:
+        args["script_covers_operations"] = req.script_covers_operations
+    try:
+        apply_tool_effect(session, "record_variables", args)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     after_sig = _variable_content_signature(session.prepare_brief.variables)
     content_changed = before_sig != after_sig
     has_draft = bool(session.current_skill.skill_md.strip())

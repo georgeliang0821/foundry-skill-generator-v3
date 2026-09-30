@@ -60,7 +60,18 @@ tests/e2e/modify-existing.spec.ts
 tests/e2e/tests-tab.spec.ts
 tests/e2e/mode-echo.spec.ts
 tests/e2e/skill-visibility.spec.ts
+tests/e2e/script-skill.spec.ts
 ```
+
+`script-skill.spec.ts` seeds the golden fixture `skills/ms-graph-room-finder`
+(SKILL.md + script) through `/api/e2e/seed-skill` and covers only the DOM side
+of script-form skills: the `[script]` selector and binding badges, the Files
+tab `SKILL.md | scripts/<name>.py` switch, the Materials / Output form rows,
+the draft card note, the 409 `script_flags_off` message, the
+`requested_scripts` list in test results, and the `material-patch-card` accept
+flow with the `edited by agent · not run` Materials badge (scenario
+`material_patch`). The eligibility, lint, save and material-patch gate rules
+themselves are pytest's.
 
 ## Question Card Coverage
 

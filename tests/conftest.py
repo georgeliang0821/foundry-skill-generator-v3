@@ -10,6 +10,14 @@ import pytest
 TEST_UPN = "test@example.com"
 
 
+@pytest.fixture(autouse=True)
+def _no_post_transition_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Once any test imports backend.main, its PREPARE-entry hook (ACA lookup over MCP) is process-global.
+    from backend import state_machine
+
+    monkeypatch.setattr(state_machine, "PostTransitionHook", None)
+
+
 def _skill_key(skill_name: str, owner_upn=None) -> str:
     owner = (owner_upn or "").strip()
     return f"{skill_name}_{owner}" if owner else skill_name
@@ -195,6 +203,12 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     module.sessions = {}
     module.auth_tokens = {}
     module.oauth_states = {}
+    # Import ran load_dotenv(override=True), which restores a real MCP_ENDPOINT / ACA_* from .env.
+    # The fake keeps whatever aca_env_result the session already has; tests needing flags set it.
+    monkeypatch.setattr(module, "load_aca_env_for_session", lambda session, *, reason="manual": None)
+    from backend import state_machine
+
+    monkeypatch.setattr(state_machine, "PostTransitionHook", module._post_transition_hook)
     # Save calls EAA's lint_skill_package over MCP; tests that exercise it override this.
     monkeypatch.setattr(
         module,

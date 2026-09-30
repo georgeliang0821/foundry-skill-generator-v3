@@ -470,7 +470,10 @@ test.describe("UI refresh — warm palette, icons, clarity", () => {
       });
     });
 
+    // Boot auto-creates a session and then replaces it with the /aca-env response; inject after that.
+    const bootAcaRefresh = page.waitForResponse((response) => response.url().endsWith("/aca-env"));
     await openApp(page);
+    await bootAcaRefresh;
     await page.evaluate(() => {
       const win = window;
       win.__sgv2.session = {
@@ -623,7 +626,9 @@ test.describe("UI refresh — warm palette, icons, clarity", () => {
       });
     });
 
+    const bootAcaRefresh = page.waitForResponse((response) => response.url().endsWith("/aca-env"));
     await openApp(page);
+    await bootAcaRefresh;
     await page.evaluate(() => {
       const win = window;
       win.__sgv2.session = {
@@ -697,8 +702,10 @@ test.describe("UI refresh — warm palette, icons, clarity", () => {
       });
     });
 
+    const bootAcaRefresh = page.waitForResponse((response) => response.url().endsWith("/aca-env"));
     await openApp(page);
     page.on("dialog", (dialog) => dialog.accept());
+    await bootAcaRefresh;
     await page.evaluate(() => {
       const win = window;
       win.__sgv2.session = {

@@ -68,13 +68,19 @@ are whitelist-only.
 `build_system_prompt()` in [backend/state_machine.py](backend/state_machine.py) from
 markdown in [prompts/](prompts/). Change wording there, not in Python string literals.
 The composition is layered: `00_global_system.md` → stage prompt (overridable per
-`SkillKind` via `KIND_PROMPT_OVERRIDES`) → optional `KIND_STAGE_ADDENDA` → shared
-`09`/`10`/`11`/`12` files → runtime session state. Adding a prompt file requires
-registering it in one of those maps, otherwise it is dead weight.
+`SkillKind` via `KIND_PROMPT_OVERRIDES`) → optional `KIND_STAGE_ADDENDA` → optional
+`FORM_STAGE_ADDENDA` (by skill form: `script_candidate` in PREPARE, `script` from DRAFT
+on; see `_form_prompt_key`) → shared `09`/`10`/`11`/`12` files → runtime session state.
+The flags-off note `01_prepare_script_flags_off.md` is not an addendum: it is appended
+to the `eaa_flags` line of the runtime `## Skill Form` block (`SKILL_FORM_FLAGS_OFF_NOTE`);
+when the ACA lookup failed, `01_prepare_script_lookup_failed.md` (`SKILL_FORM_LOOKUP_FAILED_NOTE`)
+takes its place.
+Adding a prompt file requires registering it in one of those maps, otherwise it is dead
+weight.
 
 **Scenario skills are an addendum, not a fork.** When capability/scenario behaviour
 differs, add to `KIND_STAGE_ADDENDA` rather than copying a whole stage prompt —
-forked copies drift.
+forked copies drift. Script-form behaviour follows the same rule via `FORM_STAGE_ADDENDA`.
 
 **Patches are V4A and strict.** [backend/patch.py](backend/patch.py) raises
 `PatchError` when an anchor is missing or ambiguous; partial application is never

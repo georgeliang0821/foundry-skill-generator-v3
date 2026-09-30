@@ -49,6 +49,22 @@ Run with backend coverage:
 uv run pytest --cov=backend --cov-report=term-missing
 ```
 
+### Pytest never reaches ACA / MCP
+
+`backend.main` runs `load_dotenv(override=True)` on import, so a real
+`MCP_ENDPOINT` / `ACA_*` from `.env` wins over anything the test set. Two
+fixtures in [conftest.py](./conftest.py) keep pytest local:
+
+- An autouse fixture sets `state_machine.PostTransitionHook = None` for every
+  test. Once any test has imported `backend.main`, its PREPARE-entry hook (ACA
+  lookup + peer-skill load in a background thread) is process-global, so a
+  plain unit test calling `transition()` would otherwise start real MCP calls.
+- `backend_main` re-enables the hook for API tests but replaces
+  `load_aca_env_for_session` with a no-op that keeps whatever
+  `aca_env_result` the session already has. A test that needs the EAA script
+  flags on sets `session.aca_env_result` itself (see
+  `tests/api/test_script_skill_api.py`).
+
 ## Run Playwright
 
 Playwright runs fully locally. It does not call Foundry, Azure Blob, APIM,
@@ -67,6 +83,12 @@ Run the browser tests:
 ```powershell
 npx playwright test
 ```
+
+In E2E mode the ACA lookup never leaves the machine either:
+`load_aca_env_for_session` returns `backend.e2e.fake_aca_env_result()`, which
+turns the EAA script flags on only in the `script_flags_on` scenario
+(`/api/e2e/scenario`). Every other scenario sees no ACA result, i.e. the flags
+are off.
 
 Run headed:
 

@@ -50,6 +50,24 @@
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
 - **登入與資料列級隔離（RLS）**：以 Entra 登入後的 email 作為身分，依 `dbo.user_skill_grants` 決定可存取的 Skill。
 - **公開 Skill（`is_public`）**：將一個全域 Skill 標為公開，所有登入者即可使用，**不需逐人授權**。前端在「Skill access」彈窗切換，並以 `public` 標記顯示於 Skill 清單與綁定狀態列。
+- **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈為什麼 script 型 skill 要做這麼多檢核〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
+
+### 為什麼 script 型 skill 要做這麼多檢核
+
+inline skill 的 sample code 只是範本：每次執行時，host 的 AI 會讀 `SKILL.md`、依當次請求改寫程式再執行，寫得不夠精確還有機會被「修正」。**script 型 skill 沒有這層緩衝**：EAA 用 `run_skill_script` 原封不動地執行那支 script，只傳入命令列參數，再用程式（不是 AI）判讀結果。任何一個小偏差，都會直接變成「每次都失敗」或「失敗卻被當成成功」。所以 Generator 在素材變成 script **之前**就把這些問題擋下來，而不是讓使用者部署後才發現：
+
+| 檢核 | 不檢查會發生什麼 |
+| --- | --- |
+| stdout 只能是一個 `json.dumps(...)` 物件，或 `[NEEDS_INFO]` 那一行加一個 JSON（S4、S6） | EAA 會先拿掉 `[NEEDS_INFO]` 行，再把其餘 stdout 當成**一個** JSON 解析。多一行進度訊息，結果就只剩一串無法解析的文字；訊息裡若有 `failed`、`Error:` 之類的字，成功的執行還可能被判成失敗。診斷訊息請印到 stderr。 |
+| exit-0 的輸出不能含 EAA 的錯誤樣式（S11） | EAA 會掃描 exit 0 的輸出，命中錯誤樣式就把這次執行改判為失敗。 |
+| 失敗要放進結果 JSON，並以非 0 exit 結束 | 成功的執行 EAA 不看 stderr；只把「刪除失敗」印到 stderr 再 exit 0，失敗就被當成成功。 |
+| 使用者請求的值只能用 `--flag` 參數傳入（S3、S13、`inputs`） | script 是獨立行程：`globals()` 裡沒有 host 注入的變數，環境變數只帶部署設定與憑證。用其他方式讀使用者的值，skill 就會永遠回 `[NEEDS_INFO]`。 |
+| argparse 要 `add_help=False`，`parse_args()` 要包在 `try` / `except SystemExit`（S10、S10b） | 參數錯誤時 argparse 會 exit 2，EAA 把它記成執行失敗；`--help` 則會把用法說明印到 stdout。改成回 `[NEEDS_INFO]` 並 exit 0，host 才能修正參數或詢問使用者。 |
+| exit code 只能是 0 / 1 / 3（S5） | host 依 exit code 決定下一步：0 成功或需要補資料、1 部署設定有誤、3 下游系統失敗。其他數字它不知道怎麼處理。 |
+| token 從環境變數讀，不能當參數（S7） | 命令列參數會出現在紀錄與行程清單裡。 |
+| `SKILL.md` 要照 script 的實際行為寫（每個 `--flag`、exit-code 表含 needs_info 列、每個輸出欄位） | host 是依 `SKILL.md` 組出參數、判讀結果；文件寫錯，host 就會傳錯參數或看不懂結果。 |
+
+**AI 修改素材為什麼有這麼多限制**：使用者的程式碼通常已經驗證過業務邏輯，Generator 只調整「邊界」（輸入、stdout / stderr、exit code），不碰外部呼叫與業務邏輯；外部呼叫一個都不能少，邊界以外的改動超過一半就視為改寫而拒絕。patch 必須一次修完所有問題（修一半還是當不成 script），同一份素材最多被拒 3 次，避免無限重試；接受後素材會標示「edited by agent · not run」，使用者要實際跑過一次才能確認涵蓋所有操作。實際的 patch 長什麼樣子，見 [04-agent-mechanism.md 第 7.5 節的範例](04-agent-mechanism.md#75-code-素材與-script-形式)。
 
 ---
 
@@ -115,3 +133,5 @@ flowchart TD
 | **OBO Token** | On-Behalf-Of 權杖；Skill 執行時代表使用者去呼叫下游系統所需的權杖。 |
 | **RLS** | Row-Level Security，資料列級隔離；以使用者 email 比對 `dbo.user_skill_grants`。 |
 | **Patch（V4A）** | AI 對 `SKILL.md` 的差異修改格式，可預覽、接受、還原。 |
+| **Skill 形式（inline / script）** | inline：程式碼以 sample code 寫在 `SKILL.md` 裡；script：`SKILL.md` 加上原樣出貨的 `scripts/<name>.py`。一個 skill 的形式進 DRAFT 後就固定，不支援互轉。 |
+| **EAA script 旗標** | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED`；兩者皆為 `true` 才能產出與儲存 script 型 skill。見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)。 |

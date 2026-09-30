@@ -24,7 +24,7 @@ from .models import (
     TestResult,
     TestRun,
 )
-from .skill_lint import lint_skill
+from .skill_lint import is_needs_info_response, lint_skill, script_argument_flags
 from .topology import has_errors, validate_topology
 
 _TEST_INSTRUCTION = (
@@ -135,6 +135,37 @@ def _extract_loaded_resources(raw_response: Any) -> list[str]:
     # The key name has not yet been confirmed against a live runtime response;
     # an absent key yields [] rather than an error.
     return _extract_name_list(raw_response, "loaded_resources")
+
+
+def _check_requested_scripts(
+    raw_response: Any, skill_name: str, script_flags: list[str] | None
+) -> list[dict[str, Any]]:
+    """Scripts the router asked to run; present only when the runtime has SKILL_SCRIPTS_ENABLED.
+
+    ``args`` must be a list of strings. For this skill every ``--flag`` in it must be
+    one the bundled script declares (the S3 accepted set).
+    """
+    entries = raw_response.get("requested_scripts") if isinstance(raw_response, dict) else None
+    if not isinstance(entries, list):
+        return []
+    checked: list[dict[str, Any]] = []
+    for entry in entries:
+        entry = entry if isinstance(entry, dict) else {}
+        skill, args = str(entry.get("skill") or ""), entry.get("args")
+        problems: list[str] = []
+        if not (isinstance(args, list) and all(isinstance(arg, str) for arg in args)):
+            problems.append("args is not a list of strings")
+        elif script_flags is not None and safe_skill_name(skill) == safe_skill_name(skill_name):
+            passed = [arg.split("=", 1)[0] for arg in args if arg.startswith("--")]
+            problems += [f"`{flag}` is not declared by the script" for flag in dict.fromkeys(passed) if flag not in script_flags]
+        checked.append({
+            "skill": skill,
+            "script": str(entry.get("script") or ""),
+            "args": args,
+            "valid": not problems,
+            "problems": problems,
+        })
+    return checked
 
 
 # High specificity on purpose. Entropy scanning would eat base64 images and the
@@ -558,16 +589,23 @@ def _scenario_lint(
         return []
 
 
-def _lint_prepared_code(skill_content: str, results: list[TestResult]) -> None:
+def _lint_prepared_code(
+    skill_content: str, results: list[TestResult], *, script_form: bool = False
+) -> None:
     """Lint the script the runtime WROTE for each sample, in place.
 
     The body prose -- not the sample code block -- is what the runtime reads, so
     the two artifacts drift and only one of them was ever linted. Run this once
     here rather than at prompt-build time: a later patch changes ``skill_content``
-    but not the script an earlier run produced.
+    but not the script an earlier run produced. A script-form skill runs its
+    bundled script, so there is no prepared code to compare.
     """
+    if script_form:
+        return
     for result in results:
         if not (result.apim_response or "").strip():
+            continue
+        if is_needs_info_response(result.apim_response):
             continue
         try:
             issues = lint_skill(
@@ -692,6 +730,7 @@ def run_selection_tests(
     delegation: list[Delegation] | None = None,
     child_resolver: Callable[[str], str | None] | None = None,
     run_mode: str = ROUTE_ONLY,
+    script: str | None = None,
 ) -> TestRun:
     if SkillKind(kind) is SkillKind.SCENARIO:
         layers = _run_scenario_tests(
@@ -743,7 +782,13 @@ def run_selection_tests(
 
     pos_passed = [r for r in positive_results if r.passed is True]
     neg_passed = [r for r in negative_results if r.passed is True]
-    _lint_prepared_code(skill_content, positive_results + negative_results)
+    _lint_prepared_code(skill_content, positive_results + negative_results, script_form=script is not None)
+    try:
+        script_flags = script_argument_flags(script) if script is not None else None
+    except SyntaxError:
+        script_flags = None
+    for result in positive_results + negative_results:
+        result.requested_scripts = _check_requested_scripts(result.apim_raw_response, skill_name, script_flags)
     run = TestRun(
         skill_version_hash=version_hash,
         positive_results=positive_results,

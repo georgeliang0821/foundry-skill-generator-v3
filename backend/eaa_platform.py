@@ -32,6 +32,19 @@ PLATFORM_SECRET_DENYLIST = frozenset({
 # Used when the live OBO_SCOPE_REGISTRY could not be read through MCP.
 STATIC_OBO_REGISTRY_KEYS = frozenset({"AZURE_SQL_ACCESS_TOKEN", "GRAPH_ACCESS_TOKEN"})
 
+# Scanned case-insensitively over the stdout of an exit-0 run (keys of HARD_ERROR_PATTERNS);
+# any hit downgrades the run to content_error unless a line starts with [NEEDS_INFO].
+CONTENT_ERROR_HARD_PATTERNS = (
+    r'"error":',
+    r'"status":\s*".*error"',
+    r'\bHTTP[/ ]\d(?:\.\d)?\s+(?:4\d{2}|5\d{2})\b',
+    r'\b(?:status[_ ]?code|statusCode|status|code)\s*[:=]\s*(?:4\d{2}|5\d{2})\b',
+    r'\b(?:4\d{2}|5\d{2})\s+(?:Unauthorized|Forbidden|Not\s+Found|Internal\s+Server\s+Error|Bad\s+Request|Bad\s+Gateway|Service\s+Unavailable|Gateway\s+Timeout|Conflict|Too\s+Many\s+Requests)\b',
+    r'Missing dependencies?:',
+    r'ModuleNotFoundError',
+    r'ImportError',
+)
+
 _RESERVED_CREDENTIAL_NAMES = frozenset({"PATH"})
 # Case-sensitive, exactly as EAA's filter_caller_env matches them.
 _RESERVED_CREDENTIAL_PREFIXES = ("PYTHON", "LD_", "EAA_VERIFIED_")
@@ -162,6 +175,18 @@ def obo_registry_mapping(aca_env_result: Mapping[str, Any] | None) -> dict[str, 
 def obo_registry_keys(aca_env_result: Mapping[str, Any] | None) -> frozenset[str]:
     keys = frozenset(str(key) for key in obo_registry_mapping(aca_env_result))
     return keys or STATIC_OBO_REGISTRY_KEYS
+
+
+# Both must be on for EAA to load a script-based skill (core_handler.startup / skills_sync).
+SCRIPT_SKILL_FLAGS = ("DYNAMIC_SKILLS_ENABLED", "SKILL_SCRIPTS_ENABLED")
+
+
+def script_flags_off(aca_env_result: Mapping[str, Any] | None) -> list[str]:
+    """The script-skill flags that are not on in ``architectural_config``; a missing flag is off."""
+    config = aca_env_result.get("architectural_config") if isinstance(aca_env_result, Mapping) else None
+    config = config if isinstance(config, Mapping) else {}
+    # EAA reads these as os.environ.get(NAME, "false").lower() == "true".
+    return [name for name in SCRIPT_SKILL_FLAGS if str(config.get(name, "false")).lower() != "true"]
 
 
 def reserved_credentials_key_reason(name: str, registry_keys: Collection[str]) -> str | None:

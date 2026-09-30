@@ -15,9 +15,12 @@ nothing is written.** That changes what the results can tell you:
   a `Skill used:` or a `Final answer:` line**. Do not look for them. Prose is
   not routing evidence either -- a response that merely mentions a skill name
   has not routed to it.
-- `[NEEDS_INFO]` cannot appear as a run result. Its guard sits on the first line
-  of `main()`, which never runs here, so its absence proves nothing about the
-  payload contract.
+- The runtime may answer a sample with `[NEEDS_INFO]` instead of code: when the
+  query lacks a required input, it follows the skill's contract and asks for the
+  missing field rather than preparing a script. That response is valid and is
+  the **correct** handling of missing fields. It is listed under
+  `### Needs-info responses`, not `### Prepared code`. It is not a finding --
+  never report it as invalid Python or as a script the runtime failed to write.
 - The code sits under `### Prepared code` inside `## Latest Test Run`, and each
   script is there **in full**, followed by the static findings already computed
   against it. Only samples that routed to this skill appear; a sample that
@@ -66,7 +69,8 @@ nothing is written.** That changes what the results can tell you:
     positives) and keep a precise 2-3 sentence description rather than keyword
     stuffing. Never copy failed sample queries verbatim into the skill text.
   - **Usage:** for each script under `### Prepared code`, carry over every
-    static finding printed with it, then apply the checks below.
+    static finding printed with it, then apply the checks below. Samples under
+    `### Needs-info responses` have no code and contribute no usage finding.
   - `record_reflection` fields: `what_went_wrong`, `what_to_change`,
     `confidence_delta` (optional float -1..1), `raw`.
   - **`what_to_change` is the fix list the whole REFINE round runs on**, so make

@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .blob_store import compute_hash, parse_frontmatter, safe_skill_name
+from .blob_store import compute_hash, parse_frontmatter, safe_skill_name, script_relpath_of
+from .eaa_platform import SCRIPT_SKILL_FLAGS
 from .models import (
     Delegation,
+    MaterialKind,
     PendingToolCall,
     ScenarioLayerResult,
     Session,
@@ -17,9 +19,32 @@ from .models import (
     TestResult,
     TestRun,
 )
-from .testing import ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, verify_mode_echo
+from .skill_lint import script_argument_flags
+from .testing import ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, _check_requested_scripts, verify_mode_echo
 
 _scenario = "new_skill_happy_path"
+
+# The material_patch scenario expects this material and makes it a lint-clean bundled script.
+E2E_MATERIAL_PATCH = """*** Begin Patch
+*** Update File: material
+@@
+-import requests
++import argparse
++import json
++import requests
+@@
+-ROOM_ID = "room-1"
++parser = argparse.ArgumentParser(add_help=False)
++parser.add_argument("--room-id", default="")
++try:
++    ROOM_ID = parser.parse_args().room_id
++except SystemExit:
++    print("[NEEDS_INFO] missing=ROOM_ID")
++    raise SystemExit(0)
+ response = requests.get(f"https://graph.example.invalid/rooms/{ROOM_ID}", timeout=10)
+-print(response.text)
++print(json.dumps({"room": response.text}))
+*** End Patch"""
 
 
 def e2e_enabled() -> bool:
@@ -46,6 +71,16 @@ def set_scenario(name: str) -> str:
 
 def get_scenario() -> str:
     return _scenario
+
+
+def fake_aca_env_result() -> dict[str, Any] | None:
+    """Stand-in ACA lookup: the script flags are on only in the script-form scenarios."""
+    if get_scenario() not in {"script_flags_on", "material_patch"}:
+        return None
+    return {
+        "variables": [],
+        "architectural_config": {flag: "true" for flag in SCRIPT_SKILL_FLAGS},
+    }
 
 
 def e2e_skill_files(name: str = "e2e-calendar-skill") -> SkillFiles:
@@ -144,6 +179,7 @@ def fake_run_selection_tests(
     kind: SkillKind = SkillKind.CAPABILITY,
     delegation: list[Delegation] | None = None,
     run_mode: str = ROUTE_ONLY,
+    script: str | None = None,
 ) -> TestRun:
     skill_name, _ = parse_frontmatter(skill_content)
     skill_name = skill_name or "e2e-calendar-skill"
@@ -245,6 +281,8 @@ def fake_run_selection_tests(
     ]
     pos_passed = [result for result in positive_results if result.passed is True]
     neg_passed = [result for result in negative_results if result.passed is True]
+    if script is not None:
+        _fake_requested_scripts(positive_results, skill_name, script)
     return TestRun(
         skill_version_hash=version_hash,
         positive_results=positive_results,
@@ -252,6 +290,19 @@ def fake_run_selection_tests(
         positive_hit_rate=(len(pos_passed) / len(positive_results)) if positive_results else 0.0,
         negative_correct_reject_rate=(len(neg_passed) / len(negative_results)) if negative_results else 0.0,
     )
+
+
+def _fake_requested_scripts(results: list[TestResult], skill_name: str, script: str) -> None:
+    """First positive requests the script with a declared flag, the rest with an undeclared one."""
+    try:
+        declared = sorted(script_argument_flags(script))
+    except SyntaxError:
+        declared = []
+    for index, result in enumerate(results):
+        flag = declared[0] if index == 0 and declared else "--e2e-undeclared"
+        entry = {"skill": skill_name, "script": script_relpath_of(skill_name), "args": [flag, "e2e"]}
+        result.apim_raw_response = {**result.apim_raw_response, "requested_scripts": [entry]}
+        result.requested_scripts = _check_requested_scripts(result.apim_raw_response, skill_name, declared)
 
 
 class FakeE2EAgent:
@@ -276,6 +327,8 @@ class FakeE2EAgent:
                 yield from self._patch_stream(session, "Modify existing skill with deterministic E2E patch.")
             else:
                 yield from self._stage_stream(session, stage)
+        elif scenario == "material_patch" and stage == Stage.PREPARE.value:
+            yield from self._material_patch_stream(session)
         elif scenario in {"patch_refine", "patch_failure"} or "patch" in message or "boundary" in message or "change" in message:
             if scenario == "patch_failure":
                 yield from self._patch_stream(session, "Missing anchor patch for E2E failure.", missing_anchor=True)
@@ -458,6 +511,19 @@ class FakeE2EAgent:
         )
         yield {"event": "text_delta", "data": {"delta": "E2E fake patch is ready."}}
         yield self._tool(session, "propose_patch", {"target_file": "SKILL.md", "patch": patch, "reason": reason})
+
+    def _material_patch_stream(self, session: Session):
+        """Moves the hard-coded input of the E2E code material onto an argparse flag."""
+        material = next((m for m in session.materials if m.kind == MaterialKind.CODE), None)
+        if material is None:
+            yield {"event": "text_delta", "data": {"delta": "E2E fake agent needs a code material."}}
+            return
+        yield {"event": "text_delta", "data": {"delta": "E2E fake agent adapted the code material's input."}}
+        yield self._tool(
+            session,
+            "propose_material_patch",
+            {"material_id": material.id, "patch": E2E_MATERIAL_PATCH, "reason": "Read the room id from --room-id."},
+        )
 
     def _tool(self, session: Session, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         call = PendingToolCall(tool=tool, args=args)

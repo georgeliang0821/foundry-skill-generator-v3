@@ -184,6 +184,33 @@ def test_prepared_code_lint_is_empty_without_a_prepared_script(
     assert run.positive_results[0].prepared_code_lint == []
 
 
+def test_needs_info_response_is_not_linted_as_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime may ask for a missing input instead of preparing code; that is not an A1."""
+    response = "\n  [NEEDS_INFO] missing=DRY_RUN\n請提供 DRY_RUN。"
+
+    def fake_runner(positive_samples, negative_samples, skill_name, delegated_token, run_mode=ROUTE_ONLY):
+        positive = [
+            _evaluate_apim_result(
+                query,
+                {"skills_referenced": [skill_name], "response_text": response},
+                skill_name,
+                skill_name,
+                run_mode=run_mode,
+            )
+            for query in positive_samples
+        ]
+        return positive, []
+
+    monkeypatch.setattr("backend.testing._run_apim_tests_sequential_sync", fake_runner)
+
+    run = run_selection_tests(_PREPARED_SKILL_MD, ["use demo"], [], version_hash="v1")
+
+    assert run.positive_results[0].passed is True
+    assert run.positive_results[0].prepared_code_lint == []
+
+
 def test_test_request_appends_audit_instruction() -> None:
     request = _test_request("Help me use demo", mode=EXECUTE)
 
@@ -893,3 +920,38 @@ def test_fake_scenario_runner_never_executes() -> None:
     l2, l3 = run.scenario_layers[1], run.scenario_layers[2]
     assert l2.results[0].apim_raw_response["mode"] == ROUTE_ONLY
     assert l3.results[0].apim_raw_response["mode"] == ROUTE_ONLY
+
+
+def test_fake_runner_checks_requested_scripts_only_for_a_script_skill() -> None:
+    from backend.e2e import fake_run_selection_tests, set_scenario
+
+    set_scenario("new_skill_happy_path")
+    script = (
+        "import argparse\n"
+        "parser = argparse.ArgumentParser(add_help=False)\n"
+        "parser.add_argument('--room')\n"
+    )
+    skill_md = "---\nname: demo-skill\ndescription: Demo\n---\n"
+
+    inline = fake_run_selection_tests(skill_md, ["use demo"], [])
+    run = fake_run_selection_tests(skill_md, ["use demo", "use demo again"], ["tell joke"], script=script)
+
+    assert inline.positive_results[0].requested_scripts == []
+    first, second = (result.requested_scripts[0] for result in run.positive_results)
+    assert (first["script"], first["args"], first["valid"]) == ("scripts/demo-skill.py", ["--room", "e2e"], True)
+    assert (second["valid"], second["problems"]) == (False, ["`--e2e-undeclared` is not declared by the script"])
+    assert run.negative_results[0].requested_scripts == []
+
+
+@pytest.mark.parametrize(("scenario", "flags_on"), [("new_skill_happy_path", False), ("script_flags_on", True)])
+def test_fake_aca_lookup_turns_the_script_flags_on_only_in_its_scenario(scenario: str, flags_on: bool) -> None:
+    from backend.e2e import fake_aca_env_result, set_scenario
+    from backend.eaa_platform import script_flags_off
+
+    set_scenario(scenario)
+    try:
+        result = fake_aca_env_result()
+    finally:
+        set_scenario("new_skill_happy_path")
+
+    assert (not script_flags_off(result)) is flags_on

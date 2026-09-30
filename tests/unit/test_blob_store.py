@@ -8,12 +8,15 @@ from backend.blob_store import (
     MAX_SKILL_NAME_LEN,
     AzureBlobSkillStore,
     LocalSkillStore,
+    VersionConflict,
     blob_path_of,
     blob_prefix_of,
     infer_skill_kind,
     parse_frontmatter,
     replace_frontmatter_name,
     safe_skill_name,
+    script_blob_path_of,
+    script_relpath_of,
 )
 from backend.models import SkillFiles, SkillKind
 
@@ -164,5 +167,70 @@ def test_local_store_rejects_stale_expected_version() -> None:
     store = LocalSkillStore()
     store.save_skill(SkillFiles(name="demo", skill_md="---\nname: demo\n---\n"))
 
-    with pytest.raises(RuntimeError, match="Version hash mismatch"):
+    with pytest.raises(VersionConflict, match="Version hash mismatch"):
         store.save_skill(SkillFiles(name="demo", skill_md="changed"), expected_version_hash="stale")
+
+
+def test_script_path_is_named_after_the_skill() -> None:
+    assert script_relpath_of("Room Finder") == "scripts/room-finder.py"
+    assert script_blob_path_of("room-finder") == "skills/room-finder/scripts/room-finder.py"
+
+
+def test_local_store_keeps_the_script_when_a_save_omits_it() -> None:
+    store = LocalSkillStore()
+    store.save_skill(SkillFiles(name="demo", skill_md="---\nname: demo\n---\n", script="print(1)\n"))
+
+    store.save_skill(SkillFiles(name="demo", skill_md="---\nname: demo\n---\nEdited.\n"))
+
+    assert store.load_skill("demo").script == "print(1)\n"
+    assert store.has_script("demo")
+    store.delete_skill("demo")
+    assert not store.has_script("demo")
+
+
+def test_local_store_list_marks_script_skills() -> None:
+    store = LocalSkillStore()
+    store.save_skill(SkillFiles(name="with-script", skill_md="---\nname: with-script\n---\n", script="print(1)\n"))
+    store.save_skill(SkillFiles(name="inline", skill_md="---\nname: inline\n---\n"))
+
+    assert {entry.name: entry.has_script for entry in store.list_skills()} == {"inline": False, "with-script": True}
+
+
+def test_azure_store_list_marks_script_skills_from_the_listing() -> None:
+    contents = {
+        "skills/with-script/SKILL.md": "---\nname: with-script\n---\n",
+        "skills/with-script/scripts/with-script.py": "print(1)\n",
+        "skills/inline/SKILL.md": "---\nname: inline\n---\n",
+        # A script under another skill's name does not count.
+        "skills/stray/SKILL.md": "---\nname: stray\n---\n",
+        "skills/stray/scripts/other.py": "print(1)\n",
+    }
+
+    class _Blob:
+        def __init__(self, name: str) -> None:
+            self.name, self.etag = name, "etag"
+
+    class _Client:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def download_blob(self):
+            return self
+
+        def readall(self) -> bytes:
+            return contents[self.name].encode("utf-8")
+
+    class _Container:
+        def list_blobs(self, name_starts_with: str = ""):
+            return iter(_Blob(name) for name in contents if name.startswith(name_starts_with))
+
+        def get_blob_client(self, name: str) -> _Client:
+            return _Client(name)
+
+    store = object.__new__(AzureBlobSkillStore)
+    store.prefix, store.container, store.id = "skills", "c", "azure:test"
+    store.service = type("_Service", (), {"get_container_client": lambda self, _name: _Container()})()
+
+    listed = {entry.name: entry.has_script for entry in store.list_skills()}
+
+    assert listed == {"inline": False, "stray": False, "with-script": True}

@@ -174,10 +174,36 @@ def _enum_declarations(text: str) -> list[tuple[str, list[str]]]:
     return found
 
 
+def _script_fidelity(script: str, materials: Sequence[Material] | None) -> list[FidelityIssue]:
+    """Script form ships the code material itself, so anything but a verbatim copy is drift."""
+    sources = [m for m in materials or [] if m.kind in VERBATIM_KINDS]
+    if not sources:
+        return []
+
+    def canonical(text: str) -> str:
+        return (text or "").replace("\r\n", "\n").rstrip()
+
+    if any(canonical(m.content) == canonical(script) for m in sources):
+        return []
+    return [
+        FidelityIssue(
+            rule="script_not_verbatim",
+            message=(
+                "The bundled script differs from the code material it was taken from. A script "
+                "skill ships the user's code verbatim; attach the changed code as a new material "
+                "instead of editing it."
+            ),
+            detail=", ".join(m.id for m in sources),
+        )
+    ]
+
+
 def scan_material_fidelity(
-    skill_md: str, materials: Sequence[Material] | None
+    skill_md: str, materials: Sequence[Material] | None, *, script: str | None = None
 ) -> list[FidelityIssue]:
     """Flag sample code that drifted from the user's own code. Never blocks."""
+    if script is not None:
+        return _script_fidelity(script, materials)
     visible = [
         (material, text, truncated)
         for material, text, truncated in materials_for_prompt(materials)

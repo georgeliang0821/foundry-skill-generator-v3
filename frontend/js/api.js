@@ -138,6 +138,12 @@ export async function fetchSessionTopology(sessionId) {
   return res.json();
 }
 
+export async function fetchSkillForm(sessionId) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/skill-form`);
+  if (!res.ok) throw await responseError(res);
+  return res.json();
+}
+
 export async function updateSessionDraft(sessionId, draft) {
   const res = await apiFetch(`/api/sessions/${sessionId}/draft`, {
     method: "PUT",

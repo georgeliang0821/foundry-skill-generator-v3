@@ -264,7 +264,8 @@
             <div class="pane-intro files-header">
               <div>
                 <h2><svg class="icon pane-icon" aria-hidden="true"><use href="#i-document"/></svg> SKILL.md</h2>
-                <p class="panel-subtitle">Single artifact. Environment guidance and sample code live inside this Markdown.</p>
+                <p id="filesSubtitle" class="panel-subtitle">Single artifact. Environment guidance and sample code live inside this Markdown.</p>
+                <div id="fileSwitch" class="file-switch hidden" role="tablist" aria-label="Skill files" data-testid="file-switch"></div>
               </div>
               <div class="button-row">
                 <button id="saveDraftBtn" type="button" class="icon-button primary" data-testid="accept-draft-button">
@@ -275,7 +276,7 @@
             </div>
             <div class="skill-md-workspace">
               <label class="skill-editor-pane">
-                <span>Source</span>
+                <span id="editorLabel">Source</span>
                 <textarea id="editor" spellcheck="false" data-testid="file-editor"></textarea>
               </label>
               <div

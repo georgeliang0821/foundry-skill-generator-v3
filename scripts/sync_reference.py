@@ -281,17 +281,23 @@ def _collection_members(value: ast.AST) -> list[str] | None:
 
 
 def constant_members(content: bytes | None, filename: str, symbol: str) -> list[str] | None:
-    """Members of a module-level string collection, or of a comma-separated string constant."""
+    """Members of a module-level string collection, a dict's keys, or a comma-separated string constant."""
     try:
         tree = ast.parse(content or b"", filename=filename)
     except SyntaxError:
         return None
     for node in tree.body:
-        if not (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)):
+        if isinstance(node, ast.AnnAssign):
+            if not (isinstance(node.target, ast.Name) and node.target.id == symbol) or node.value is None:
+                continue
+        elif not (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)):
             continue
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return sorted(item.strip() for item in node.value.value.split(",") if item.strip())
-        return _collection_members(node.value)
+        value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return sorted(item.strip() for item in value.value.split(",") if item.strip())
+        if isinstance(value, ast.Dict):
+            return _collection_members(ast.Tuple(elts=[key for key in value.keys if key is not None]))
+        return _collection_members(value)
     return None
 
 

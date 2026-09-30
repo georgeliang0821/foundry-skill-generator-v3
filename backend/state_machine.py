@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
-from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_mapping
+from typing import Literal
+
+from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_mapping, script_flags_off
 from .input_contract import input_contract_errors, request_inputs_enabled
 
 from .material_fidelity import (
@@ -26,6 +30,7 @@ from .models import (
     TestResult,
     prepare_checklist_for,
 )
+from .skill_lint import is_needs_info_response, script_argument_names, script_only_errors
 from .topology import declared_children, parse_frontmatter_block
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -59,6 +64,24 @@ KIND_FORMAT_SPEC: dict[SkillKind, str] = {
     SkillKind.CAPABILITY: "10_format_spec.md",
     SkillKind.SCENARIO: "10_format_spec_scenario.md",
 }
+
+# Appended to the stage prompt by skill FORM, which is orthogonal to SkillKind (see _form_prompt_key).
+# "script_candidate" = a NEW capability skill whose form is not locked yet, with a code material and the flags on.
+FORM_STAGE_ADDENDA: dict[str, dict[Stage, tuple[str, ...]]] = {
+    "script_candidate": {
+        Stage.PREPARE: ("01_prepare_script_addendum.md",),
+    },
+    "script": {
+        Stage.DRAFT: ("02_draft_script_addendum.md", "13_script_save.md"),
+        Stage.REFINE: ("02_draft_script_addendum.md", "13_script_save.md"),
+        Stage.TEST: ("04_test_script_addendum.md", "13_script_save.md"),
+        Stage.DONE: ("13_script_save.md",),
+    },
+}
+
+# One line appended to the eaa_flags reason in `## Skill Form`; flags-off sessions get no addendum.
+SKILL_FORM_FLAGS_OFF_NOTE = "01_prepare_script_flags_off.md"
+SKILL_FORM_LOOKUP_FAILED_NOTE = "01_prepare_script_lookup_failed.md"
 
 
 def stage_prompt_for(kind: SkillKind, stage: Stage) -> str:
@@ -262,6 +285,206 @@ def check_quality_gates(session: Session) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Skill form (inline sample code vs bundled script)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FormCheck:
+    """One unmet script-form condition. States what failed, never how to fix it."""
+
+    check: str
+    message: str
+    rule: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"check": self.check, "message": self.message, "rule": self.rule}
+
+
+@dataclass(frozen=True)
+class SkillFormVerdict:
+    form: Literal["inline", "script"]
+    locked: bool
+    failures: tuple[FormCheck, ...] = ()
+    # The code material shipped verbatim when an unlocked verdict is script.
+    script: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "form": self.form,
+            "locked": self.locked,
+            "failures": [failure.to_dict() for failure in self.failures],
+        }
+
+
+def script_readiness_problems(session: Session, script: str) -> list[FormCheck]:
+    """Why ``script`` cannot ship verbatim as this session's bundled script; empty when it can."""
+    try:
+        errors = script_only_errors(script)
+    except SyntaxError as exc:
+        return [FormCheck("parses", f"The code material is not valid Python: {exc.msg} (line {exc.lineno}).")]
+    problems = [FormCheck("script_lint", issue.message, issue.rule) for issue in errors]
+    accepted = script_argument_names(script)
+    unbound = [
+        v.name for v in session.prepare_brief.variables
+        if v.kind == "runtime" and v.source == "request" and v.name and v.name.upper() not in accepted
+    ]
+    if unbound:
+        problems.append(FormCheck(
+            "inputs",
+            "These request inputs have no matching `add_argument` flag: "
+            + ", ".join(f"`{name}`" for name in unbound)
+            + ". The host passes a bundled script's business inputs only as `--flag` arguments; "
+            "environment variables carry deployment settings and credentials, never values from "
+            "the user's request.",
+        ))
+    return problems
+
+
+def evaluate_skill_form(session: Session) -> SkillFormVerdict:
+    """Script form iff every condition holds; otherwise inline with each unmet condition listed."""
+    if session.skill_form is not None:
+        return SkillFormVerdict(form=session.skill_form, locked=True)
+    if Mode(session.mode) is Mode.MODIFY:
+        return SkillFormVerdict(
+            form="script" if session.current_skill.script is not None else "inline", locked=True
+        )
+    failures: list[FormCheck] = []
+    if SkillKind(session.skill_kind) is SkillKind.SCENARIO:
+        failures.append(FormCheck("skill_kind", "A scenario skill has no script of its own."))
+    if Mode(session.mode) is not Mode.NEW:
+        failures.append(FormCheck("mode", f"Only a new skill can take the script form; this session is {session.mode}."))
+    flags_off = script_flags_off(session.aca_env_result)
+    if flags_off and flag_lookup_failed(session):
+        failures.append(FormCheck(
+            "eaa_flags",
+            "Could not read the EAA script flags: the ACA lookup failed "
+            f"({_short_error(session.aca_env_error)}). Until a lookup succeeds it is unknown whether "
+            "EAA runs script skills.",
+        ))
+    elif flags_off:
+        failures.append(FormCheck(
+            "eaa_flags",
+            f"EAA does not run script skills: {', '.join(flags_off)} is not true in the ACA "
+            "architectural_config (missing counts as false).",
+        ))
+    codes = [m for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+    script: str | None = None
+    if len(codes) != 1:
+        failures.append(FormCheck("code_material", f"Exactly one code material is required; there are {len(codes)}."))
+    else:
+        script = codes[0].content
+        failures += script_readiness_problems(session, script)
+    brief = session.prepare_brief
+    if not (brief.script_covers_operations and brief.verify_checklist.get("variables_ok", False)):
+        failures.append(FormCheck(
+            "covers_operations",
+            "It is not confirmed in variables_ok that the code material covers every operation.",
+        ))
+    if failures:
+        return SkillFormVerdict(form="inline", locked=False, failures=tuple(failures))
+    return SkillFormVerdict(form="script", locked=False, script=script)
+
+
+def flag_lookup_failed(session: Session) -> bool:
+    return session.aca_env_result is None and bool(session.aca_env_error)
+
+
+def _short_error(error: str) -> str:
+    # ACA returns a whole HTML page after the status line.
+    head = error.split(" | ", 1)[0].strip()
+    return head if len(head) <= 120 else head[:117] + "..."
+
+
+def _awaits_flags(session: Session) -> bool:
+    """A NEW capability skill with a code material whose form still depends on the EAA flags."""
+    return (
+        session.skill_form is None
+        and SkillKind(session.skill_kind) is SkillKind.CAPABILITY
+        and Mode(session.mode) is Mode.NEW
+        and bool(code_material_contents(session))
+    )
+
+
+def needs_flag_lookup_before_lock(session: Session) -> bool:
+    """Leaving PREPARE would lock the form without ever having read the EAA flags."""
+    return Stage(session.current_stage) is Stage.PREPARE and _awaits_flags(session) and session.aca_env_result is None
+
+
+SCRIPT_LOCKED_INLINE_MESSAGE = (
+    "The skill form is now locked as inline, not as a bundled script. These script-form conditions "
+    "were unmet when PREPARE ended:\n{failures}\nIn your next reply, tell the user plainly that this "
+    "skill ships inline sample code, name these conditions, and correct any earlier statement that it "
+    "would be a bundled script. Switching to a bundled script needs a new session."
+)
+
+
+def lock_skill_form(session: Session) -> None:
+    """Fix the form for the rest of the session; a NEW script skill takes its code material verbatim."""
+    if session.skill_form is not None:
+        return
+    candidate = _form_prompt_key(session) == "script_candidate" or (
+        _awaits_flags(session) and flag_lookup_failed(session)
+    )
+    verdict = evaluate_skill_form(session)
+    session.skill_form = verdict.form
+    if not verdict.locked and verdict.form == "script":
+        session.current_skill.script = verdict.script
+    elif candidate and verdict.failures:
+        session.conversation.append(ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=SCRIPT_LOCKED_INLINE_MESSAGE.format(
+                failures="\n".join(_form_check_line(failure) for failure in verdict.failures)
+            ),
+        ))
+
+
+def code_material_contents(session: Session) -> list[str]:
+    return [m.content for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+
+
+def script_replacement_problems(session: Session) -> list[FormCheck]:
+    """Why the code materials cannot replace a locked script; empty when there is nothing to replace."""
+    codes = code_material_contents(session)
+    if session.skill_form != "script" or not codes or codes == [session.current_skill.script]:
+        return []
+    if len(codes) != 1:
+        return [FormCheck(
+            "code_material",
+            f"Exactly one code material is required to replace the script; there are {len(codes)}.",
+        )]
+    return script_readiness_problems(session, codes[0])
+
+
+SCRIPT_REPLACED_MESSAGE = (
+    "The bundled script was replaced by the new code material. Confirm with the user that the new "
+    "code still covers every operation this skill documents."
+)
+
+
+def apply_code_material_change(session: Session, before: list[str]) -> None:
+    """Run after any entry point changed ``session.materials``; ``before`` = code_material_contents beforehand."""
+    if code_material_contents(session) == before:
+        return
+    session.material_patch_rejections = 0
+    if session.skill_form is None:
+        brief = session.prepare_brief
+        brief.script_covers_operations = False
+        brief.verify_checklist["variables_ok"] = False
+        brief.verify_evidence.pop("variables_ok", None)
+        return
+    codes = code_material_contents(session)
+    if (
+        session.skill_form == "script"
+        and len(codes) == 1
+        and codes[0] != session.current_skill.script
+        and not script_replacement_problems(session)
+    ):
+        session.current_skill.script = codes[0]
+        session.conversation.append(ChatMessage(role=MessageRole.SYSTEM, content=SCRIPT_REPLACED_MESSAGE))
+
+
+# ---------------------------------------------------------------------------
 # Transitions
 # ---------------------------------------------------------------------------
 
@@ -301,6 +524,7 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         missing = check_quality_gates(session)
         if missing:
             raise QualityGateError(missing)
+        lock_skill_form(session)
     if target == Stage.PREPARE and current in {Stage.DRAFT, Stage.REFINE, Stage.TEST, Stage.DONE}:
         # Coming back to PREPARE: clear the draft but keep the brief & materials.
         session.current_skill.skill_md = ""
@@ -577,6 +801,59 @@ def _format_open_fixes(session: Session) -> str | None:
     return "\n".join(lines)
 
 
+def _format_skill_form(session: Session) -> str | None:
+    has_code = any(MaterialKind(m.kind) is MaterialKind.CODE for m in session.materials)
+    if SkillKind(session.skill_kind) is SkillKind.SCENARIO or not (has_code or session.skill_form == "script"):
+        return None
+    verdict = evaluate_skill_form(session)
+    flag_failures = [failure for failure in verdict.failures if failure.check == "eaa_flags"]
+    if flag_failures:
+        # With the flags off nothing else can make it a script; the other failures are noise.
+        note = SKILL_FORM_LOOKUP_FAILED_NOTE if flag_lookup_failed(session) else SKILL_FORM_FLAGS_OFF_NOTE
+        return (
+            f"## Skill Form\n\nform: inline\n{_form_check_line(flag_failures[0])} "
+            f"{load_prompt(note)}"
+        )
+    lines = ["## Skill Form", "", f"form: {verdict.form}", f"locked: {str(verdict.locked).lower()}"]
+    if verdict.failures:
+        lines += ["", "Unmet script-form conditions:"]
+        lines += [_form_check_line(failure) for failure in verdict.failures]
+    replacement = script_replacement_problems(session)
+    if replacement:
+        lines += ["", "The code material did not replace the script; the previous script is kept:"]
+        lines += [_form_check_line(failure) for failure in replacement]
+    return "\n".join(lines)
+
+
+def _form_check_line(failure: FormCheck) -> str:
+    return f"- {failure.check}{f' ({failure.rule})' if failure.rule else ''}: {failure.message}"
+
+
+def _form_prompt_key(session: Session) -> str | None:
+    if session.skill_form == "script":
+        return "script"
+    if (
+        session.skill_form is None
+        and SkillKind(session.skill_kind) is SkillKind.CAPABILITY
+        and Mode(session.mode) is Mode.NEW
+        and code_material_contents(session)
+        and not script_flags_off(session.aca_env_result)
+    ):
+        return "script_candidate"
+    return None
+
+
+def _format_bundled_script(session: Session) -> str | None:
+    script = session.current_skill.script
+    if session.skill_form != "script" or script is None:
+        return None
+    heading = "## Bundled Script\n\nRead-only. Shipped next to SKILL.md; never edited in this session."
+    for material in session.materials:
+        if MaterialKind(material.kind) is MaterialKind.CODE and material.content == script:
+            return f"{heading}\n\nIt is the code material `{material.id}` above, verbatim."
+    return f"{heading}\n\n```python\n{script}\n```"
+
+
 def _format_aca_environment(session: Session) -> str | None:
     if session.aca_env_error:
         return f"## Existing ACA Environment Variables\n\nLookup status: failed\n\nError: {session.aca_env_error}"
@@ -672,6 +949,23 @@ def _format_prepared_code(results: list[TestResult]) -> list[str]:
     return lines
 
 
+def _format_needs_info_responses(results: list[TestResult]) -> list[str]:
+    if not results:
+        return []
+    lines = [
+        "",
+        "### Needs-info responses",
+        "",
+        "For these samples the runtime found a required input missing from the query and",
+        "answered with the `[NEEDS_INFO]` contract instead of preparing code. That is the",
+        "correct handling of missing fields, not a finding. There is no code to review here.",
+    ]
+    for result in results:
+        first_line = result.apim_response.lstrip().splitlines()[0]
+        lines.append(f"- From: {result.query} -> `{first_line}`")
+    return lines
+
+
 def _format_prepared_code_lint(issues: list[dict]) -> list[str]:
     """Static findings against the script above. Already decided -- do not re-derive them."""
     if not issues:
@@ -685,6 +979,17 @@ def _format_prepared_code_lint(issues: list[dict]) -> list[str]:
         detail = issue.get("detail") or ""
         suffix = f" [{detail}]" if detail else ""
         lines.append(f"- {rule}{suffix}: {issue.get('message', '')}")
+    return lines
+
+
+def _format_requested_scripts(entries: list[dict]) -> list[str]:
+    if not entries:
+        return ["  requested_scripts: (none)"]
+    lines = ["  requested_scripts:"]
+    for entry in entries:
+        verdict = "valid" if entry.get("valid") else "INVALID -- " + "; ".join(entry.get("problems") or [])
+        args = json.dumps(entry.get("args"), ensure_ascii=False)
+        lines.append(f"  - `{entry.get('skill', '')}` args {args}: {verdict}")
     return lines
 
 
@@ -723,9 +1028,12 @@ def _format_latest_test_run(session: Session) -> str | None:
                 lines.append(f"  error: {result.error}")
             elif result.reasoning:
                 lines.append(f"  {result.reasoning}")
+            if session.skill_form == "script":
+                lines.extend(_format_requested_scripts(result.requested_scripts))
             if result.apim_response and _selected_target_skill(result, positive=positive):
                 routed_here.append(result)
-    lines.extend(_format_prepared_code(routed_here))
+    lines.extend(_format_prepared_code([r for r in routed_here if not is_needs_info_response(r.apim_response)]))
+    lines.extend(_format_needs_info_responses([r for r in routed_here if is_needs_info_response(r.apim_response)]))
     return "\n".join(lines)
 
 
@@ -1065,9 +1373,10 @@ def _format_materials(session: Session) -> str | None:
             continue
         lines += ["", f"### {title}", "", policy]
         for material, text in group:
+            origin = ", origin=agent_patch, not run by the user" if material.origin == "agent_patch" else ""
             lines += [
                 "",
-                f"<<<BEGIN MATERIAL {material.id} (kind={material.kind.value})>>>",
+                f"<<<BEGIN MATERIAL {material.id} (kind={material.kind.value}{origin})>>>",
                 text,
                 f"<<<END MATERIAL {material.id}>>>",
             ]
@@ -1085,6 +1394,9 @@ def build_system_prompt(session: Session) -> str:
     addendum = KIND_STAGE_ADDENDA.get(kind, {}).get(stage)
     if addendum:
         parts.append(load_prompt(addendum))
+    form_key = _form_prompt_key(session)
+    for filename in FORM_STAGE_ADDENDA.get(form_key or "", {}).get(stage, ()):
+        parts.append(load_prompt(filename))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
     runtime_state += f"\nrequest_inputs_enabled: {str(request_inputs_enabled()).lower()}"
     if kind is SkillKind.SCENARIO:
@@ -1115,6 +1427,9 @@ def build_system_prompt(session: Session) -> str:
     brief_section = _format_prepare_brief(session)
     if brief_section:
         parts.append(brief_section)
+    form_section = _format_skill_form(session)
+    if form_section:
+        parts.append(form_section)
     if stage in {Stage.PREPARE, Stage.DRAFT, Stage.REFINE}:
         peer_section = _format_peer_skills(session)
         if peer_section:
@@ -1150,6 +1465,9 @@ def build_system_prompt(session: Session) -> str:
             f"version_hash: {session.current_skill.version_hash}\n\n"
             f"```markdown\n{session.current_skill.skill_md}\n```"
         )
+    bundled_script = _format_bundled_script(session)
+    if bundled_script:
+        parts.append(bundled_script)
     # Keep transition guidance last so the Agent ends the system message with
     # the exact outgoing edges it may choose from for this stage.
     parts.append(load_prompt("12_input_sources.md"))
