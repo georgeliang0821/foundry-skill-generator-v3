@@ -565,6 +565,9 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         session.current_skill.skill_md = ""
         session.current_skill.version_hash = ""
         session.prepare_brief.revisit = True
+    if target == Stage.DONE and session.iteration_reflections:
+        # Finalizing accepts the skill as-is, so whatever is still open was declined.
+        session.iteration_reflections[-1].skipped.extend(open_fix_items(session)[1])
     session.current_stage = target
     session.conversation.append(
         ChatMessage(

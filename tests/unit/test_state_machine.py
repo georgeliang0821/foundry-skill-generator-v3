@@ -802,6 +802,16 @@ def test_open_fix_items_are_stale_after_a_newer_test_run() -> None:
     assert open_fix_items(session) == ([], [])
 
 
+def test_finalizing_skips_the_still_open_fix_items() -> None:
+    session = _reflected_session("fix one", "fix two")
+    _record_patch(session, "fix one")
+
+    transition(session, Stage.DONE, "finalize as-is")
+
+    assert session.iteration_reflections[-1].skipped == ["fix two"]
+    assert open_fix_items(session) == (["fix one"], [])
+
+
 def test_prompt_carries_the_open_fix_list_in_refine() -> None:
     session = _reflected_session("fix one", "fix two")
     _record_patch(session, "fix one")

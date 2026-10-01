@@ -1166,7 +1166,8 @@ function renderQuestionQueueStatus() {
 function renderFixListStatus() {
   const node = el("fixListStatus");
   if (!node) return;
-  const remaining = openFixItems();
+  const stage = session?.current_stage;
+  const remaining = stage === "refine" || stage === "test" ? openFixItems() : [];
   if (!remaining.length) {
     node.classList.add("hidden");
     node.innerHTML = "";
