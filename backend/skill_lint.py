@@ -1061,7 +1061,7 @@ def _check_input_bindings(
         elif template and not (isinstance(value, ast.Constant) and value.value is None):
             issues.append(LintIssue(rule="A14", severity="error", message=f"The sample template must leave `{binding.name}` as None, not an executable example value. The Coding Agent binds it from the current request.", detail=binding.name))
         if binding.required and binding.name.upper() not in codes:
-            issues.append(LintIssue(rule="A14", severity="error", message=f"Validate `{binding.name}` before external calls and emit `[NEEDS_INFO] missing={binding.name.upper()}` when required but absent. A request source does not remove missing-data handling.", detail=binding.name))
+            issues.append(LintIssue(rule="A14", severity="error", message=f"Validate `{binding.name}` before external calls and emit `[NEEDS_INFO] missing={binding.name.upper()}` when required but absent. A request source does not remove missing-data handling. The code must appear as a string literal; one built at runtime (e.g. `','.join(missing)`) is not recognised.", detail=binding.name))
     for name in supplied.keys() - request_fields:
         issues.append(LintIssue(rule="A14", severity="error", message=f"`request_inputs` contains `{name}` without a request-source binding. Do not duplicate credential inputs or invent a fallback.", detail=name))
     return issues

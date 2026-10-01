@@ -4315,7 +4315,7 @@ function renderToolCall(call) {
         nameError.hidden = true;
         const makePublic = draftPublicChoice();
         if (makePublic === null) return;
-        await acceptTool(call, { action: "accept", name });
+        if (await acceptTool(call, { action: "accept", name }) === false) return;
         if (makePublic) await publishAfterDraftAccept(name);
       }),
     );
@@ -4777,6 +4777,11 @@ async function acceptTool(call, result) {
       appendConversationStatus(scriptFlagsOffText(detail), { failed: true });
       return false;
     }
+    if (isLintFailure(detail)) {
+      removeConversationStatus(runningNode);
+      await reportLintFailure(detail);
+      return false;
+    }
     if (call.tool === "propose_patch" && detail?.recoverable) {
       appendConversationStatus(`Patch was not applied: ${detail.guidance || detail.error}`, { failed: true });
       await sendChatPayload(detail.retry_prompt || patchRetryPrompt(detail), []);
@@ -4838,6 +4843,33 @@ function scriptFlagsOffText(detail) {
 
 function isScriptFlagsOffError(err) {
   return err?.status === 409 && err?.detail?.kind === "script_flags_off";
+}
+
+function isLintFailure(detail) {
+  return ["skill_lint_failed", "eaa_lint_failed"].includes(detail?.kind);
+}
+
+async function reportLintFailure(detail) {
+  const count = (detail.issues || []).length || 1;
+  appendConversationStatus(
+    `SKILL.md was not saved: the ${detail.kind === "eaa_lint_failed" ? "EAA" : "skill"} lint found ${count} problem(s). `
+      + "The agent has been asked to fix them. Review its corrected version, then accept or save again. "
+      + "You can also edit SKILL.md yourself in the Files tab.",
+    { failed: true },
+  );
+  await sendChatPayload(lintFixPrompt(detail), []);
+}
+
+function lintFixPrompt(detail) {
+  const redraft = session?.current_stage === "draft" && !session?.remote_skill_id;
+  return [
+    "The backend refused to save SKILL.md because of these lint findings:",
+    ...(detail.issues || [detail.message]).map((issue) => `- ${issue}`),
+    redraft
+      ? "The draft has not been saved yet. Call propose_skill_draft again with the COMPLETE corrected SKILL.md."
+      : "Propose one propose_patch that fixes all of them.",
+    "Fix every finding and change nothing else. Do not ask the user first.",
+  ].join("\n");
 }
 
 function chooseOrphanAction(err) {
@@ -6273,6 +6305,10 @@ bind("saveDraftBtn", "click", async () => {
     } catch (err) {
       if (isScriptFlagsOffError(err)) {
         appendConversationStatus(scriptFlagsOffText(err.detail), { failed: true });
+        return;
+      }
+      if (isLintFailure(err.detail)) {
+        await reportLintFailure(err.detail);
         return;
       }
       const orphanAction = chooseOrphanAction(err);

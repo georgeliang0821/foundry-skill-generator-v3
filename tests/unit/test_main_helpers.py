@@ -146,7 +146,8 @@ def test_apply_tool_effect_updates_state(backend_main) -> None:
     )
     assert session.current_skill.version_hash == compute_hash(session.current_skill.skill_md)
 
-    # Second propose_skill_draft must be rejected (invariant).
+    # A second propose_skill_draft is rejected once the skill has been saved (invariant).
+    session.remote_skill_id = "demo"
     import pytest
     with pytest.raises(ValueError):
         backend_main.apply_tool_effect(

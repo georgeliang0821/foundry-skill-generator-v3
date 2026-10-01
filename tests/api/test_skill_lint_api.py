@@ -96,7 +96,7 @@ def test_request_skill_cannot_save_without_binding_validation(client, monkeypatc
     client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": skill_md})
     response = client.post(f"/api/sessions/{session_id}/save", json={"name": "request-skill"})
     assert response.status_code == 400
-    assert "A14" in response.json()["detail"]
+    assert "A14" in response.json()["detail"]["message"]
 
 
 def test_source_change_is_pending_and_invalidates_confirmation(client, backend_main, monkeypatch) -> None:
@@ -137,8 +137,30 @@ def test_save_is_blocked_when_the_sample_code_does_not_parse(client) -> None:
     response = client.post(f"/api/sessions/{session_id}/save", json={"name": "broken-skill"})
 
     assert response.status_code == 400
-    assert response.json()["detail"].startswith("Skill lint failed:")
-    assert "A1" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["kind"] == "skill_lint_failed"
+    assert detail["recoverable"] is True
+    assert detail["message"].startswith("Skill lint failed:")
+    assert any(issue.startswith("A1:") for issue in detail["issues"])
+
+
+def test_redraft_replaces_an_unsaved_draft_but_never_a_saved_skill(client, backend_main) -> None:
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    session = backend_main.sessions[session_id]
+    session.current_stage = "draft"
+    first = PendingToolCall(tool="propose_skill_draft", args={"skill_md": BROKEN_CODE_SKILL})
+    second = PendingToolCall(tool="propose_skill_draft", args={"skill_md": RAISING_SKILL})
+    session.pending_tool_calls = [first]
+    backend_main.apply_tool_effect(session, "propose_skill_draft", first.args)
+    session.pending_tool_calls.append(second)
+
+    backend_main.apply_tool_effect(session, "propose_skill_draft", second.args)
+
+    assert session.current_skill.skill_md == RAISING_SKILL
+    assert [call.call_id for call in session.pending_tool_calls] == [second.call_id]
+    session.remote_skill_id = "raising-skill"
+    with pytest.raises(ValueError, match="saved skill"):
+        backend_main.apply_tool_effect(session, "propose_skill_draft", first.args)
 
 
 def test_save_is_not_blocked_by_advisory_lint_findings(client) -> None:
@@ -185,8 +207,9 @@ def test_save_is_blocked_by_eaa_lint_errors(client, backend_main, monkeypatch) -
 
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert detail.startswith("EAA skill lint failed:")
-    assert errors[0] in detail
+    assert detail["kind"] == "eaa_lint_failed"
+    assert detail["message"].startswith("EAA skill lint failed:")
+    assert detail["issues"] == errors
     assert not backend_main.store.list_skills()
 
 

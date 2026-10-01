@@ -329,6 +329,9 @@ class FakeE2EAgent:
                 yield from self._stage_stream(session, stage)
         elif scenario == "material_patch" and stage == Stage.PREPARE.value:
             yield from self._material_patch_stream(session)
+        elif scenario == "lint_failure" and "refused to save skill.md" in message:
+            yield {"event": "text_delta", "data": {"delta": "E2E fake agent fixed the lint findings."}}
+            yield self._tool(session, "propose_skill_draft", {"skill_md": e2e_skill_files().skill_md})
         elif scenario in {"patch_refine", "patch_failure"} or "patch" in message or "boundary" in message or "change" in message:
             if scenario == "patch_failure":
                 yield from self._patch_stream(session, "Missing anchor patch for E2E failure.", missing_anchor=True)
@@ -468,8 +471,12 @@ class FakeE2EAgent:
             yield {"event": "text_delta", "data": {"delta": "E2E fake draft already exists."}}
             return
         files = e2e_scenario_skill_files() if SkillKind(session.skill_kind) is SkillKind.SCENARIO else e2e_skill_files()
+        skill_md = files.skill_md
+        if get_scenario() == "lint_failure":
+            # Unparseable sample code: A1 blocks the save.
+            skill_md = skill_md.replace("def run():", "def run(:")
         yield {"event": "text_delta", "data": {"delta": "E2E fake draft is ready."}}
-        yield self._tool(session, "propose_skill_draft", {"skill_md": files.skill_md})
+        yield self._tool(session, "propose_skill_draft", {"skill_md": skill_md})
 
     def _question_stream(self, session: Session, scenario: str):
         yield {"event": "text_delta", "data": {"delta": "E2E fake agent needs confirmation."}}

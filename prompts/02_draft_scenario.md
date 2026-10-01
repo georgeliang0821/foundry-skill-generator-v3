@@ -5,9 +5,10 @@ wait for the user's accept/reject.
 
 ## Rules
 
-- You may call `propose_skill_draft` **only once per session** and **only while
-  the current draft is empty**. After acceptance, never call it again -- use
-  REFINE.
+- You may call `propose_skill_draft` **only while the current draft is empty**,
+  or again when the backend refused to save it (the message lists the lint
+  findings): then send the COMPLETE corrected SKILL.md, changing only what the
+  findings require. After acceptance, never call it again -- use REFINE.
 - The frontmatter must satisfy every topology rule in the Scenario Skill Format
   Spec. In particular: `metadata.children` is a non-empty YAML list nested
   under `metadata`, and `metadata.skill_type` is exactly

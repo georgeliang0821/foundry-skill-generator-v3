@@ -322,7 +322,7 @@ def test_session_lint_and_save_use_the_script_form_rules(client, backend_main, f
 
     assert [item["rule"] for item in topology["lint"]] == ["S9", "S10b"]
     assert response.status_code == 400
-    assert "S10b" in response.json()["detail"]
+    assert "S10b" in response.json()["detail"]["message"]
     assert calls == [] and fake_sql.skills == {}
 
 

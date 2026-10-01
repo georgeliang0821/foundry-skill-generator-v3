@@ -160,7 +160,7 @@ Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層�
 | `update_prepare_checklist` | PREPARE | 更新準備期 Checklist 子項 (definition_clear 等)，附帶實質佐證文字。 |
 | `propose_neighbor_edit` | PREPARE / REFINE | 對鄰近 Peer Skill 提交 V4A 補丁，修剪 description 或補 When NOT to Use。 |
 | `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script。見 7.5 節。 |
-| `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter，每 session 僅限一次）。 |
+| `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter）。儲存前被 lint 擋下時可再送一次完整修正版；儲存後不可再用。 |
 | `propose_patch` | REFINE / TEST | 提交極小區間 of V4A git-like Patch（依 Anchor 替換代碼或內文）。 |
 | `rename_skill` | REFINE / TEST | 改名。後端直接改寫 frontmatter `name`，並把 Blob 資料夾、SQL 列與所有授權搬到新名稱，舊名刪除。frontmatter `name` 不得用 `propose_patch` 修改。 |
 | `request_test_run` | TEST | 異步提交正面、負面測試用例集合給設定的 Router runtime endpoint 跑路由盲測（`mode=route_only`，只路由不執行；端點可直連，也可選擇經由 APIM 等閘道）。 |
@@ -275,8 +275,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | 屬性 | 規格說明 |
 | --- | --- |
 | **Input (上下文)** | 完整的 Prepare Brief（定義、研究、三類變數、測試用例）、Peer Skills 名錄、`10_format_spec.md`。 |
-| **決策邏輯** | 唯有在草稿為空時，方可發動一次 `propose_skill_draft`。大腦必須全力保證 YAML 格式合法（多國與 `:` 符號等引號包覆處理，避免 SQL 剖析 YAMLError）。 |
-| **Output** | `propose_skill_draft` 工具調用（單 session 限一次）。 |
+| **決策邏輯** | 草稿為空時發動 `propose_skill_draft`；若接受時被儲存 lint 擋下，前端會把 findings 交回 Agent，由它再送一次完整修正版（新卡片取代舊卡片）。大腦必須全力保證 YAML 格式合法（多國與 `:` 符號等引號包覆處理，避免 SQL 剖析 YAMLError）。 |
+| **Output** | `propose_skill_draft` 工具調用（儲存成功前可重送修正版，`remote_skill_id` 存在後一律拒絕）。 |
 | **解鎖下一關條件** | 使用者在 UI 端予以接受（Accept Draft / 點選「儲存」），系統會儲存初版、執行 material fidelity 與 skill lint，隨即將 DRAFT 進展到 REFINE 狀態。 |
 
 > 📜 **代碼段落排列規範：**

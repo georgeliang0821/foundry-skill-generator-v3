@@ -897,8 +897,8 @@ def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
         raise HTTPException(status_code=400, detail=f"EAA rejected the skill package: {exc}") from exc
     if not result.valid:
         log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, errors=result.errors)
-        detail = "\n".join(result.errors) or "EAA reported the package invalid without listing errors."
-        raise HTTPException(status_code=400, detail="EAA skill lint failed:\n" + detail)
+        errors = result.errors or ["EAA reported the package invalid without listing errors."]
+        raise _lint_failure("eaa_lint_failed", "EAA skill lint failed", errors)
     if script is not None and not _ruleset_at_least(result.ruleset_version, SCRIPT_MIN_EAA_RULESET):
         raise HTTPException(
             status_code=503,
@@ -909,6 +909,19 @@ def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
             ),
         )
     return result
+
+
+def _lint_failure(kind: str, title: str, issues: list[str]) -> HTTPException:
+    # Recoverable: the frontend hands the findings back to the agent to fix.
+    return HTTPException(
+        status_code=400,
+        detail={
+            "kind": kind,
+            "recoverable": True,
+            "message": f"{title}:\n" + "\n".join(issues),
+            "issues": issues,
+        },
+    )
 
 
 # EAA lint_skill_package validates scripts/ layout and naming from this ruleset on.
@@ -1051,8 +1064,7 @@ def save_skill_dual_write(
     # is never shippable. Every other lint rule stays advisory.
     lint_errors = [issue for issue in _session_lint(session, session.current_skill.skill_md) if issue.severity == "error"]
     if lint_errors:
-        detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in lint_errors)
-        raise HTTPException(status_code=400, detail=f"Skill lint failed:\n{detail}")
+        raise _lint_failure("skill_lint_failed", "Skill lint failed", [f"{issue.rule}: {issue.message}" for issue in lint_errors])
 
     if session.current_skill.script is not None:
         _assert_script_flags_on(session)
@@ -2029,12 +2041,16 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
     if tool == "propose_skill_draft":
         if session.current_stage != Stage.DRAFT.value:
             raise ValueError(f"propose_skill_draft only allowed in DRAFT stage (current={session.current_stage})")
-        if session.current_skill.skill_md.strip():
-            raise ValueError("propose_skill_draft already used this session; use propose_patch in REFINE instead")
+        if session.current_skill.skill_md.strip() and session.remote_skill_id:
+            raise ValueError("propose_skill_draft cannot replace a saved skill; use propose_patch in REFINE instead")
         proposed = args.get("skill_md", "")
         _assert_topology_preserved(session, proposed, tool="propose_skill_draft")
         session.current_skill.skill_md = proposed
         session.current_skill.version_hash = compute_hash(session.current_skill.skill_md)
+        # A redraft supersedes the earlier unsaved card; only the newest can be accepted.
+        drafts = [call for call in session.pending_tool_calls if call.tool == "propose_skill_draft"]
+        superseded = {call.call_id for call in drafts[:-1]}
+        session.pending_tool_calls = [call for call in session.pending_tool_calls if call.call_id not in superseded]
         session.touch()
         return
 
@@ -3139,12 +3155,13 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
                 try:
                     save_skill_dual_write(session, upn)
                 except HTTPException as sync_exc:
+                    reason = sync_exc.detail.get("message", sync_exc.detail) if isinstance(sync_exc.detail, dict) else sync_exc.detail
                     session.conversation.append(
                         ChatMessage(
                             role=MessageRole.SYSTEM,
                             content=(
                                 "Patch applied locally, but syncing to Blob/SQL failed: "
-                                f"{sync_exc.detail}. Use Save to retry the sync."
+                                f"{reason}. Use Save to retry the sync."
                             ),
                         )
                     )

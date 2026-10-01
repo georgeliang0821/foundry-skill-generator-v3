@@ -100,7 +100,11 @@ Example SHAPE ONLY (never invent these fields in a skill that does not use them)
   preserve valid false/zero values and distinguish empty text where relevant.
 - Keep the existing `[NEEDS_INFO]` section. Missing request data still needs a
   named field code: print `[NEEDS_INFO] missing=FIELD` plus a separate explanation
-  and exit 0 without external effects. Credentials envelopes retain their own
+  and exit 0 without external effects. Each required field's code must appear as
+  a string literal -- either the whole `"[NEEDS_INFO] missing=FIELD"` line or
+  `"FIELD"` passed to a helper that prints the template with an f-string. The save-time check
+  reads literals only, so a code assembled at runtime (`",".join(missing)`,
+  `name.upper()`) blocks the save. Credentials envelopes retain their own
   missing codes. Document conditional requirements and host follow-up. Never
   claim that absence of environment inputs means absence of missing-input cases.
 - Retain the reference helpers and guards. Explain any necessary source-binding

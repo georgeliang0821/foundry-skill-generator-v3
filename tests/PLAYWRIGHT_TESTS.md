@@ -61,7 +61,13 @@ tests/e2e/tests-tab.spec.ts
 tests/e2e/mode-echo.spec.ts
 tests/e2e/skill-visibility.spec.ts
 tests/e2e/script-skill.spec.ts
+tests/e2e/lint-failure.spec.ts
 ```
+
+`lint-failure.spec.ts` (scenario `lint_failure`) covers the DOM side of a
+save refused by the skill lint: the plain-language status, the automatic fix
+request to the agent, and accepting the redrafted card. Which findings block a
+save is pytest's.
 
 `script-skill.spec.ts` seeds the golden fixture `skills/ms-graph-room-finder`
 (SKILL.md + script) through `/api/e2e/seed-skill` and covers only the DOM side

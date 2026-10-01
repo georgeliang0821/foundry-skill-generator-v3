@@ -231,7 +231,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 - Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。有 script 但 EAA 回報的 `ruleset_version` 低於 `1.1`（還沒有 script 檢核）時回 **HTTP 503** 拒絕儲存，因為無法驗證。
 - **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
-- `status == "failed"`（request 或 package 不合法）或 `valid == false`（有 lint ERROR）回 **HTTP 400**，訊息列出 EAA 的 `error` / `errors`。
+- `status == "failed"`（request 或 package 不合法）回 **HTTP 400**，訊息列出 EAA 的 `error`。
+- 本機 skill lint 或 EAA lint 有 ERROR 時回 **HTTP 400**，`detail` 為 `{kind: "skill_lint_failed" | "eaa_lint_failed", recoverable: true, message, issues}`。前端不顯示原始規則文字，而是告知使用者「未儲存、已請 Agent 修正」，並把 `issues` 送回 Agent：DRAFT 尚未儲存時重送完整 `propose_skill_draft`，之後則用 `propose_patch`。
 - `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
 - `ruleset_version` 記在 session 的 `eaa_ruleset_version` 與 `skill.save.done` / `mcp.lint.done` log。
 - 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
