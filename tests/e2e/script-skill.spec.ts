@@ -151,10 +151,35 @@ test("a confirmed code material becomes the bundled script at DRAFT", async ({ p
   await openTab(page, "checklist");
   await expect(page.getByTestId("skill-form-row").getByTestId("skill-form-state")).toHaveText("script · locked");
   await expect(page.getByTestId("script-covers-checkbox")).toBeDisabled();
+  await expect(page.getByTestId("skill-form-choice").locator("input").first()).toBeDisabled();
 
   await openTab(page, "files");
   await page.getByTestId("file-tab-script").click();
   await expect(page.getByTestId("file-editor")).toHaveValue(/add_help=False/);
+});
+
+test("choosing inline sample code keeps a ready script inline at DRAFT", async ({ page, request }) => {
+  await setScenario(request, "script_flags_on");
+  await openApp(page);
+  await startNewSession(page);
+  await page.getByTestId("add-material-row-button").click();
+  await page.getByTestId("material-kind").selectOption("code");
+  await page.getByTestId("material-input").fill(SCRIPT);
+  await page.getByTestId("attach-material-button").click();
+
+  await openTab(page, "checklist");
+  const row = page.getByTestId("skill-form-row");
+  await row.getByTestId("script-covers-checkbox").check();
+  await row.getByTestId("skill-form-choice").locator("input[value='inline']").check();
+  await page.locator("[data-var-save]").click();
+  await expect.poll(async () => (await readSession(request, await currentSessionId(page))).prepare_brief.prefer_inline).toBe(true);
+
+  await sendChat(page, "Create a deterministic E2E calendar skill.");
+  await expect(page.getByTestId("draft-card")).toBeVisible();
+  await expect(page.getByTestId("binding-script-badge")).toHaveCount(0);
+
+  await openTab(page, "checklist");
+  await expect(page.getByTestId("skill-form-row").getByTestId("skill-form-state")).toHaveText("inline · locked");
 });
 
 test("an accepted material patch replaces the code material and marks it as not run", async ({ page, request }) => {

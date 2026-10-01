@@ -540,16 +540,20 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 | check | 條件 |
 | --- | --- |
+| `user_choice` | 使用者沒有選擇 inline（`prepare_brief.prefer_inline` 為 `false`）。使用者在 Checklist 的 Output form 選「Inline sample code」，或在對話中明確表示要 inline、由 Agent 呼叫 `record_variables(prefer_inline=true)` 時，即使其他條件全部成立也是 inline；此時 `## Skill Form` 只列這一項，也不附加 script addendum |
 | `skill_kind` | capability（scenario 沒有自己的 script） |
 | `mode` | NEW（MODIFY 沿用 Blob 上的形式；IMPORT 不適用） |
 | `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)） |
 | `code_material` | 恰好一份 `code` 素材 |
 | `parses` | 該素材可被 `ast` 解析 |
+| `entry_point` | 模組頂層除了 import、函式／類別定義、賦值與 docstring 之外，至少還有一個會執行的語句（例如 `main()` 或 `if __name__ == "__main__":`）；只有定義的函式庫直接執行時什麼都不做 |
 | `script_lint` | `script_only_errors()` 沒有 error（S4/S5/S6/S7/S10/S10b/S11/S12/S13；S12 擋 inline 範本：字面 `request_inputs` dict 打包成腳本後每次都用同一組值；S13 擋讀 `globals()`：bundled script 是獨立行程，沒有 host 注入的變數）。S4 訊息附上該行原始碼；`[NEEDS_INFO]` 之後的純文字另有專屬訊息（說明要放進其後的 JSON，EAA 會先去掉標記行再 `json.loads` 其餘 stdout） |
 | `inputs` | `variables` 中每個 `kind=runtime`、`source=request` 的變數都有對應的 `add_argument`（`dest`，或 `--target-tables` → `TARGET_TABLES`）。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
 | `covers_operations` | 使用者在 `variables_ok` 確認「code 素材涵蓋本 skill 的所有操作」（`script_covers_operations`），**且** `variables_ok` 已確認 |
 
-**鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文。之後不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式。
+**鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文，並寫入一則 system 訊息要 Agent 告訴使用者這是 bundled script、更正先前任何「會是 inline」的說法。之後不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 或 `prefer_inline` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式。
+
+`record_variables` 的 `variables` 可省略：省略時變數不變；帶入的清單會整份取代現有變數。只記錄 `script_covers_operations` 或 `prefer_inline` 時應省略它。
 
 **Generator 不改 script**。REFINE 的 patch 只作用在 `SKILL.md`；UI 的 Files 分頁把 script 顯示為唯讀。要換 script 只能換 `code` 素材：
 
@@ -557,7 +561,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | --- | --- | --- |
 | 未鎖定 | 任何變動 | 重置 `script_covers_operations`、`variables_ok` 與其 evidence，需要重新確認 |
 | 鎖定為 inline | 任何變動 | 不影響形式 |
-| 鎖定為 script | 剛好一份 `code` 素材、內容與現有 script 不同，且 `script_readiness_problems()`（可解析、`script_only_errors()` 乾淨、`inputs`）為空 | **取代** `current_skill.script`，並寫入一則 system 訊息要 Agent 請使用者確認新程式碼仍涵蓋所有操作（**不**重置 `variables_ok`） |
+| 鎖定為 script | 剛好一份 `code` 素材、內容與現有 script 不同，且 `script_readiness_problems()`（可解析、`script_only_errors()` 乾淨、`entry_point`、`inputs`）為空 | **取代** `current_skill.script`，並寫入一則 system 訊息要 Agent 請使用者確認新程式碼仍涵蓋所有操作（**不**重置 `variables_ok`） |
 | 鎖定為 script | 其他情況（兩份以上、無法解析、有 lint error、request 輸入沒有 flag） | 保留原本的 script；原因出現在 `## Skill Form` 與 `GET /skill-form` 的 `replacement_problems`，UI 的 Materials 分頁也會列出 |
 
 內容完全相同的 PUT 不算變動。五個入口（`POST` / `PUT` / `DELETE /materials`、chat 附上素材、接受 `propose_material_patch`）都走 `apply_code_material_change()`。

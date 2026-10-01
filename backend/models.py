@@ -455,6 +455,8 @@ class PrepareBrief(BaseModel):
     delegation: list[Delegation] = Field(default_factory=list)
     # Agent and user confirmed (with variables_ok) that the one code material covers every operation.
     script_covers_operations: bool = False
+    # The user chose inline sample code even if every script-form condition holds.
+    prefer_inline: bool = False
     revisit: bool = False
     last_updated: int | str | None = None
 
@@ -816,6 +818,8 @@ class VariablesUpdateRequest(BaseModel):
     variables: list[SkillVariable] = Field(default_factory=list)
     # None leaves the confirmation untouched.
     script_covers_operations: bool | None = None
+    # None leaves the form choice untouched.
+    prefer_inline: bool | None = None
 
 
 class SkillIndexEntry(BaseModel):

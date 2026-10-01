@@ -3366,6 +3366,9 @@ textarea:focus, input:focus, select:focus {
 .skill-form-note ul { margin: 4px 0 0; padding-left: 18px; }
 .skill-form-covers { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
 .skill-form-covers input[type="checkbox"] { width: auto; margin: 0; }
+.skill-form-choice { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; font-size: var(--fs-sm); }
+.skill-form-choice label { display: flex; align-items: center; gap: 6px; }
+.skill-form-choice input[type="radio"] { width: auto; margin: 0; }
 .file-switch { display: flex; gap: 4px; margin-top: 8px; }
 .file-switch-tab { padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--text-2); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--fs-xs); cursor: pointer; }
 .file-switch-tab.active { border-color: var(--form-script); background: var(--form-script-soft); color: var(--form-script); font-weight: 600; }

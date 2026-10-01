@@ -306,6 +306,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "variables": {
                     "type": "array",
+                    "description": "The FULL variable list; it replaces the stored one, so [] deletes every variable. Omit it to leave the variables unchanged (e.g. when only recording script_covers_operations or prefer_inline).",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -327,8 +328,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "Capability skills with exactly one code material: true only when you and the user confirmed that the code covers EVERY operation of this skill. It is one of the conditions for the script form, and it cannot change once the form is locked at PREPARE -> DRAFT. Omit to leave it unchanged.",
                 },
+                "prefer_inline": {
+                    "type": "boolean",
+                    "description": "true only when the user explicitly chose inline sample code over a bundled script; the skill is then inline even if every script-form condition holds. false withdraws that choice. It cannot change once the form is locked at PREPARE -> DRAFT. Omit to leave it unchanged.",
+                },
             },
-            "required": ["variables"],
+            "required": [],
             "additionalProperties": False,
         },
     },

@@ -9,8 +9,14 @@ condition; it states what failed, never how to fix it.
   reconciled, walk the user through each operation the skill performs and check
   together that the code material implements it. Record the joint answer with
   `record_variables(script_covers_operations=true)` (or `false` when an
-  operation is missing), then confirm `variables_ok`. Never record `true` on
-  your own reading alone.
+  operation is missing), then confirm `variables_ok`. Omit `variables` in that
+  call: a `variables` list replaces every stored variable. Never record `true`
+  on your own reading alone.
+- **The user may choose inline.** When the user says to keep inline sample
+  code, record it with `record_variables(prefer_inline=true)`, again omitting
+  `variables`. The skill is then inline even when every condition holds; do not
+  offer the script form again unless the user asks. Coverage is a separate
+  question: never treat a coverage answer as a form choice, or the reverse.
 - **Fix only the edges of the code material, and only with the user's consent.**
   When a condition in `## Skill Form` is unmet, name it and ask whether the user
   wants you to adapt the code material or keep the inline form. If they want it
@@ -68,6 +74,8 @@ condition; it states what failed, never how to fix it.
   the skill will take, copied from the `form:` line of `## Skill Form`; never
   infer it from the conversation or from what the user wants. When that line
   says `inline` while the user wanted a bundled script, list every unmet
-  condition and ask whether to fix them first or accept the inline form. Say
+  condition and ask whether to fix them first or accept the inline form. Never
+  request the transition in the same reply as a tool call that changes the
+  form; read the updated `form:` line first. Say
   that the form is locked at that point: switching between inline sample code
   and a bundled script afterwards needs a new session.

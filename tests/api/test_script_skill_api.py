@@ -204,6 +204,33 @@ def test_locked_form_refuses_a_switch(client, backend_main) -> None:
         backend_main.apply_tool_effect(session, "record_variables", {"variables": [], "script_covers_operations": False})
 
 
+def test_inline_choice_is_recorded_until_the_lock(client, backend_main) -> None:
+    session = backend_main.Session(materials=[Material(kind=MaterialKind.CODE, content=SCRIPT)])
+    session.prepare_brief.verify_checklist["variables_ok"] = True
+    backend_main.sessions[session.id] = session
+
+    response = client.post(f"/api/sessions/{session.id}/variables", json={"variables": [], "prefer_inline": True})
+
+    brief = response.json()["prepare_brief"]
+    assert (brief["prefer_inline"], brief["verify_checklist"]["variables_ok"]) == (True, True)
+    backend_main.sessions[session.id].skill_form = "inline"
+    locked = client.post(f"/api/sessions/{session.id}/variables", json={"variables": [], "prefer_inline": False})
+    assert locked.status_code == 409 and "prefer_inline" in locked.json()["detail"]
+
+
+def test_record_variables_without_a_list_keeps_the_variables(backend_main) -> None:
+    session = backend_main.Session(materials=[Material(kind=MaterialKind.CODE, content=SCRIPT)])
+    backend_main.apply_tool_effect(
+        session, "record_variables", {"variables": [{"name": "ROOM", "kind": "runtime", "source": "request"}]}
+    )
+
+    backend_main.apply_tool_effect(session, "record_variables", {"script_covers_operations": True, "prefer_inline": True})
+
+    brief = session.prepare_brief
+    assert [v.name for v in brief.variables] == ["ROOM"]
+    assert (brief.script_covers_operations, brief.prefer_inline) == (True, True)
+
+
 def test_draft_update_keeps_the_server_side_script(client, backend_main) -> None:
     session = _script_session(backend_main, "room-finder")
 

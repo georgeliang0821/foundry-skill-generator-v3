@@ -1422,10 +1422,13 @@ async function refreshSkillForm() {
   }
 }
 
-// With the EAA flags off, or inline template code (S12), nothing short of different code makes it a script.
+// With the EAA flags off, or inline template code (S12), nothing short of different code makes it a script;
+// the user's inline choice likewise makes the other failures moot.
 function unmetFormChecks(verdict) {
   const failures = Array.isArray(verdict?.failures) ? verdict.failures : [];
-  const blocker = failures.find((f) => f.check === "eaa_flags") || failures.find((f) => f.rule === "S12");
+  const blocker = failures.find((f) => f.check === "eaa_flags")
+    || failures.find((f) => f.rule === "S12")
+    || failures.find((f) => f.check === "user_choice");
   return blocker ? [blocker] : failures;
 }
 
@@ -2137,15 +2140,22 @@ function renderSkillFormRow() {
   const unmet = locked ? [] : unmetFormChecks(verdict);
   const blocked = unmet.some((f) => f.check === "eaa_flags" || f.rule === "S12");
   const covers = Boolean(session.prepare_brief?.script_covers_operations);
+  const preferInline = Boolean(session.prepare_brief?.prefer_inline);
   const hint = locked
     ? `Fixed when the draft started${form === "script" ? `: SKILL.md plus ${scriptRelpath()}, the code material verbatim` : ""}. Switching between inline and script is not supported.`
     : "Script form ships the single code material verbatim as scripts/<name>.py instead of inline sample code. It is decided when the draft starts.";
+  const choiceRadio = (value, label, checked) =>
+    `<label><input type="radio" name="skill-form-choice" value="${value}" data-form-choice${checked ? " checked" : ""}${locked ? " disabled" : ""} /> ${escapeHtml(label)}</label>`;
+  const choice = blocked
+    ? ""
+    : `<div class="skill-form-choice" data-testid="skill-form-choice">${choiceRadio("script", "Bundled script when every condition holds", !preferInline)}${choiceRadio("inline", "Inline sample code", preferInline)}</div>`;
   const coversBox = blocked
     ? ""
     : `<label class="skill-form-covers"><input type="checkbox" data-script-covers data-testid="script-covers-checkbox"${covers ? " checked" : ""}${locked ? " disabled" : ""} /> The code material covers every operation of this skill</label>`;
   return `<div class="var-group skill-form-row" data-testid="skill-form-row">
       <div class="var-group-head"><strong>Output form</strong> <span class="form-state form-${escapeHtml(form)}" data-testid="skill-form-state">${escapeHtml(form)}${locked ? " \u00b7 locked" : ""}</span></div>
       <p class="spl-hint">${escapeHtml(hint)}</p>
+      ${choice}
       ${coversBox}
       ${unmet.length ? `<div class="skill-form-note skill-form-info">${formChecksListHtml(unmet)}</div>` : ""}
     </div>`;
@@ -2389,6 +2399,8 @@ async function saveBriefVariables() {
     const payload = { variables };
     const covers = document.querySelector("[data-variables-editor] [data-script-covers]");
     if (covers && !covers.disabled) payload.script_covers_operations = covers.checked;
+    const choice = document.querySelector("[data-variables-editor] [data-form-choice]:checked");
+    if (choice && !choice.disabled) payload.prefer_inline = choice.value === "inline";
     session = await updateVariables(session.id, payload);
     persistSessionState();
     renderSession();

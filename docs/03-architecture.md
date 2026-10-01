@@ -143,7 +143,7 @@ flowchart LR
 - `GET /skill-form` 只在 capability session 有 `code` 素材或已鎖定為 script 時才呼叫，以 `session.updated_at` 快取；回應含 `form` / `locked` / `failures`（未滿足的條件）/ `replacement_problems`（新 code 素材為何沒取代已鎖定的 script）。
 - Materials：code 素材列標出 `script` / `inline` / `not the script`，表格下列出未滿足條件或取代失敗的原因（旗標關閉時只列旗標）。被 Agent 改過（`origin=agent_patch`）的素材另標 `edited by agent · not run`，使用者自己再編輯後消失。
 - 對話中的 `propose_material_patch` 以 `material-patch-card` 呈現 diff，接受 / 拒絕走同一個 `tool-result`。
-- Checklist 的 `variables_ok`：「Output form」列顯示形式與是否鎖定，並提供「code 素材涵蓋所有操作」勾選框（隨 Save variables 送出 `script_covers_operations`；DRAFT 後停用）。
+- Checklist 的 `variables_ok`：「Output form」列顯示形式與是否鎖定，提供 inline / script 選擇（隨 Save variables 送出 `prefer_inline`）與「code 素材涵蓋所有操作」勾選框（送出 `script_covers_operations`）；兩者在 DRAFT 後停用。
 - Files：有 script 時出現 `SKILL.md | scripts/<name>.py` 切換，script 為唯讀。
 - Draft 卡片註記會一併儲存 script；綁定狀態列與 modify 選單（`GET /api/skills` 的 `has_script`）標 `script` / `[script]`。
 - Tests：每筆結果列出 `requested_scripts`（script 路徑、args、valid / invalid 與 problems）。

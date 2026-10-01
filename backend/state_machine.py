@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -324,6 +325,12 @@ def script_readiness_problems(session: Session, script: str) -> list[FormCheck]:
     except SyntaxError as exc:
         return [FormCheck("parses", f"The code material is not valid Python: {exc.msg} (line {exc.lineno}).")]
     problems = [FormCheck("script_lint", issue.message, issue.rule) for issue in errors]
+    if not _runs_when_executed(script):
+        problems.append(FormCheck(
+            "entry_point",
+            "The code material only imports and defines functions, classes and constants, so running "
+            "it as a script performs none of its operations.",
+        ))
     accepted = script_argument_names(script)
     unbound = [
         v.name for v in session.prepare_brief.variables
@@ -341,6 +348,23 @@ def script_readiness_problems(session: Session, script: str) -> list[FormCheck]:
     return problems
 
 
+_DEFINITION_NODES = (
+    ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+    ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Pass,
+)
+
+
+def _runs_when_executed(script: str) -> bool:
+    """A top-level statement other than a definition, e.g. a call or an `if __name__ == "__main__":` block."""
+    for node in ast.parse(script).body:
+        if isinstance(node, _DEFINITION_NODES):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue
+        return True
+    return False
+
+
 def evaluate_skill_form(session: Session) -> SkillFormVerdict:
     """Script form iff every condition holds; otherwise inline with each unmet condition listed."""
     if session.skill_form is not None:
@@ -350,6 +374,8 @@ def evaluate_skill_form(session: Session) -> SkillFormVerdict:
             form="script" if session.current_skill.script is not None else "inline", locked=True
         )
     failures: list[FormCheck] = []
+    if session.prepare_brief.prefer_inline:
+        failures.append(FormCheck("user_choice", "The user chose inline sample code over a bundled script."))
     if SkillKind(session.skill_kind) is SkillKind.SCENARIO:
         failures.append(FormCheck("skill_kind", "A scenario skill has no script of its own."))
     if Mode(session.mode) is not Mode.NEW:
@@ -400,6 +426,7 @@ def _awaits_flags(session: Session) -> bool:
     """A NEW capability skill with a code material whose form still depends on the EAA flags."""
     return (
         session.skill_form is None
+        and not session.prepare_brief.prefer_inline
         and SkillKind(session.skill_kind) is SkillKind.CAPABILITY
         and Mode(session.mode) is Mode.NEW
         and bool(code_material_contents(session))
@@ -418,6 +445,13 @@ SCRIPT_LOCKED_INLINE_MESSAGE = (
     "would be a bundled script. Switching to a bundled script needs a new session."
 )
 
+SCRIPT_LOCKED_SCRIPT_MESSAGE = (
+    "The skill form is now locked as a bundled script: the code material ships verbatim next to "
+    "SKILL.md. In your next reply, tell the user plainly that this skill is a bundled script and "
+    "correct any earlier statement that it would ship inline sample code. Switching to inline sample "
+    "code needs a new session."
+)
+
 
 def lock_skill_form(session: Session) -> None:
     """Fix the form for the rest of the session; a NEW script skill takes its code material verbatim."""
@@ -430,6 +464,7 @@ def lock_skill_form(session: Session) -> None:
     session.skill_form = verdict.form
     if not verdict.locked and verdict.form == "script":
         session.current_skill.script = verdict.script
+        session.conversation.append(ChatMessage(role=MessageRole.SYSTEM, content=SCRIPT_LOCKED_SCRIPT_MESSAGE))
     elif candidate and verdict.failures:
         session.conversation.append(ChatMessage(
             role=MessageRole.SYSTEM,
@@ -815,6 +850,10 @@ def _format_skill_form(session: Session) -> str | None:
             f"{load_prompt(note)}"
         )
     lines = ["## Skill Form", "", f"form: {verdict.form}", f"locked: {str(verdict.locked).lower()}"]
+    choice = [failure for failure in verdict.failures if failure.check == "user_choice"]
+    if choice:
+        # The user's choice decides the form; the other failures are noise.
+        return "\n".join(lines + [_form_check_line(choice[0])])
     if verdict.failures:
         lines += ["", "Unmet script-form conditions:"]
         lines += [_form_check_line(failure) for failure in verdict.failures]
@@ -834,6 +873,7 @@ def _form_prompt_key(session: Session) -> str | None:
         return "script"
     if (
         session.skill_form is None
+        and not session.prepare_brief.prefer_inline
         and SkillKind(session.skill_kind) is SkillKind.CAPABILITY
         and Mode(session.mode) is Mode.NEW
         and code_material_contents(session)

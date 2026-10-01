@@ -2169,6 +2169,14 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             brief.script_covers_operations = bool(covers)
             brief.verify_checklist["variables_ok"] = False
             brief.verify_evidence.pop("variables_ok", None)
+        prefer_inline = args.get("prefer_inline")
+        if prefer_inline is not None and bool(prefer_inline) != brief.prefer_inline:
+            if session.skill_form is not None:
+                raise ValueError(
+                    f"This skill's form is locked as {session.skill_form}; switching between inline "
+                    "and script is not supported, so prefer_inline can no longer change."
+                )
+            brief.prefer_inline = bool(prefer_inline)
         raw = args.get("variables")
         if isinstance(raw, list):
             parsed_vars: list[SkillVariable] = []
@@ -3830,6 +3838,8 @@ def update_session_variables(session_id: str, req: VariablesUpdateRequest, upn: 
     args: dict[str, Any] = {"variables": [v.model_dump() for v in req.variables]}
     if req.script_covers_operations is not None:
         args["script_covers_operations"] = req.script_covers_operations
+    if req.prefer_inline is not None:
+        args["prefer_inline"] = req.prefer_inline
     try:
         apply_tool_effect(session, "record_variables", args)
     except ValueError as exc:

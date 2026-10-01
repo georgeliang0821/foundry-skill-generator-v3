@@ -50,7 +50,7 @@
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
 - **登入與資料列級隔離（RLS）**：以 Entra 登入後的 email 作為身分，依 `dbo.user_skill_grants` 決定可存取的 Skill。
 - **公開 Skill（`is_public`）**：將一個全域 Skill 標為公開，所有登入者即可使用，**不需逐人授權**。前端在「Skill access」彈窗切換，並以 `public` 標記顯示於 Skill 清單與綁定狀態列。
-- **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈Script 型 skill 的限制〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
+- **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。使用者也可以在 Checklist 的 Output form 直接選擇 inline。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈Script 型 skill 的限制〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
 
 ### Script 型 skill 的限制
 

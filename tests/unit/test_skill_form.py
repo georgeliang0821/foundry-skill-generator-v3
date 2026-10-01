@@ -84,6 +84,25 @@ def _request_input_without_flag(s: Session) -> None:
     s.prepare_brief.variables = [SkillVariable(name="FLOOR", kind="runtime", source="request")]
 
 
+def _user_chose_inline(s: Session) -> None:
+    s.prepare_brief.prefer_inline = True
+
+
+LIBRARY_ONLY = '''"""Helpers only."""
+import json
+
+LIMIT: int = 3
+
+
+def run() -> str:
+    return json.dumps({"limit": LIMIT})
+'''
+
+
+def _library_only(s: Session) -> None:
+    s.materials = [Material(kind=MaterialKind.CODE, content=LIBRARY_ONLY)]
+
+
 @pytest.mark.parametrize(
     ("breaker", "check"),
     [
@@ -97,6 +116,8 @@ def _request_input_without_flag(s: Session) -> None:
         (_coverage_unconfirmed, "covers_operations"),
         (_variables_not_ok, "covers_operations"),
         (_request_input_without_flag, "inputs"),
+        (_user_chose_inline, "user_choice"),
+        (_library_only, "entry_point"),
     ],
 )
 def test_each_unmet_condition_makes_it_inline(breaker, check) -> None:
@@ -201,6 +222,33 @@ def test_prepare_to_draft_locks_the_script_form_and_takes_the_code_verbatim(monk
 
     assert session.skill_form == "script"
     assert session.current_skill.script == PY
+    assert [m.content for m in session.conversation if "now locked" in m.content] == [
+        state_machine.SCRIPT_LOCKED_SCRIPT_MESSAGE
+    ]
+
+
+def test_the_users_inline_choice_wins_over_a_ready_script(monkeypatch) -> None:
+    session = _session()
+    _user_chose_inline(session)
+
+    assert state_machine._form_prompt_key(session) is None
+    assert state_machine._format_skill_form(session) == (
+        "## Skill Form\n\nform: inline\nlocked: false\n"
+        "- user_choice: The user chose inline sample code over a bundled script."
+    )
+    _to_draft(session, monkeypatch)
+
+    assert (session.skill_form, session.current_skill.script) == ("inline", None)
+    assert [m for m in session.conversation if "now locked" in m.content] == []
+
+
+def test_a_library_without_request_inputs_is_not_a_script() -> None:
+    # Reproduces a session whose variables were wiped, leaving the `inputs` check nothing to compare.
+    session = _session(materials=[Material(kind=MaterialKind.CODE, content=LIBRARY_ONLY)])
+    session.prepare_brief.variables = []
+
+    assert evaluate_skill_form(session).form == "inline"
+    assert _checks(session) == ["entry_point"]
 
 
 def test_prepare_to_draft_locks_inline_without_a_script(monkeypatch) -> None:
