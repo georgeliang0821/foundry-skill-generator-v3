@@ -487,6 +487,8 @@ class IterationReflection(BaseModel):
     test_run_id: str = ""
     what_went_wrong: list[str] = Field(default_factory=list)
     what_to_change: list[str] = Field(default_factory=list)
+    # what_to_change entries the user chose not to fix; they no longer count as open.
+    skipped: list[str] = Field(default_factory=list)
     confidence_delta: float = 0.0  # -1.0 .. +1.0
     raw: str = ""  # full text, never truncated in storage
 

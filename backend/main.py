@@ -1924,8 +1924,9 @@ def _note_open_fixes(session: Session) -> None:
         content = (
             f"{len(still_open)} of {total} fix item(s) from the latest reflection are still "
             f"open:\n{listed}\n"
-            "Propose the next narrow patch now (set `addresses` to the item it closes). Do NOT "
-            "request a test run or a transition to TEST until this list is empty."
+            "If the user accepted these fixes, propose the next narrow patch now (set "
+            "`addresses` to the item it closes). If they chose to fix only some or none, "
+            "do not push the rest."
         )
     else:
         content = (
@@ -3584,6 +3585,31 @@ def update_session_samples(session_id: str, req: SamplesUpdateRequest, upn: str 
         cascaded=cascaded,
         stage=session.current_stage,
     )
+    return session
+
+
+@app.post("/api/sessions/{session_id}/fix-list/skip")
+def skip_open_fixes(session_id: str, upn: str = Depends(require_upn)) -> Session:
+    """User closes every still-open item of the latest reflection without patching it."""
+    session = get_session_for_user(session_id, upn)
+    _, still_open = open_fix_items(session)
+    if not still_open:
+        return session
+    session.iteration_reflections[-1].skipped.extend(still_open)
+    listed = "\n".join(f"- {item}" for item in still_open)
+    session.conversation.append(
+        ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=(
+                f"The user skipped the remaining {len(still_open)} fix item(s); do not raise them "
+                f"again or propose patches for them:\n{listed}"
+            ),
+            metadata={"skipped_fixes": still_open},
+        )
+    )
+    session.touch()
+    persist_session(session)
+    log_event("open_fixes.skipped", session_id=session.id, count=len(still_open))
     return session
 
 

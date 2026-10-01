@@ -112,6 +112,40 @@ def test_accepted_patch_without_reflection_adds_no_open_fix_note(client, backend
     assert not [m for m in body["conversation"] if "fix item(s)" in m["content"]]
 
 
+def test_skip_open_fixes_closes_the_rest_without_a_patch(client, backend_main) -> None:
+    session = backend_main.Session()
+    session.current_skill.skill_md = "one"
+    session.iteration_reflections.append(
+        IterationReflection(what_to_change=["fix one", "fix two", "fix three"], raw="reflection")
+    )
+    backend_main.sessions[session.id] = session
+    _accept_patch(client, session, call_id="p1", old="one", new="two", addresses=["fix one"])
+
+    response = client.post(f"/api/sessions/{session.id}/fix-list/skip")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["iteration_reflections"][-1]["skipped"] == ["fix two", "fix three"]
+    note = body["conversation"][-1]
+    assert note["role"] == "system"
+    assert note["metadata"]["skipped_fixes"] == ["fix two", "fix three"]
+
+    again = client.post(f"/api/sessions/{session.id}/fix-list/skip").json()
+    assert again["iteration_reflections"][-1]["skipped"] == ["fix two", "fix three"]
+    assert len(again["conversation"]) == len(body["conversation"])
+
+
+def test_skip_open_fixes_rejects_another_users_session(client, backend_main) -> None:
+    session = backend_main.Session(owner_upn="someone-else@example.com")
+    session.iteration_reflections.append(IterationReflection(what_to_change=["fix one"], raw="r"))
+    backend_main.sessions[session.id] = session
+
+    response = client.post(f"/api/sessions/{session.id}/fix-list/skip")
+
+    assert response.status_code in {403, 404}
+    assert session.iteration_reflections[-1].skipped == []
+
+
 def test_tool_result_missing_call_returns_404(client, backend_main) -> None:
     session = backend_main.Session()
     backend_main.sessions[session.id] = session

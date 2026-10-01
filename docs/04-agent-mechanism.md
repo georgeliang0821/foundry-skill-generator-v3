@@ -307,8 +307,9 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 >
 > 一次 TEST 反思常同時吐出多個 finding。若每接受一個 Patch 就回頭重跑一次盲測，N 個 finding 就要付 N 趟 router round-trip，使用者還得重複核准同一個方向。因此 `record_reflection` 的 `what_to_change` 被視為**一份有狀態的待辦清單**：
 >
-> - `open_fix_items()`（[state_machine.py](../backend/state_machine.py)）取最新一次反思的清單，扣掉**該反思之後**被接受、且 `addresses` 有指名該項的 Patch，得出「已完成／未完成」。
-> - 未完成項會以 `## Open Fix List` 注入 REFINE / TEST 的 System Prompt，清單非空時明令**不得** `request_test_run` 或轉場 TEST。
+> - `open_fix_items()`（[state_machine.py](../backend/state_machine.py)）取最新一次反思的清單，扣掉**該反思之後**被接受、且 `addresses` 有指名該項的 Patch，以及使用者略過的項目（`IterationReflection.skipped`），得出「已完成／未完成」。若最近一次 TEST 比該反思新，整份清單視為過期。
+> - 未完成項會以 `## Open Fix List` 注入 REFINE / TEST 的 System Prompt。以使用者最新的決定為準：使用者接受全部時連續出 Patch、中間盡量不重跑測試；只接受部分或不修時不追著其餘項目；使用者要求測試時照做。
+> - 使用者可按聊天輸入框上方的 **Skip remaining fixes**（`POST /api/sessions/{id}/fix-list/skip`），把剩下的項目標記為略過，並寫一則 system 訊息告知 Agent 不再提起。
 > - 每次 Patch 被接受，後端 `_note_open_fixes()`（[main.py](../backend/main.py)）另外寫一則 system 訊息報告「還剩 N 項 / 全部完成」，作法與 `_note_skill_lint` 相同。
 > - `propose_patch` 因此新增選填的 `addresses` 欄位：逐字複製它所關閉的那一項。沒帶 `addresses` 的 Patch 不會關掉任何一項。
 > - 對使用者端的意義：Agent 在 TEST 徵求同意時，必須主動給出「一次修完全部 N 項（建議）」這類**可點選**的批次選項；使用者不需要、也不應該知道要自己打字要求連續出 Patch。
@@ -338,8 +339,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
 >
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
-> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。以 `[NEEDS_INFO]` 開頭的回應不是程式碼，判定函式為 `is_needs_info_response()`（[skill_lint.py](../backend/skill_lint.py)），會略過 lint。
-> - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings；`[NEEDS_INFO]` 回應則由 `_format_needs_info_responses()` 另列於 `### Needs-info responses`，只顯示第一行，不列入審查。對於已印出的結論，[prompts/04_test.md](../prompts/04_test.md) 明令大腦**不得重新推導**，只需照抄成 `what_to_change` 項目。
+> - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。以 `[NEEDS_INFO]` 開頭的回應，以及只在最外層印出 `[NEEDS_INFO]` 就結束的腳本，都不是要審查的程式碼，判定函式為 `is_needs_info_response()`（[skill_lint.py](../backend/skill_lint.py)），會略過 lint。
+> - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings；`[NEEDS_INFO]` 回應則由 `_format_needs_info_responses()` 另列於 `### Needs-info responses`，只顯示 `[NEEDS_INFO]` 那一行（`needs_info_line()`），不列入審查。每項 finding 標出嚴重度，`[error]` 排在前面。對於已印出的結論，[prompts/04_test.md](../prompts/04_test.md) 明令大腦**不得重新推導**：`[error]` 照抄成 `what_to_change` 項目，`[warning]` / `[info]` 只轉述給使用者，不列入修正清單。
 > - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）、未檢查回傳碼（A12）與 EAA 平台規則（D4–D6、A15，見下方）全數下放給 lint。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。
 
@@ -416,7 +417,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Materials** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 呼叫 `_format_materials`，把使用者附加的素材**全文**依可信度分層（Tier 1/2/3）注入，並附上各層的引用邊界。詳見[第 7 節](#7-素材materials的三層可信度合約) |
 | **Prepare Brief** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 準備期已確認的 Goal / Sources / Capabilities 等 Brief 歸檔結構 |
 | **Iteration Log** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 局部 Patch 補丁歷史、以及 TEST 回合所保存的反思資訊 |
-| **Open Fix List** | **D** | | | ✓ | ✓ | | 呼叫 `_format_open_fixes`。把最新一次 `record_reflection` 的 `what_to_change` 逐項列成 `[x]`/`[ ]` 待辦清單，未清空前禁止重跑 TEST。詳見 [3.3 節](#33-refine打磨精修與局部修正) |
+| **Open Fix List** | **D** | | | ✓ | ✓ | | 呼叫 `_format_open_fixes`。把最新一次 `record_reflection` 的 `what_to_change` 逐項列成 `[x]`/`[-]`/`[ ]` 待辦清單（`[-]` 為使用者略過）。詳見 [3.3 節](#33-refine打磨精修與局部修正) |
 | **Research Summary** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 經 Agent 查證好的網路研究結論。 |
 | **Current Draft** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | 當前已被接受的 `SKILL.md` 快照本體 |
 | **Form Stage Addenda** | **B** | △ | △ | △ | △ | △ | `FORM_STAGE_ADDENDA`，接在 stage prompt（與 `KIND_STAGE_ADDENDA`）之後。依 `_form_prompt_key()` 選用，見 [6.2 節](#62-prompt-分層與-skill-形式) |

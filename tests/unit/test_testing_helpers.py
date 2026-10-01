@@ -6,6 +6,7 @@ import time
 import pytest
 
 from backend.models import Delegation, Mode, SkillKind
+from backend.skill_lint import is_needs_info_response, needs_info_line
 from backend.testing import (
     EXECUTE,
     ROUTE_ONLY,
@@ -209,6 +210,62 @@ def test_needs_info_response_is_not_linted_as_python(
 
     assert run.positive_results[0].passed is True
     assert run.positive_results[0].prepared_code_lint == []
+
+
+def test_script_that_only_prints_needs_info_is_not_linted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script that asks for the input and exits has no business code to compare with the body."""
+    response = (
+        "import sys\n"
+        "if hasattr(sys.stdout, 'reconfigure'):\n"
+        "    sys.stdout.reconfigure(encoding='utf-8')\n"
+        "print('[NEEDS_INFO] missing=DRY_RUN')\n"
+        "print('Please provide DRY_RUN.')\n"
+        "sys.exit(0)\n"
+    )
+
+    def fake_runner(positive_samples, negative_samples, skill_name, delegated_token, run_mode=ROUTE_ONLY):
+        positive = [
+            _evaluate_apim_result(
+                query,
+                {"skills_referenced": [skill_name], "response_text": response},
+                skill_name,
+                skill_name,
+                run_mode=run_mode,
+            )
+            for query in positive_samples
+        ]
+        return positive, []
+
+    monkeypatch.setattr("backend.testing._run_apim_tests_sequential_sync", fake_runner)
+
+    run = run_selection_tests(_PREPARED_SKILL_MD, ["use demo"], [], version_hash="v1")
+
+    assert run.positive_results[0].prepared_code_lint == []
+
+
+_CONDITIONAL_NEEDS_INFO = (
+    "import os, sys\n"
+    "if not os.environ.get('X'):\n"
+    "    print('[NEEDS_INFO] missing=X')\n"
+    "    sys.exit(0)\n"
+    "print(os.environ['X'])\n"
+)
+_WORK_AFTER_MARKER = "import requests\nprint('[NEEDS_INFO] missing=X')\nrequests.get('https://example.com')\n"
+_WORK_BEFORE_MARKER = "import requests\nrequests.get('https://example.com')\nprint('[NEEDS_INFO] missing=X')\n"
+
+
+@pytest.mark.parametrize("code", [_CONDITIONAL_NEEDS_INFO, _WORK_AFTER_MARKER, _WORK_BEFORE_MARKER])
+def test_script_doing_real_work_is_not_a_needs_info_response(code: str) -> None:
+    assert not is_needs_info_response(code)
+
+
+def test_needs_info_line_reads_the_marker_from_a_script() -> None:
+    code = "import sys\nprint(f'[NEEDS_INFO] missing=A,B')\nraise SystemExit(0)\n"
+    assert needs_info_line(code) == "[NEEDS_INFO] missing=A,B"
+    assert needs_info_line("  [NEEDS_INFO] missing=C\nmore") == "[NEEDS_INFO] missing=C"
+    assert needs_info_line("print('hi')") == ""
 
 
 def test_test_request_appends_audit_instruction() -> None:

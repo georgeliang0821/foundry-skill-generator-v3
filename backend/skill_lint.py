@@ -1809,7 +1809,62 @@ _NEEDS_INFO_PREFIX = "[NEEDS_INFO]"
 
 def is_needs_info_response(text: str) -> bool:
     """A route_only response where the runtime asked for missing input instead of preparing code."""
-    return (text or "").lstrip().startswith(_NEEDS_INFO_PREFIX)
+    return bool(needs_info_line(text))
+
+
+def needs_info_line(text: str) -> str:
+    """The ``[NEEDS_INFO]`` line of a needs-info response, or ``""`` when it is not one.
+
+    The runtime answers either with the marker itself or with a script that does
+    nothing but print it and exit; the latter has no business code to lint.
+    """
+    stripped = (text or "").lstrip()
+    if stripped.startswith(_NEEDS_INFO_PREFIX):
+        return stripped.splitlines()[0].strip()
+    if _NEEDS_INFO_PREFIX not in stripped:
+        return ""
+    try:
+        tree = ast.parse(stripped)
+    except (SyntaxError, ValueError):
+        return ""
+    for index, stmt in enumerate(tree.body):
+        if isinstance(stmt, ast.Expr) and _is_needs_info_print(stmt.value):
+            if not all(_is_output_or_exit_stmt(rest) for rest in tree.body[index + 1 :]):
+                return ""
+            literal = (_literal_prefix(stmt.value.args[0]) or "").strip()
+            return literal.splitlines()[0].strip() if literal else _NEEDS_INFO_PREFIX
+        if not _is_setup_stmt(stmt):
+            return ""
+    return ""
+
+
+def _is_stream_reconfigure(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "reconfigure"
+        and (_is_sys_stream(node.func.value, "stdout") or _is_sys_stream(node.func.value, "stderr"))
+    )
+
+
+def _is_setup_stmt(stmt: ast.stmt) -> bool:
+    """Imports, a docstring or stream-encoding setup: nothing that reaches outside the process."""
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return True
+    if isinstance(stmt, ast.Expr):
+        return isinstance(stmt.value, ast.Constant) or _is_stream_reconfigure(stmt.value)
+    if isinstance(stmt, ast.If):
+        return all(_is_setup_stmt(s) for s in stmt.body) and all(_is_setup_stmt(s) for s in stmt.orelse)
+    return False
+
+
+def _is_output_or_exit_stmt(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Raise):
+        return _exit_expr(stmt) is not _NO_EXIT
+    if not isinstance(stmt, ast.Expr):
+        return False
+    node = stmt.value
+    return _is_stdout_print(node) or _is_stderr_write(node) or _exit_expr(node) is not _NO_EXIT
 
 _PARSE_ARGS_ATTRS = frozenset(
     {"parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args"}

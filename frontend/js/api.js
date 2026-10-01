@@ -234,6 +234,12 @@ export async function updateNeighbors(sessionId, payload) {
   return res.json();
 }
 
+export async function skipOpenFixes(sessionId) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/fix-list/skip`, { method: "POST" });
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
 export async function openNeighborEdit(sessionId, skill) {
   const res = await apiFetch(`/api/sessions/${sessionId}/neighbor-edits/${encodeURIComponent(skill)}/open`, {
     method: "POST",

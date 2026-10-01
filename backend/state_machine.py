@@ -31,7 +31,7 @@ from .models import (
     TestResult,
     prepare_checklist_for,
 )
-from .skill_lint import is_needs_info_response, script_argument_names, script_only_errors
+from .skill_lint import is_needs_info_response, needs_info_line, script_argument_names, script_only_errors
 from .topology import declared_children, parse_frontmatter_block
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -775,14 +775,24 @@ def open_fix_items(session: Session) -> tuple[list[str], list[str]]:
     A fix item is closed once an accepted patch applied AFTER that reflection
     named it in ``addresses``. Patches that carry no ``addresses`` close
     nothing, so an agent that skips the field is reminded rather than let off.
+    Items the user skipped are in neither list, and a test run newer than the
+    reflection makes the whole list stale.
     """
     if not session.iteration_reflections:
         return [], []
     reflection = session.iteration_reflections[-1]
-    items = [str(x) for x in reflection.what_to_change if str(x).strip()]
+    skipped = {_norm_fix_item(x) for x in reflection.skipped}
+    items = [
+        str(x) for x in reflection.what_to_change
+        if str(x).strip() and _norm_fix_item(x) not in skipped
+    ]
     if not items:
         return [], []
     since = _parse_iso(reflection.created_at)
+    if session.test_runs and since is not None:
+        latest_run = _parse_iso(session.test_runs[-1].ran_at)
+        if latest_run is not None and latest_run > since:
+            return [], []
     closed_keys: set[str] = set()
     for patch in session.patch_history:
         applied = _parse_iso(patch.applied_at)
@@ -805,7 +815,8 @@ def _format_open_fixes(session: Session) -> str | None:
     closed, still_open = open_fix_items(session)
     if not closed and not still_open:
         return None
-    total = len(closed) + len(still_open)
+    skipped = [str(x) for x in session.iteration_reflections[-1].skipped]
+    total = len(closed) + len(still_open) + len(skipped)
     lines = [
         "## Open Fix List",
         "",
@@ -814,19 +825,20 @@ def _format_open_fixes(session: Session) -> str | None:
     ]
     for item in closed:
         lines.append(f"- [x] {item}")
+    for item in skipped:
+        lines.append(f"- [-] {item} (skipped by the user -- do not raise it again)")
     for item in still_open:
         lines.append(f"- [ ] {item}")
     lines.append("")
     if still_open:
         lines.append(
-            "Work through the open items one at a time: propose ONE narrow `propose_patch` "
-            "for the first open item, set its `addresses` to that item VERBATIM, and after it "
-            "is accepted immediately propose the next one. Do NOT call `request_test_run` and "
-            "do NOT `request_stage_transition` to test while any item is open -- a test run "
-            "between fixes wastes a full router round-trip and forces the user to re-approve "
-            "the same direction. The two exceptions: the user explicitly asks to test now, or "
-            "an item needs human judgement / a material you do not have -- say which item and "
-            "why, then ask the user how to proceed."
+            "The user's latest decision wins over this list. If they chose to fix only some "
+            "items or none, do not push the rest: propose patches only for what they accepted, "
+            "and tell them the 'Skip remaining fixes' button above the chat input closes the "
+            "others. Otherwise work through the open items one at a time: propose ONE narrow "
+            "`propose_patch` for the first open item, set its `addresses` to that item VERBATIM, "
+            "and after it is accepted propose the next one. Prefer not to test between fixes -- "
+            "each run costs a full router round-trip -- but when the user asks to test, test."
         )
     else:
         lines.append(
@@ -1001,8 +1013,7 @@ def _format_needs_info_responses(results: list[TestResult]) -> list[str]:
         "correct handling of missing fields, not a finding. There is no code to review here.",
     ]
     for result in results:
-        first_line = result.apim_response.lstrip().splitlines()[0]
-        lines.append(f"- From: {result.query} -> `{first_line}`")
+        lines.append(f"- From: {result.query} -> `{needs_info_line(result.apim_response)}`")
     return lines
 
 
@@ -1014,11 +1025,12 @@ def _format_prepared_code_lint(issues: list[dict]) -> list[str]:
         "",
         "Static findings on that script (already checked -- read them, do not re-derive them):",
     ]
-    for issue in issues:
+    for issue in sorted(issues, key=lambda i: str(i.get("severity", "")).lower() != "error"):
         rule = issue.get("rule", "?")
+        severity = str(issue.get("severity") or "warning").lower()
         detail = issue.get("detail") or ""
         suffix = f" [{detail}]" if detail else ""
-        lines.append(f"- {rule}{suffix}: {issue.get('message', '')}")
+        lines.append(f"- [{severity}] {rule}{suffix}: {issue.get('message', '')}")
     return lines
 
 

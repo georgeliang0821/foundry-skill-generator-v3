@@ -309,6 +309,52 @@ def test_needs_info_response_is_listed_apart_from_prepared_code() -> None:
     assert "```python" not in section
 
 
+_NEEDS_INFO_SCRIPT = """import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+print("[NEEDS_INFO] missing=PURPOSE,INSTRUCTIONS")
+print("Please describe the purpose and the steps.")
+sys.exit(0)
+"""
+
+
+def test_script_that_only_asks_for_info_is_listed_as_needs_info() -> None:
+    session = Session(current_stage=Stage.TEST)
+    session.test_runs.append(
+        ModelTestRun(
+            skill_version_hash="abc123",
+            positive_results=[
+                ModelTestResult(
+                    query="q1", expected_skill="demo", actual_skill="demo", passed=True,
+                    apim_response=_NEEDS_INFO_SCRIPT,
+                ),
+            ],
+            positive_hit_rate=1.0,
+        )
+    )
+    section = _format_latest_test_run(session) or ""
+    assert "- From: q1 -> `[NEEDS_INFO] missing=PURPOSE,INSTRUCTIONS`" in section
+    assert "### Prepared code" not in section
+
+
+def test_prepared_code_findings_show_severity_errors_first() -> None:
+    session = Session(current_stage=Stage.TEST)
+    result = ModelTestResult(
+        query="q1", expected_skill="demo", actual_skill="demo", passed=True,
+        apim_response="import os\nX = os.environ.get('a')\n",
+    )
+    result.prepared_code_lint = [
+        {"rule": "D7", "severity": "info", "message": "note", "detail": ""},
+        {"rule": "A2", "severity": "error", "message": "unread", "detail": "B"},
+    ]
+    session.test_runs.append(
+        ModelTestRun(skill_version_hash="abc123", positive_results=[result], positive_hit_rate=1.0)
+    )
+    section = _format_latest_test_run(session) or ""
+    assert section.index("- [error] A2 [B]: unread") < section.index("- [info] D7: note")
+
+
 def test_prompt_includes_done_reentry_guidance() -> None:
     session = Session(current_stage=Stage.DONE)
     prompt = build_system_prompt(session)
@@ -734,6 +780,26 @@ def test_open_fix_items_only_track_the_latest_reflection() -> None:
     )
 
     assert open_fix_items(session) == ([], ["new fix"])
+
+
+def test_open_fix_items_exclude_what_the_user_skipped() -> None:
+    session = _reflected_session("fix one", "fix two", "fix three")
+    _record_patch(session, "fix one")
+    session.iteration_reflections[-1].skipped = ["Fix  three"]
+
+    assert open_fix_items(session) == (["fix one"], ["fix two"])
+
+    prompt = build_system_prompt(session)
+    assert "1 of 3 fix item(s)" in prompt
+    assert "- [-] Fix  three" in prompt
+
+
+def test_open_fix_items_are_stale_after_a_newer_test_run() -> None:
+    session = _reflected_session("fix one")
+    session.iteration_reflections[-1].created_at = "2000-01-01T00:00:00+00:00"
+    session.test_runs.append(ModelTestRun(skill_version_hash="abc123"))
+
+    assert open_fix_items(session) == ([], [])
 
 
 def test_prompt_carries_the_open_fix_list_in_refine() -> None:

@@ -22,6 +22,7 @@ import {
   addSessionMaterial,
   deleteSessionMaterial,
   sendToolResult,
+  skipOpenFixes,
   StaleToolCallError,
   updateSessionMaterial,
   startMicrosoftLogin,
@@ -832,6 +833,7 @@ function renderSession() {
   renderTests();
   renderTestSampleEditor();
   renderQuestionQueueStatus();
+  renderFixListStatus();
   syncDraftScriptNotes();
   updateActionButtons();
   applyContextTabDefault();
@@ -1159,6 +1161,33 @@ function renderQuestionQueueStatus() {
   }
   node.classList.remove("hidden");
   node.innerHTML = `<strong>Confirmation queue</strong><span>${escapeHtml(choiceProgressText(progress))}</span>`;
+}
+
+function renderFixListStatus() {
+  const node = el("fixListStatus");
+  if (!node) return;
+  const remaining = openFixItems();
+  if (!remaining.length) {
+    node.classList.add("hidden");
+    node.innerHTML = "";
+    return;
+  }
+  node.classList.remove("hidden");
+  node.title = remaining.join("\n");
+  node.innerHTML = `<strong>Fix list</strong><span>${remaining.length} item(s) still open</span>`
+    + `<button type="button" class="ghost" data-testid="skip-fixes-button">Skip remaining fixes</button>`;
+  node.querySelector("button").addEventListener("click", skipRemainingFixes);
+}
+
+async function skipRemainingFixes() {
+  if (!session) return;
+  try {
+    session = await skipOpenFixes(session.id);
+    renderSession();
+    appendStatus("Remaining fix items skipped.");
+  } catch (err) {
+    appendStatus(`Could not skip the fix items: ${err.message}`);
+  }
 }
 
 function updateChoiceCardMeta() {
@@ -5359,26 +5388,31 @@ function testAnalysisPrompt() {
     "Do not emit propose_patch yet.",
     "If all positive and negative samples pass, summarize the result and ask_user_input whether to finish or continue refining.",
     "If any sample failed, summarize the failure pattern, propose a concise modification direction, and ask_user_input whether the user accepts that direction.",
-    "Record every distinct finding as its own atomic entry in record_reflection.what_to_change.",
+    "Record every distinct finding as its own atomic entry in record_reflection.what_to_change; for static findings only [error] ones count -- mention [warning] / [info] ones to the user without making them fix items.",
     "When there is more than one finding, the ask_user_input options must let the user pick the batch in one click -- spell out the count, e.g. 「一次修完全部 N 項（建議）」 as the recommended default, 「只修第 1 項，其餘先擱置」, 「先不修」.",
     "Only after the user accepts the suggested direction should you produce a V4A propose_patch in a later turn.",
   ].join("\n");
 }
 
-/** Fix items from the latest reflection that no accepted patch has closed yet. */
+/** Fix items from the latest reflection that no accepted patch has closed and the user has not skipped. */
 function openFixItems() {
   const reflection = (session?.iteration_reflections || []).slice(-1)[0];
   if (!reflection) return [];
-  const items = (reflection.what_to_change || []).map(String).filter((x) => x.trim());
+  const norm = (item) => String(item).replace(/\s+/g, " ").trim().toLowerCase();
+  const skipped = new Set((reflection.skipped || []).map(norm));
+  const items = (reflection.what_to_change || []).map(String).filter((x) => x.trim() && !skipped.has(norm(x)));
   if (!items.length) return [];
   const since = Date.parse(reflection.created_at || "");
+  const lastRun = Date.parse((session?.test_runs || []).slice(-1)[0]?.ran_at || "");
+  // A newer test run makes the list stale.
+  if (!Number.isNaN(since) && !Number.isNaN(lastRun) && lastRun > since) return [];
   const closed = new Set();
   for (const patch of session?.patch_history || []) {
     const applied = Date.parse(patch.applied_at || "");
     if (!Number.isNaN(since) && !Number.isNaN(applied) && applied < since) continue;
-    for (const item of patch.addresses || []) closed.add(String(item).replace(/\s+/g, " ").trim().toLowerCase());
+    for (const item of patch.addresses || []) closed.add(norm(item));
   }
-  return items.filter((item) => !closed.has(item.replace(/\s+/g, " ").trim().toLowerCase()));
+  return items.filter((item) => !closed.has(norm(item)));
 }
 
 function nextFixPrompt(remaining) {
@@ -5386,8 +5420,8 @@ function nextFixPrompt(remaining) {
     "The user accepted the proposed patch and it has been applied.",
     `${remaining.length} item(s) of the Open Fix List are still open:`,
     ...remaining.map((item, index) => `${index + 1}. ${item}`),
-    "Propose the next narrow propose_patch for the first open item now, with addresses set to that item verbatim.",
-    "Do NOT request a test run and do NOT transition to TEST until the list is empty.",
+    "If the user accepted these items, propose the next narrow propose_patch for the first one now, with addresses set to that item verbatim.",
+    "If the user chose to fix only some items, do not push the rest: say so briefly and mention the 'Skip remaining fixes' button above the chat input.",
   ].join("\n");
 }
 

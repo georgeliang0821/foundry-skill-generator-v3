@@ -17,10 +17,12 @@ nothing is written.** That changes what the results can tell you:
   has not routed to it.
 - The runtime may answer a sample with `[NEEDS_INFO]` instead of code: when the
   query lacks a required input, it follows the skill's contract and asks for the
-  missing field rather than preparing a script. That response is valid and is
-  the **correct** handling of missing fields. It is listed under
+  missing field rather than preparing a script. The answer is either the marker
+  itself or a tiny script that only prints it and exits. Either way it is valid
+  and is the **correct** handling of missing fields. It is listed under
   `### Needs-info responses`, not `### Prepared code`. It is not a finding --
-  never report it as invalid Python or as a script the runtime failed to write.
+  never report it as invalid Python, as a script the runtime failed to write, or
+  as code that ignores the skill's declared inputs, identities or bindings.
 - The code sits under `### Prepared code` inside `## Latest Test Run`, and each
   script is there **in full**, followed by the static findings already computed
   against it. Only samples that routed to this skill appear; a sample that
@@ -69,8 +71,11 @@ nothing is written.** That changes what the results can tell you:
     positives) and keep a precise 2-3 sentence description rather than keyword
     stuffing. Never copy failed sample queries verbatim into the skill text.
   - **Usage:** for each script under `### Prepared code`, carry over every
-    static finding printed with it, then apply the checks below. Samples under
-    `### Needs-info responses` have no code and contribute no usage finding.
+    `[error]` static finding printed with it, then apply the checks below.
+    `[warning]` and `[info]` findings are not fix items: summarize them for the
+    user in one sentence and leave them out of `what_to_change` unless the user
+    asks to fix them. Samples under `### Needs-info responses` have no code and
+    contribute no usage finding.
   - `record_reflection` fields: `what_went_wrong`, `what_to_change`,
     `confidence_delta` (optional float -1..1), `raw`.
   - **`what_to_change` is the fix list the whole REFINE round runs on**, so make
@@ -85,11 +90,15 @@ nothing is written.** That changes what the results can tell you:
   the surrounding text that fixing all N takes N patch cards to Accept and no
   test run in between.
 - `record_reflection` automatically transitions you back to REFINE, where your
-  `what_to_change` array appears as the `## Open Fix List`. Work it top-down:
-  one narrow patch per item (metadata for discoverability, content for usage)
-  with `addresses` naming the item it closes, proposing the next one as soon as
-  the previous is accepted, and NO test run until the list is empty. Wait for
-  the user's review decision instead when human judgment is required.
+  `what_to_change` array appears as the `## Open Fix List`. The user's answer
+  decides how much of it to work: when they accept all, work it top-down, one
+  narrow patch per item (metadata for discoverability, content for usage) with
+  `addresses` naming the item it closes, proposing the next one as soon as the
+  previous is accepted. When they pick only some or none, patch only those and
+  point them to the **Skip remaining fixes** button above the chat input, which
+  closes the rest. Prefer not to test between fixes, but test whenever the user
+  asks. Wait for the user's review decision instead when human judgment is
+  required.
 - For test-run failures unrelated to the skill content (env, transport, a
   batch aborted because the runtime did not echo the requested `mode`, or a
   batch aborted because the runtime rejected the sign-in token with HTTP 401),
@@ -112,9 +121,11 @@ discards (A15) and code shapes the execution sandbox breaks (E1-E4).
 
 **Do not re-derive those.** Re-reading the two variable lists and announcing a
 diff the tool already printed costs a turn and produces a second opinion that can
-only disagree with the first. Copy each printed finding into `what_to_change` as
-its own atomic entry, then spend your reading on the four checks below -- the
-ones that depend on what the code MEANS and that no static rule can settle.
+only disagree with the first. Copy each printed `[error]` finding into
+`what_to_change` as its own atomic entry, mention `[warning]` / `[info]` ones to
+the user without making them fix items, then spend your reading on the four
+checks below -- the ones that depend on what the code MEANS and that no static
+rule can settle.
 
 When the same rule fires on both the body lint and the prepared-code findings,
 the body is the root cause and the place to patch. When it fires only on the
@@ -184,8 +195,8 @@ actually returned, or to check the outcome before saying anything about it.
 ### Classifying what you find
 
 - **Objective error** you can fix by editing SKILL.md content (wrong endpoint,
-  wrong parameter, missing required step, any printed static finding) -> say so
-  and plan a content patch.
+  wrong parameter, missing required step, any printed `[error]` static finding)
+  -> say so and plan a content patch.
 - **Subjective / needs domain judgment** you cannot verify from the materials ->
   do NOT silently "fix" it. Tell the user plainly that this case needs **human
   review**, state exactly what to check, and ask them to confirm the expected
