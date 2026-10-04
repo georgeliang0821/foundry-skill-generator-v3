@@ -39,10 +39,10 @@
 本專案把以上痛點，收斂成一條「對話式、分階段、可測試」的流程。
 
 ---
-
+A
 ## 核心功能
 
-- **對話式產生 SKILL.md**：使用者用自然語言描述需求，AI 透過工具呼叫（tool calls）逐步產出與修改 `SKILL.md`。
+- **對話式產生 SKILL.md**：使用者用自然語言描述A需求，AI 透過工具呼叫（tool calls）逐步產出與修改 `SKILL.md`。
 - **五階段工作流**（見下方流程圖）：PREPARE → DRAFT → REFINE → TEST → DONE，每個階段有明確產出與品質關卡（quality gate）。
 - **既有 Skill 重複偵測**：PREPARE 階段比對知識庫（SQL + Blob），協助判斷該「新增」還是「修改既有 Skill」。
 - **鄰近 Skill 差異化（Peer Skills）**：載入使用者有權限的其他 Skill，協助把 `description` 的路由邊界寫清楚（何時用、何時不要用）。
