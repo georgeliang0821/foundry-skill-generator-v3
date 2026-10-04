@@ -189,6 +189,8 @@ def test_the_script_section_set_is_the_golden_fixture() -> None:
             "`propose_patch` edits SKILL.md only", "add the new version as a new code material",
             "remove the old code material", "confirm", "patch `## Required Inputs`", "(S3)",
             "Needs-info gets a row of its own whose first cell is `` 0, `status` = `needs_info` ``",
+            "the key in the script's own stdout JSON, never the tool's",
+            "`run_skill_script` reports this run as `success`",
         ]),
         ("04_test_script_addendum.md", [
             "`requested_scripts`", "`valid`", "`INVALID`", "`problems`", "args is not a list of strings",

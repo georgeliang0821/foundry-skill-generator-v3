@@ -26,8 +26,10 @@ Write the body with these sections, in this order:
    the host does for each. Needs-info gets a row of its own whose first cell
    is `` 0, `status` = `needs_info` ``; it says the first stdout line is
    `[NEEDS_INFO] missing=<field>`, followed by at most one JSON object, with
-   exit 0. Then one output-field table per `status`, naming every key the
-   script prints.
+   exit 0. That `status` is the key in the script's own stdout JSON, never
+   the tool's: `run_skill_script` reports this run as `success`, so never
+   write that the tool returns `needs_info`. Then one output-field table per
+   `status`, naming every key the script prints.
 5. `## Composability` -- which skills depend on this one's result, and which
    are independent of it.
 6. `## Prerequisites` -- one top-level bullet per environment variable the
