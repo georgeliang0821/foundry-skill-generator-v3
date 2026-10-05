@@ -244,7 +244,7 @@ import socket
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 import httpx  # 2026.05.18 George : v1.8 Phase 4 — Teams notification HTTP
 
@@ -326,6 +326,8 @@ from job_state_store import JobStateStore, InMemoryJobStateStore
 # cancel_pending_task / check_pending_tasks 使用。
 from job_store import JobStore, JobStatus
 
+import workspace_store
+from workspace_store import BlobWorkspaceStore, WORKSPACE_PERSISTENCE, WORKSPACE_CONTAINER
 # 2026.05.22 George : v1.9 — Static SkillsProvider (binary flag mode)
 # DYNAMIC_SKILLS_ENABLED=false 時用,把 SKILLS_DIR 內所有本地 skill 全部
 # 載入給 coding_agent。Dynamic 模式 (=true) 走 SkillsProviderFactory 不用這個。
@@ -383,6 +385,8 @@ _project_client = None
 _executor: Optional[CodeExecutor] = None
 _file_store: Optional[OutputFileStore] = None
 _job_state_store: Optional[JobStateStore] = None
+# Set only when WORKSPACE_PERSISTENCE=true; None keeps every turn byte-identical to the pre-feature path.
+_workspace_store: Optional[BlobWorkspaceStore] = None
 
 # 2026.05.22 George : v1.8 Phase — Per-turn dynamic SkillsProvider
 # Factory 是 singleton(內部持有 BlobServiceClient,跨 request 共用)。
@@ -408,6 +412,11 @@ _replica_id: str = ""
 # 標 interrupted 並砍 subprocess (下一個 commit 接 SIGTERM 時消費此簿)。
 # 純 in-process,不跨 replica;跨 replica 的死亡偵測走 W5 orphan (heartbeat)。
 _inflight_jobs: Dict[str, str] = {}
+
+# Tasks that outlive their HTTP request; uvicorn does not track them, so SIGTERM must drain them.
+_bg_tasks: Set[asyncio.Task] = set()
+
+_loop_lag_task: Optional[asyncio.Task] = None
 
 # 2026.05.18 George : v1.7 Phase 3
 # Adaptive Timeout 同步等待秒數。短任務 80 秒內完成走同步路徑,
@@ -446,6 +455,10 @@ CANCEL_POLL_INTERVAL = int(os.environ.get("CANCEL_POLL_INTERVAL", "5"))
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "20"))
 ORPHAN_TIMEOUT_SEC = int(os.environ.get("ORPHAN_TIMEOUT_SEC", "90"))
 
+# Must fit ACA terminationGracePeriodSeconds (600) minus uvicorn graceful timeout (30).
+SHUTDOWN_DRAIN_TIMEOUT_SEC = int(os.environ.get("SHUTDOWN_DRAIN_TIMEOUT_SEC", "540"))
+LOOP_LAG_WARN_SEC = float(os.environ.get("LOOP_LAG_WARN_SEC", "5"))
+
 # 2026.05.18 George : v1.8 Phase 4 — Teams 通知 webhook
 # Logic App HTTP trigger URL,bg task 完成且無 waiter 時 POST 到此 URL。
 # 未設定時 fallback 為「只 log 不發 HTTP」,並於 startup 記 warning。
@@ -463,7 +476,7 @@ TEAMS_NOTIFY_RESULT_SUMMARY_MAX_CHARS = 1500  # 截至 Adaptive Card 容納範�
 # ============================================================================
 # 2026.05.22 George : v1.9 — Static SkillsProvider builder
 # ============================================================================
-# 用於 DYNAMIC_SKILLS_ENABLED=false 模式 (主路徑) — 把 SKILLS_DIR 內所有本地
+# 用於 DYNAMIC_SKILLS_ENABLED=false 模式 (Mode A) — 把 SKILLS_DIR 內所有本地
 # skill 載入給 coding_agent.context_providers,讓所有 skill 全開、無 RBAC。
 #
 # sync_skills() 也會用同一個 helper 在 Blob → 本地 sync 後重建 provider
@@ -552,6 +565,7 @@ async def startup():
     global _job_store, _replica_id
     # 2026.05.22 George : v1.8 — SkillsProviderFactory
     global _skills_factory
+    global _loop_lag_task, _workspace_store
 
     logger.info("=" * 60)
     logger.info("Core Handler - Starting...")
@@ -645,6 +659,14 @@ async def startup():
             "file uploads will be skipped"
         )        
 
+    if WORKSPACE_PERSISTENCE and account_name:
+        _workspace_store = BlobWorkspaceStore(account_name, WORKSPACE_CONTAINER)
+        logger.info(f"[startup] Workspace persistence enabled, container={WORKSPACE_CONTAINER}")
+    elif WORKSPACE_PERSISTENCE:
+        logger.warning(
+            "[startup] WORKSPACE_PERSISTENCE=true ignored: AZURE_STORAGE_ACCOUNT_NAME missing"
+        )
+
     # 4c. JobStateStore: in-process waiter 機制
     # Phase 0 是空殼,Phase 3 已填完整邏輯 (見 job_state_store.py)。
     _job_state_store = InMemoryJobStateStore()
@@ -657,19 +679,20 @@ async def startup():
     # 4d. SkillsProvider wiring
     # 2026.05.22 George : v1.8 — dynamic per-turn factory (初版)
     # 2026.05.22 George : v1.9 — Binary flag, no fallback
+    # 2026.10.03 George : 預設改為 true (Mode B);Mode A 需明設 false
     # ============================================================
     # 單一 env var 控制:
-    #   DYNAMIC_SKILLS_ENABLED (預設 false)
+    #   DYNAMIC_SKILLS_ENABLED (預設 true)
     #
-    # Flag=false (預設,主路徑):
+    # Flag=true (預設,主路徑,Mode B):
+    #   建 SkillsProviderFactory 並注入 workflow.skills_factory。
+    #   workflow.run() per-turn 用 factory 拉 RLS-filtered skill 並 swap。
+    #
+    # Flag=false (Mode A,緊急回滾路徑):
     #   建 static FileAgentSkillsProvider(SKILLS_DIR) 並注入
     #   coding_agent.context_providers。所有本地 skill 全開,無 RBAC。
     #   workflow.run() 內 if self.skills_factory is not None 為 False,
     #   不會 swap context_providers,coding_agent 永久使用這個 static provider。
-    #
-    # Flag=true:
-    #   建 SkillsProviderFactory 並注入 workflow.skills_factory。
-    #   workflow.run() per-turn 用 factory 拉 RLS-filtered skill 並 swap。
     #
     # 故意不做 SQL/Blob 故障自動 fallback (設計取捨):
     #   - 程式只負責「我有沒有 RBAC」的二元決策
@@ -679,7 +702,7 @@ async def startup():
     #   使用者反映 → ops 把 DYNAMIC_SKILLS_ENABLED 改 false 重啟即可。
     # ============================================================
     _dynamic_enabled = os.environ.get(
-        "DYNAMIC_SKILLS_ENABLED", "false"
+        "DYNAMIC_SKILLS_ENABLED", "true"
     ).lower() == "true"
 
     from skills_sync import SKILL_SCRIPTS_ENABLED
@@ -696,7 +719,7 @@ async def startup():
         )
 
     if not _dynamic_enabled:
-        # ── Static-only 模式 (主路徑) ──
+        # ── Static-only 模式 (Mode A,緊急回滾路徑) ──
         _skills_factory = None
         _workflow.skills_factory = None
 
@@ -798,6 +821,10 @@ async def startup():
         f"ADAPTIVE_TIMEOUT_SECONDS={ADAPTIVE_TIMEOUT_SECONDS}"
     )
 
+    _loop_lag_task = asyncio.create_task(
+        _loop_lag_monitor(LOOP_LAG_WARN_SEC), name="loop-lag-monitor"
+    )
+
     logger.info("Core Handler ready")
 
 
@@ -855,6 +882,7 @@ RESPONSE_BOUNDARY_WHITELIST = frozenset({
     "message",
     "reason",
     "existing_job",
+    "interrupted",
 })
 
 
@@ -1119,7 +1147,7 @@ async def run_workflow(
     # Step 4: 起 bg task,asyncio.create_task 會在當前 event loop 排程,
     # handler return 之後 bg task 仍存活 (Phase 1 驗證 1 已實證)。
     # ─────────────────────────────────────────────────────────────
-    bg_task = asyncio.create_task(
+    bg_task = _track_bg_task(asyncio.create_task(
         _run_coding_agent_inner(
             user_input=user_input,
             session_id_hint=effective_session_id,
@@ -1128,7 +1156,7 @@ async def run_workflow(
             mode=mode,
             scenario=scenario,
         )
-    )
+    ))
     # 名字方便 debug
     bg_task.set_name(f"coding-agent-{job_id[:8]}")
 
@@ -1217,6 +1245,26 @@ def _build_running_response(
     }
 
 
+def _track_bg_task(task: asyncio.Task) -> asyncio.Task:
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
+async def _loop_lag_monitor(warn_sec: float, interval: float = 1.0) -> None:
+    """Log-only: a blocked loop also stalls heartbeats, which looks like an orphan from other replicas."""
+    loop = asyncio.get_running_loop()
+    while True:
+        started = loop.time()
+        await asyncio.sleep(interval)
+        lag = loop.time() - started - interval
+        if lag >= warn_sec:
+            logger.warning(
+                f"[loop-lag] event loop blocked ~{lag:.1f}s "
+                f"(threshold={warn_sec}s, inflight={len(_inflight_jobs)})"
+            )
+
+
 def _register_inflight(job_id: str, session_id: str) -> None:
     """登記本 replica 正在跑的 job (W5/W6)。"""
     _inflight_jobs[job_id] = session_id
@@ -1242,6 +1290,11 @@ async def shutdown() -> None:
     2026.07.20 George : #3 落地 — 一併補關 _admin_credential (Mode B 寫路徑用 MI
     拿 SQL admin token 的長駐 credential),原本從未 close。
     """
+    if _loop_lag_task is not None:
+        _loop_lag_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _loop_lag_task
+
     for name, store in (("job_store", _job_store), ("conv_store", _conv_store)):
         if store is not None:
             try:
@@ -1270,6 +1323,12 @@ async def shutdown() -> None:
         except Exception as e:
             logger.warning(f"[shutdown] executor.close() error: {e}")
 
+    if _workspace_store is not None:
+        try:
+            await _workspace_store.close()
+        except Exception as e:
+            logger.warning(f"[shutdown] workspace_store.close() error: {e}")
+
     # 2026.07.25 George : #5 — 關閉 debug bundle 的 cached blob client/credential/
     # executor(sync helper,卸載到 thread 避免阻塞 shutdown loop)。
     try:
@@ -1283,6 +1342,7 @@ async def shutdown() -> None:
 async def shutdown_inflight_jobs(
     reason: str = "shutdown",
     cancel_timeout: float = 3.0,
+    drain_timeout: Optional[float] = None,
 ) -> int:
     """W6 — SIGTERM / graceful shutdown 時把本 replica 仍在跑的 job 標
     INTERRUPTED,並 best-effort 砍 subprocess。
@@ -1316,12 +1376,30 @@ async def shutdown_inflight_jobs(
     Returns:
         處理的 job 數 (供 log / 測試)。
     """
-    if not _inflight_jobs:
+    if drain_timeout is None:
+        drain_timeout = SHUTDOWN_DRAIN_TIMEOUT_SEC
+
+    pending = {t for t in _bg_tasks if not t.done()}
+    if pending:
+        logger.warning(
+            f"[shutdown] draining {len(pending)} background task(s) "
+            f"for up to {drain_timeout}s (reason={reason})"
+        )
+        _, pending = await asyncio.wait(pending, timeout=drain_timeout)
+
+    # Snapshot before cancelling: a cancelled task deregisters itself in its finally block.
+    snapshot = list(_inflight_jobs.items())
+
+    # Cancel stragglers so they cannot commit metadata / job state after being marked INTERRUPTED.
+    if pending:
+        logger.warning(f"[shutdown] cancelling {len(pending)} undrained task(s)")
+        for t in pending:
+            t.cancel()
+        await asyncio.wait(pending, timeout=cancel_timeout)
+
+    if not snapshot:
         return 0
 
-    # 快照後再迭代:Pass 2 的 executor.cancel 可能間接觸發 bg task 收尾 →
-    # _deregister_inflight 改動 dict,迭代原 dict 會出錯。
-    snapshot = list(_inflight_jobs.items())
     logger.warning(
         f"[shutdown] marking {len(snapshot)} in-flight job(s) INTERRUPTED "
         f"(reason={reason}, replica={_replica_id})"
@@ -1601,6 +1679,10 @@ async def _run_coding_agent_inner(
         if _conv_store and session_id_hint:
             metadata = await _conv_store.load_metadata(session_id_hint)
             if metadata:
+                if _workspace_store is not None and mode != "route_only":
+                    notice = await workspace_store.prepare(_workspace_store, metadata)
+                    if notice:
+                        metadata["workspace_notice"] = notice
                 _apply_metadata_to_state(state, metadata)
                 logger.info(
                     f"[State] Loaded metadata: session={session_id_hint}, "
@@ -1642,6 +1724,10 @@ async def _run_coding_agent_inner(
         # metadata 有無即「是否為 session 第一輪」的判準。
         _init_debug_dir(state.work_dir, reset=not metadata)
 
+        _persist_workspace = _workspace_store is not None and _conv_store is not None and mode != "route_only"
+        if _persist_workspace:
+            workspace_store.mark_dirty(state.work_dir, state.workspace_generation)
+
         # 3. 注入 session context
         if metadata:
             _inject_session_context(state, metadata)
@@ -1674,7 +1760,10 @@ async def _run_coding_agent_inner(
         #              放進 result["usage"] → 隨 result JSON 進 Job Store,也進本輪 turn summary。
         # cumulative = 上一輪 metadata 的 session 累計 + 本 turn → 寫回 state.session_usage_totals,
         #              由 save_metadata 在同一次 upsert 寫成 usage_json(與 turn_history 同源同寫,零 drift)。
-        _usage_keys = ("input_token_count", "output_token_count", "total_token_count")
+        _usage_keys = (
+            "input_token_count", "output_token_count", "total_token_count",
+            "cached_input_token_count", "cache_write_token_count",
+        )
         this_turn_usage = {
             k: int(getattr(state, "usage_totals", {}).get(k, 0) or 0)
             for k in _usage_keys
@@ -1688,7 +1777,9 @@ async def _run_coding_agent_inner(
         logger.info(
             f"[Usage] turn input={this_turn_usage['input_token_count']}, "
             f"output={this_turn_usage['output_token_count']}, "
-            f"total={this_turn_usage['total_token_count']}; "
+            f"total={this_turn_usage['total_token_count']}, "
+            f"cached_input={this_turn_usage['cached_input_token_count']}, "
+            f"cache_write={this_turn_usage['cache_write_token_count']}; "
             f"session total={state.session_usage_totals['total_token_count']}"
         )
 
@@ -1743,7 +1834,15 @@ async def _run_coding_agent_inner(
         # 路由驗證)每個樣本用獨立 session 且永不回帶,寫了沒人讀;批次跑數百個樣本
         # 會在 Table 累積等量垃圾。也讓「route_only 不寫入」這條不變式少一個例外。
         if _conv_store and mode != "route_only":
-            await _conv_store.save_metadata(effective_session_id, state)
+            if _persist_workspace:
+                previous_blob = state.workspace_blob
+                await workspace_store.checkpoint(_workspace_store, state)
+                saved = await _conv_store.save_metadata(
+                    effective_session_id, state, etag=(metadata or {}).get("_etag")
+                )
+                await workspace_store.finalize(_workspace_store, state, previous_blob, saved)
+            else:
+                await _conv_store.save_metadata(effective_session_id, state)
 
         # 6. 在 result 中帶回 session_id(供 caller 下輪帶回)
         result["session_id"] = effective_session_id
@@ -2100,7 +2199,7 @@ async def _send_teams_notification(
     # ── fire-and-forget:不 await,bg task 立即釋放 ──
     # 重試邏輯在 _post_webhook_with_retry 內。即使重試全失敗也只 log,
     # 不影響 Job Store 終態 (已寫 completed/failed)。
-    asyncio.create_task(_post_webhook_with_retry(payload))
+    _track_bg_task(asyncio.create_task(_post_webhook_with_retry(payload)))
 
 
 async def _post_webhook_with_retry(payload: dict) -> None:
@@ -2318,6 +2417,19 @@ def _is_terminal_status(status: str) -> bool:
     )
 
 
+def interrupted_session_hint() -> str:
+    workspace = (
+        "本輪的變更未保存,工作區已回到上一輪完成時的狀態"
+        if _workspace_store is not None
+        else "工作目錄中的檔案可能已遺失"
+    )
+    return (
+        f"本輪任務因系統事件(部署 / 縮容)中斷;{workspace},先前的對話與程式碼仍保留。"
+        "重新發起前請先確認本輪是否已產生外部寫入(例如已發布的文件),"
+        "再帶回此 session_id 重新發起。"
+    )
+
+
 async def _deliver_terminal_job(session_id: str, job) -> dict:
     """從終態 job 取回 result、標記 picked_up、投影成 MCP 邊界 shape。
 
@@ -2367,6 +2479,9 @@ async def _deliver_terminal_job(session_id: str, job) -> dict:
             "skills_referenced": [],
             "uploads": [],
         }
+
+    if is_interrupted:
+        result["interrupted"] = True
 
     # 標記已領取,後續同 session 查詢不會再撈到此筆
     await _mark_result_picked_up(session_id, job.job_id)
@@ -2584,6 +2699,12 @@ def _apply_metadata_to_state(state: ConversationState, metadata: dict):
     # 不還原會導致新一輪寫成 script_v1.py 蓋掉舊檔)
     state.execution_count = metadata.get("execution_count", 0)
 
+    state.workspace_generation = int(metadata.get("workspace_generation") or 0)
+    state.workspace_blob = metadata.get("workspace_blob") or ""
+    state.workspace_status = metadata.get("workspace_status") or ""
+    state.workspace_digest = metadata.get("workspace_digest") or ""
+    state.workspace_hydrate_failed = bool(metadata.get("workspace_hydrate_failed"))
+
     # 還原既有產出檔案清單,過濾掉已不存在於磁碟的 (replica 重啟後可能消失)
     output_files = metadata.get("output_files", []) or []
     state.output_files = [f for f in output_files if os.path.exists(f)]
@@ -2621,6 +2742,10 @@ def _inject_session_context(state: ConversationState, metadata: dict):
     所以 agent instructions 不需要修改。
     """
     parts = []
+
+    workspace_notice = metadata.get("workspace_notice")
+    if workspace_notice:
+        parts.append(f"## 工作區狀態\n{workspace_notice}\n")
 
     # 1. Turn history(讓 LLM 知道前幾輪做了什麼)
     turn_history = metadata.get("turn_history", [])
@@ -3295,12 +3420,10 @@ async def clear_session(session_id: str) -> str:
 # 2026.05.25 George
 #
 # Gatekeeper approve 後同步 skill metadata 到 SQL 時,以 ACA Managed Identity
-# 取得 SQL token 寫入 skills / user_skill_grants(一般 user 沒有這些寫入權限)。
+# 取得 SQL token 推進 skills.updated_at(一般 user 沒有寫入權限)。
 #
-# 前置條件(SQL 端必須完成,見 mode_b_publish_deployment.sql):
-#   1. CREATE USER [aca-app-name] FROM EXTERNAL PROVIDER
-#   2. GRANT INSERT/UPDATE/SELECT ON skills + INSERT/SELECT ON user_skill_grants
-# user_skill_grants 只有 FILTER predicate,INSERT 不受 RLS 影響,寫入不需要 bypass。
+# 前置條件:sql-database-permission.sql Case B
+#   (SELECT on v_my_skills / skills + UPDATE on skills(updated_at))
 # 2026.09.26 實測:MI 的 SUSER_SNAME() 是 '<ClientID>@<TenantID>',以 app 名稱比對的 bypass 不成立。
 # ============================================================================
 

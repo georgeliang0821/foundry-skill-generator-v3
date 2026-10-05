@@ -200,8 +200,7 @@ VERSION: 1.7
                               + Mode B publish(approve_pending_skill)主動
                               invalidate_rls_cache() — 發佈後下一 turn 立刻生效。
                             - 診斷查詢 SELECT SUSER_SNAME()... 改由
-                              SKILLS_RLS_DIAG_ENABLED gate(正式環境預設關閉,
-                              省每 turn 一趟 round-trip)。
+                              SKILLS_RLS_DIAG_ENABLED gate(2026.10.03 已整段移除)。
                             - hit/miss/invalidate 都打 key=value log,供 KQL 撈 hit rate。
                             - 只服務 User OBO 讀路徑(短連線);Admin MI 寫路徑走
                               gatekeeper_publish,不共用此快取/連線邏輯。
@@ -299,14 +298,6 @@ _EAA_RUNS_HELPER = Path(__file__).with_name("eaa_runs_helper.py")
 
 # Azure SQL token authentication — Microsoft 規定的 ODBC SQL_COPT_SS_ACCESS_TOKEN
 SQL_COPT_SS_ACCESS_TOKEN = 1256
-
-# 2026.07.20 George : #3 — 診斷查詢 debug flag。_fetch_allowed_skills 每 turn 會
-# 多打一次 SELECT SUSER_SNAME(), USER_NAME(), ORIGINAL_LOGIN() 純診斷 principal
-# 對不對。正式環境預設關閉(省每 turn 一趟 round-trip);要查 RLS grant 對不對
-# 時才設 SKILLS_RLS_DIAG_ENABLED=true 開。⚠️ 預設值必須是關閉。
-_RLS_DIAG_ENABLED = os.environ.get("SKILLS_RLS_DIAG_ENABLED", "false").strip().lower() in (
-    "1", "true", "yes", "on",
-)
 
 # RLS 清單快取 TTL(秒)—— 只是保底防背景漂移;主要失效靠 Mode B publish
 # 主動 invalidate。預設 300s。
@@ -734,6 +725,8 @@ class ScriptRunContext:
                 self.output_files.append(f)
         stdout = result.raw_stdout or ""
         stderr = result.raw_stderr or ""
+        # 只進 script_runs;tool payload 不變,模型仍依 stdout 的 [NEEDS_INFO] 行判斷
+        record["needs_input"] = bool(getattr(result, "needs_input", False))
         tool_result = finish(
             getattr(result.status, "value", str(result.status)),
             exit_code=result.returncode,
@@ -936,34 +929,10 @@ class SkillsProviderFactory:
             attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct},
         ) as conn:
             async with conn.cursor() as cursor:
-                # 2026.06.09 George: RLS 診斷
                 # v_my_skills 依「連線進來的 principal」過濾。互動路徑是 user
                 # OBO(SUSER_SNAME = user UPN);routine 路徑是 ACA MI(token auth)。
-                # 若回 0 列,通常不是連線/auth 失敗,而是這個 principal 在
-                # user_skill_grants 沒有對應列 → grant 對象就是下面印出來的名字。
-                # 一次印三個函式,因為 token 連線下 SUSER_SNAME / USER_NAME /
-                # ORIGINAL_LOGIN 可能不同,要對齊 v_my_skills 實際比對的那一個。
-                # 診斷失敗不阻斷主查詢。
-                # 2026.07.20 George : #3 — 每 turn 多一趟純診斷 round-trip,改由
-                # SKILLS_RLS_DIAG_ENABLED gate(正式環境預設關閉)。
-                if _RLS_DIAG_ENABLED:
-                    try:
-                        await cursor.execute(
-                            "SELECT SUSER_SNAME(), USER_NAME(), ORIGINAL_LOGIN()"
-                        )
-                        diag = await cursor.fetchone()
-                        if diag is not None:
-                            logger.info(
-                                "[Skills] Connected principal — SUSER_SNAME=%r, "
-                                "USER_NAME=%r, ORIGINAL_LOGIN=%r",
-                                diag[0], diag[1], diag[2],
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "[Skills] Principal diagnostic failed (continuing): "
-                            "%s: %s", type(e).__name__, e,
-                        )
-
+                # 2026.10.03 George : 移除 SKILLS_RLS_DIAG_ENABLED 診斷查詢 ——
+                # MI 的 principal 名稱改由 SQL 端自行組出(見 Foundry Routines §2.2)。
                 await cursor.execute(
                     "SELECT skill_name, owner_upn, skill_key, blob_path, updated_at, "
                     "blob_prefix, is_internal "
@@ -1008,8 +977,7 @@ class SkillsProviderFactory:
                 "[Skills] Fetched 0 allowed skills via Azure SQL RLS — "
                 "connection/auth OK but v_my_skills returned no rows. "
                 "Either the principal has no grants, or no skill is marked "
-                "is_public=1 (enable SKILLS_RLS_DIAG_ENABLED to log the "
-                "principal name the view filters on).",
+                "is_public=1.",
             )
         return list(metas)
 

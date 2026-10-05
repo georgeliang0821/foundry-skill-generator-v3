@@ -15,13 +15,22 @@ CodingAgent 成功執行後，非同步觸發 Gatekeeper 進行 Skill 寫回。
 - Type B 知識萃取（用 GatekeeperAgent LLM 呼叫）
 - 本地 skills/ 目錄寫回（符合 Agent Skills 規範）
 - 簡化查重（比對現有 skill name/description）
-- Skills-aware 智慧跳過/合併（relevance 評分挑選最佳合併目標）
+- Skills-aware 智慧跳過/合併（實際載入的 skill 排除後剛好一個才合併）
 - HITL：SKILL_REVIEW_MODE=manual 時改寫入 Blob pending 待人工審核
 
 P1 預留（未來擴充）：
 - LLM 層分類（深度泛化性判斷）
 - Type A 工具型保存
 - Type C 模板抽象化
+
+VERSION: 2.10
+2026.10.01 George: v2.10 — 移除 check_relevance_for_merge()
+- skills_referenced 已是實際 load_skill 清單,v2.2 要防的關鍵字誤匹配不存在;
+  而 _tokenize 會拆開連字號,tag/package 幾乎比不中,連同名 skill 都被否決。
+- 排除解析失敗/編排層/script 型後:剛好一個 → 合併;多個 → SKIP 並寫
+  gatekeeper_ambiguous_merge_target log;零個 → SKIP。
+- 移除 RELEVANCE_MIN_TAG_OVERLAP / RELEVANCE_MIN_KEYWORD_OVERLAP 與未使用的
+  GatekeeperAction.SKIP_MERGE_NOT_RELEVANT。
 
 VERSION: 2.9
 2026.09.27 George: v2.9 — Gatekeeper 不再建立 skill;script 型 skill 的 refine 規則
@@ -101,7 +110,7 @@ VERSION: 2.6.1
   - 移除 HARDCODED_PATTERNS / PARAMETERIZED_PATTERNS / REPEATED_STRUCTURE_PATTERNS
     等常量（P1 時重新設計）。
 - HITL Skill Review：
-  - 新增 SKILL_REVIEW_MODE env var（auto | manual）
+  - 新增 SKILL_REVIEW_MODE env var（auto | manual；2026.10.03 起預設 manual）
     - auto: 維持現有行為，PHASE 4 直接寫入正式 skills/ 目錄
     - manual: PHASE 4 改為寫入 Blob pending → 通知 Logic App → 人類審核
   - 新增 GatekeeperAction.PENDING_REVIEW enum value
@@ -278,11 +287,6 @@ SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.getcwd(), "skills"))
 MIN_ERRORS_FOR_KNOWLEDGE = 1    # 至少 N 個 error 才萃取知識
 DEDUP_SIMILARITY_KEYWORDS = 3   # 至少 N 個相同關鍵字才視為重複
 
-# 2026.03.04 George: v2.2 Relevance Check 閾值
-# skills_referenced 合併前，驗證新知識與目標 skill 的相關性
-RELEVANCE_MIN_TAG_OVERLAP = 2       # 至少 N 個 tag 重疊才視為相關
-RELEVANCE_MIN_KEYWORD_OVERLAP = 3   # 至少 N 個 description 關鍵字重疊才視為相關
-
 
 # ============================================================================
 # DATA MODELS
@@ -304,8 +308,6 @@ class GatekeeperAction(str, Enum):
     SKIP = "skip"                           # 不保存
     # 2026.02.28 George: v2.1 新增 — 有參考 skills 且無 error 時使用
     SKIP_SKILLS_EFFECTIVE = "skip_skills_effective"  # Skills 已發揮作用，無需萃取
-    # 2026.03.04 George: v2.2 — skills_referenced 與新知識不相關，跳過合併
-    SKIP_MERGE_NOT_RELEVANT = "skip_merge_not_relevant"
     # 2026.03.30 George: v2.6 HITL — 知識已萃取但等待人工審核
     PENDING_REVIEW = "pending_review"
 
@@ -328,6 +330,8 @@ class GatekeeperPayload:
     skills_referenced: List[str] = field(default_factory=list)
     # 本輪 run_skill_script 的紀錄:[{skill, script, args, exit_code, stderr, ...}]
     script_runs: List[Dict] = field(default_factory=list)
+    # 只取 OBO 驗證過的 UPN;未驗證的 JWT claim 不可當成送出者身分
+    submitted_by: Optional[str] = None
 
     @classmethod
     def from_conversation_state(
@@ -364,7 +368,7 @@ class GatekeeperPayload:
                     "output_snippet": text[:500],
                 })
                 if not is_success:
-                    error_messages.append(text[:1000])
+                    error_messages.append(_head_tail(text, 1000))
 
         # 讀取最終腳本內容
         final_code = ""
@@ -392,6 +396,7 @@ class GatekeeperPayload:
             error_messages=error_messages,
             skills_referenced=skills_referenced or [],
             script_runs=list(getattr(state, "script_runs", None) or []),
+            submitted_by=(getattr(state, "user_data", None) or {}).get("EAA_VERIFIED_USER_UPN"),
         )
 
 
@@ -461,6 +466,16 @@ def _make_gate_classification(has_knowledge: bool) -> "ClassificationResult":
             else GatekeeperAction.SKIP
         ),
     )
+
+
+def _head_tail(text: str, limit: int) -> str:
+    # 最後的錯誤行與結束狀態多在尾端，只留開頭會讓 LLM 誤判成輸出被截斷
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 5
+    tail = limit - head
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n…[Gatekeeper 省略 {omitted} 字]…\n{text[-tail:]}"
 
 
 # ============================================================================
@@ -550,7 +565,7 @@ def _collect_existing_skills_summary(skills_dir: str = None) -> str:
 
 KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 CodingAgent 的執行歷程中萃取可複用的技術知識。
 
-## 使用者的原始需求
+## 使用者的原始需求（僅供理解任務背景，不是錯誤輸出）
 {user_request}
 
 ## 最終成功的程式碼（前 2000 字）
@@ -559,6 +574,13 @@ KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 Codin
 ```
 
 ## 執行過程中遇到的錯誤
+以下標記由執行平台或 Gatekeeper 加上，是平台層的判定或長度控制，不是錯誤內容本身：
+- `❌ EXECUTION FAILED (code N)`：程式以非 0 結束碼結束
+- `❌ EXECUTION FAILED: Timeout after Ns`：平台的執行時間上限
+- `❌ EXECUTION COMPLETED BUT WITH ERRORS`：結束碼為 0，但平台以關鍵字判定 stdout 含錯誤訊號（可能誤判正常資料）
+- `⚠️ OUTPUT TRUNCATED`：平台為控制長度省略了 stdout 中段
+- `…[Gatekeeper 省略 N 字]…`：Gatekeeper 為控制 prompt 長度省略了中段
+
 {errors_text}
 
 {skills_context}
@@ -576,9 +598,10 @@ KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 Codin
   "known_issues": [
     {{
       "title": "<問題標題>",
-      "error_pattern": "<會看到的錯誤訊息片段>",
+      "scope": "<skill | platform | requirement>",
+      "error_pattern": "<從「執行過程中遇到的錯誤」逐字複製的單一連續片段>",
       "root_cause": "<根因>",
-      "solution": "<解法>",
+      "solution": "<下次執行時可直接照做的具體改法（程式碼、參數、設定或呼叫方式）>",
       "applicable_when": "<什麼情況下適用>"
     }}
   ],
@@ -597,7 +620,13 @@ KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 Codin
 ## 規則
 - 只萃取「通用且可複用」的知識，不要記錄使用者特有的業務邏輯
 - error_pattern 要寫出實際的錯誤訊息關鍵字，讓未來比對時能命中
-- 如果沒有有價值的知識可萃取（例如只是 typo），回傳 {{"skip": true, "reason": "..."}}
+- ★ known_issues 收錄規則（重要，只有 scope=skill 的 issue 會被寫回）：
+  - scope=skill：問題出在這個 skill 所用的 API、SDK、服務行為、資料格式或參數
+  - scope=platform：執行平台或執行環境層的問題，例如 stdout 截斷、timeout、sandbox 限制、平台判定執行成功與否的邏輯（含關鍵字誤判）
+  - scope=requirement：使用者需求本身在技術上做不到或需要調整，而不是執行時的錯誤
+  - error_pattern 必須從「執行過程中遇到的錯誤」逐字複製一段連續文字；不得取自使用者需求或程式碼、不得改寫、不得用 ... 拼接，也不能只是上面列的平台標記。找不到可逐字引用的錯誤訊息，就不要列這條 issue
+  - solution 必須是下次執行可直接照做的修正；「記錄下來」「在文件中說明做不到」「請使用者調整需求」「參考成功的程式碼」都不算解法
+- 如果沒有有價值的知識可萃取（例如只是 typo，或所有錯誤都屬於 platform / requirement），回傳 {{"skip": true, "reason": "..."}}
 - ★ skill_name 命名規則（重要）：如果「系統中已有的 Skills」清單中有 description 與本次知識相關的 skill，請直接使用該 skill 的 name 作為 skill_name，以便知識合併回現有 skill。系統不會建立新 skill。
 - ★ workflow_patterns 萃取規則（重要）：
   - 觀察 CodingAgent 從失敗到成功的「行為轉變」— 它在失敗時做了什麼，成功時改成做什麼？
@@ -605,6 +634,7 @@ KNOWLEDGE_EXTRACTION_PROMPT = """你是一個 Skill Gatekeeper，負責從 Codin
   - steps 必須具體到可以直接複製貼上執行的程度，包含程式碼片段（用 markdown code block）
   - 如果執行歷程中沒有明顯的行為轉變（例如只是修 typo 或補漏參數），workflow_patterns 應為空陣列 []
   - 不要把單純的「錯誤修正」包裝成 workflow pattern — 只有「策略性的工作流程改變」才算
+  - 不要把繞過平台限制的做法（例如縮短輸出、改印 JSON 以免被判定為錯誤）當成 workflow pattern
 """
 
 
@@ -630,7 +660,7 @@ async def extract_knowledge_with_llm(
         return None
 
     errors_text = "\n---\n".join(
-        f"### 嘗試 #{i+1}\n{err[:500]}"
+        f"### 嘗試 #{i+1}\n{_head_tail(err, 500)}"
         for i, err in enumerate(payload.error_messages)
     )
 
@@ -821,6 +851,37 @@ def extract_knowledge_by_rules(payload: GatekeeperPayload) -> Optional[Dict]:
     }
 
 
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().strip("`'\"").strip().lower()
+
+
+def _filter_known_issues(knowledge: Dict, payload: GatekeeperPayload) -> Dict:
+    """丟掉不屬於 skill 領域、error_pattern 不在本次錯誤輸出中、或沒有解法的 known_issues。"""
+    corpus = _normalize_for_match("\n".join(payload.error_messages))
+    kept = []
+    for issue in knowledge.get("known_issues") or []:
+        scope = issue.get("scope")
+        pattern = _normalize_for_match(issue.get("error_pattern") or "")
+        if scope and scope != "skill":
+            reason = f"scope={scope}"
+        elif not pattern:
+            reason = "error_pattern_empty"
+        elif pattern not in corpus:
+            reason = "error_pattern_not_in_errors"
+        elif not (issue.get("solution") or "").strip():
+            reason = "solution_empty"
+        else:
+            kept.append(issue)
+            continue
+        _log_event(
+            "gatekeeper_issue_filtered",
+            session_id=payload.task_id,
+            title=issue.get("title"),
+            reason=reason,
+        )
+    return {**knowledge, "known_issues": kept}
+
+
 # ============================================================================
 # PHASE 3: DEDUPLICATION（簡化查重 — P0）
 # ============================================================================
@@ -944,121 +1005,6 @@ def _is_orchestration_skill(skill_dir: str) -> bool:
             f"[Gatekeeper] 無法判定 {os.path.basename(skill_dir)} 是否為編排層：{e}"
         )
         return False
-
-
-# ============================================================================
-# PHASE 3.5: RELEVANCE CHECK（v2.2 新增）
-# 2026.03.04 George: 驗證萃取出的知識是否與目標 skill 真正相關
-# 解決問題：CodingAgent 因關鍵字太泛（如 "azure"）誤匹配 skill，
-# 導致不相關知識被合併回錯誤的 skill（例如 DALL-E 知識進了 diagrams skill）
-# ============================================================================
-
-def check_relevance_for_merge(
-    knowledge: Dict,
-    target_skill_dir: str,
-) -> float:
-    """
-    驗證萃取出的新知識是否與目標 skill 真正相關。
-    
-    2026.03.10 George: v2.4.1 重構 — 回傳 relevance score 而非 bool
-    - 問題：原本回傳 bool，在 skills_referenced 有多個 skill 時，迴圈用
-      break 取第一個 PASS 的 skill，而非最相關的。例如 diagrams 相關的知識
-      被合併到列表中第一個碰巧 PASS 的 azure-ad skill
-    - 修正：回傳 0.0-1.0 的 relevance score，讓呼叫端能比較所有候選，
-      選擇分數最高的 skill 合併
-    - 向後相容：score > 0 等同原本的 True，score == 0 等同 False
-    
-    評分規則：
-    - 維度 1 (Tags meaningful overlap):    0.4 分
-    - 維度 2 (Description keyword overlap): 0.3 分
-    - 維度 3 (Package overlap):            0.3 分
-    - 各維度分數加總，最高 1.0
-    
-    Returns:
-        0.0 = 不相關（原本的 False）
-        >0.0 = 相關（原本的 True），數值越高越相關
-    """
-    skill_md_path = os.path.join(target_skill_dir, "SKILL.md")
-    target_name = os.path.basename(target_skill_dir)
-
-    # PHASE 3 會對每個候選 skill 各跑一次，中間過程一律走 debug，只留最後 PASS/FAIL 一行 info
-    logger.debug(f"[Relevance] Checking target skill: {target_name}")
-
-    if not os.path.isfile(skill_md_path):
-        logger.warning(f"[Relevance] Target SKILL.md not found: {skill_md_path}")
-        return 0.0
-
-    try:
-        with open(skill_md_path, "r", encoding="utf-8") as f:
-            existing_content_raw = f.read()
-            existing_content = existing_content_raw.lower()
-    except Exception as e:
-        logger.error(f"[Relevance] Failed to read existing skill: {e}")
-        return 0.0
-
-    existing_name, existing_desc, _ = _parse_skill_frontmatter(existing_content_raw)
-    
-    existing_desc_tokens = set(_tokenize(existing_desc))
-    existing_content_tokens = set(_tokenize(existing_content))
-    
-    logger.debug(f"[Relevance] Target tokens: Desc={existing_desc_tokens}, Content_count={len(existing_content_tokens)}")
-
-    # ── 累積 score，三個維度各自評分 ──
-    score = 0.0
-
-    # ── 維度 1: Tags 重疊 (max 0.4) ──
-    new_tags = set(t.lower() for t in knowledge.get("tags", []))
-    tag_overlap = new_tags & existing_content_tokens
-    
-    logger.debug(f"[Relevance] Checking Tags: New={new_tags}, Overlap={tag_overlap}")
-
-    if len(tag_overlap) >= RELEVANCE_MIN_TAG_OVERLAP:
-        generic_tags = {"azure", "python", "api", "web", "data", "cloud", "json", "csv", "debug", "ai", "issues", "error", "skill", "solution"}
-        meaningful_overlap = tag_overlap - generic_tags
-        if meaningful_overlap:
-            score += 0.4
-            logger.debug(f"[Relevance] Tags: +0.4 (meaningful overlap={meaningful_overlap})")
-        else:
-            logger.debug(f"[Relevance] Tags: +0.0 (only generic: {tag_overlap})")
-    
-    # ── 維度 2: Description 關鍵字重疊 (max 0.3) ──
-    new_desc = knowledge.get("skill_description", "")
-    new_desc_tokens = set(_tokenize(new_desc))
-    desc_overlap = new_desc_tokens & existing_desc_tokens
-    
-    generic_words = {
-        "azure", "python", "using", "tips", "issues", "known", "related",
-        "when", "with", "that", "this", "from", "about", "have", "error",
-        "skill", "problem", "solution",
-    }
-    meaningful_desc_overlap = desc_overlap - generic_words
-    
-    logger.debug(f"[Relevance] Checking Desc Keywords: Overlap={meaningful_desc_overlap} (Required >= {RELEVANCE_MIN_KEYWORD_OVERLAP})")
-
-    if len(meaningful_desc_overlap) >= RELEVANCE_MIN_KEYWORD_OVERLAP:
-        score += 0.3
-        logger.debug(f"[Relevance] Desc: +0.3 (overlap={meaningful_desc_overlap})")
-
-    # ── 維度 3: Package 重疊 (max 0.3) ──
-    new_packages = set(p.lower() for p in knowledge.get("useful_packages", []))
-    if new_packages:
-        pkg_overlap = new_packages & existing_content_tokens
-        logger.debug(f"[Relevance] Checking Packages: New={new_packages}, Overlap={pkg_overlap}")
-        if pkg_overlap:
-            score += 0.3
-            logger.debug(f"[Relevance] Pkgs: +0.3 (overlap={pkg_overlap})")
-    
-    # ── 最終結果 ──
-    if score > 0:
-        logger.info(f"[Relevance] ✅ PASS: '{target_name}' score={score:.1f}")
-    else:
-        logger.info(
-            f"[Relevance] ❌ FAIL: '{knowledge.get('skill_name')}' is NOT relevant to '{target_name}'. "
-            f"Dimensions: Tags({len(tag_overlap)}), DescOverlap({len(meaningful_desc_overlap)}), "
-            f"Pkgs({new_packages if not new_packages else pkg_overlap})"
-        )
-    
-    return score
 
 
 def write_knowledge_skill(knowledge: Dict, existing_skill_dir: str) -> bool:
@@ -1454,29 +1400,37 @@ def _log_event(event: str, **fields: Any) -> None:
     logger.warning("%s %s", event, json.dumps(fields, ensure_ascii=False, default=str))
 
 
-async def _excluded_as_script_skill(skill_name: str, payload: GatekeeperPayload) -> bool:
-    """script 型 skill 只有在本輪腳本成功執行過(exit_code == 0)時才可 refine。"""
+async def _is_script_skill(skill_name: str) -> bool:
     try:
         from skills_sync import blob_skill_has_script
-        is_script = await blob_skill_has_script(skill_name)
+        return await blob_skill_has_script(skill_name)
     except Exception as e:
         # 判斷不了就當 script 型:誤排除只是少一次 refine,誤放行會把繞過腳本的寫法寫進 SKILL.md
         logger.warning(f"[Gatekeeper] 無法確認 {skill_name} 是否為 script 型，視為 script 型: {e}")
-        is_script = True
+        return True
 
-    if not is_script:
+
+async def _excluded_as_script_skill(skill_name: str, payload: GatekeeperPayload) -> bool:
+    """script 型 skill 只有在本輪腳本成功執行過(exit_code == 0 且非 [NEEDS_INFO])時才可 refine。"""
+    if not await _is_script_skill(skill_name):
         return False
 
     runs = [r for r in payload.script_runs if r.get("skill") == skill_name]
-    if any(r.get("exit_code") == 0 for r in runs):
+    if any(r.get("exit_code") == 0 and not r.get("needs_input") for r in runs):
         return False
 
     last = runs[-1] if runs else {}
+    if not runs:
+        reason = "script_not_run"
+    elif all(r.get("exit_code") == 0 for r in runs):
+        reason = "script_needs_input"
+    else:
+        reason = "script_failed"
     _log_event(
         "gatekeeper_script_skill_excluded",
         session_id=payload.task_id,
         skill=skill_name,
-        reason="script_failed" if runs else "script_not_run",
+        reason=reason,
         script=last.get("script"),
         args=last.get("args"),
         exit_code=last.get("exit_code"),
@@ -1575,6 +1529,11 @@ async def run_gatekeeper(
     if not knowledge:
         knowledge = extract_knowledge_by_rules(payload)
 
+    if knowledge:
+        knowledge = _filter_known_issues(knowledge, payload)
+        if not knowledge["known_issues"] and not knowledge.get("workflow_patterns"):
+            knowledge = None
+
     if not knowledge:
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         logger.info("[Gatekeeper] 萃取不到有價值的知識，跳過")
@@ -1594,7 +1553,7 @@ async def run_gatekeeper(
 
     # ═══════════════════════════════════════════
     # PHASE 3: 選 merge 目標 —— Gatekeeper 只 refine 既有 skill,不建立新 skill
-    # - skills_referenced 有值:只在其中挑;一個都不適用就 SKIP,不 fall through 到
+    # - skills_referenced 有值:排除後剛好剩一個才合併;零個或多個都 SKIP,不 fall through 到
     #   check_duplicate()(正確目標依定義不在候選集內,模糊比對命中的必然是別人)
     # - skills_referenced == []:才用 check_duplicate() 找目標;沒命中只記 log
     # ═══════════════════════════════════════════
@@ -1616,13 +1575,12 @@ async def run_gatekeeper(
     existing_skill_etag = None
 
     if payload.skills_referenced:
-        # 2026.03.10 George: v2.4.1 — 評估所有 skills_referenced 的 relevance score，選分數最高的
-        best_score = 0.0
         unresolved_refs: List[str] = []
+        eligible: List[tuple] = []
 
         for ref_skill in payload.skills_referenced:
             # 2026.08.24 George: v2.8 — 先從 Blob 拉回 SKILL.md 當基準。
-            # 底下 _is_orchestration_skill()、check_relevance_for_merge() 以及
+            # 底下 _is_orchestration_skill() 以及
             # 之後的 merge/版本遞增/dedup 全部讀這一份，基準舊了就全部一起錯。
             found_dir, found_etag = await _resolve_and_refresh_skill_dir(ref_skill)
             if not found_dir:
@@ -1630,8 +1588,7 @@ async def run_gatekeeper(
                 logger.info(f"[Gatekeeper] skills_referenced={ref_skill} 在 Blob 找不到，跳過")
                 continue
 
-            # 2026.08.21 George : parent(編排層)的 tags/description 常跟錯誤情境高度
-            # 相關,relevance score 很容易贏過真正出錯的 child。
+            # 2026.08.21 George : 分階情境下 loaded_skills 同時含 parent 與 child,知識屬於 child。
             if _is_orchestration_skill(found_dir):
                 logger.info(
                     f"[Gatekeeper] skills_referenced={ref_skill} 為編排層"
@@ -1642,20 +1599,23 @@ async def run_gatekeeper(
             if await _excluded_as_script_skill(ref_skill, payload):
                 continue
 
-            score = check_relevance_for_merge(knowledge, found_dir)
-            if score > best_score:
-                best_score = score
-                existing_skill_dir = found_dir
-                existing_skill_etag = found_etag
-                logger.info(
-                    f"[Gatekeeper] 候選 Skill 更新: {ref_skill} "
-                    f"score={score:.1f} (目前最佳)"
-                )
+            eligible.append((ref_skill, found_dir, found_etag))
 
-        if not existing_skill_dir:
+        if len(eligible) > 1:
+            candidates = [name for name, _, _ in eligible]
+            _log_event(
+                "gatekeeper_ambiguous_merge_target",
+                session_id=payload.task_id,
+                candidates=candidates,
+                skill_name=knowledge.get("skill_name"),
+                known_issues=[i.get("title") for i in knowledge.get("known_issues", [])],
+            )
+            return _skip(f"skills_referenced 有多個可合併目標，無法判定歸屬: {', '.join(candidates)}")
+        if not eligible:
             if unresolved_refs:
                 return _skip(f"skills_referenced 無可用目標（無法解析: {', '.join(unresolved_refs)}）")
             return _skip("skills_referenced 均不適合作為合併目標")
+        _, existing_skill_dir, existing_skill_etag = eligible[0]
     else:
         try:
             dup_dir = check_duplicate(
@@ -1694,8 +1654,17 @@ async def run_gatekeeper(
     # 2026.03.30 George: v2.6 HITL — 加入 SKILL_REVIEW_MODE 分支
     # ═══════════════════════════════════════════
 
-    review_mode = os.environ.get("SKILL_REVIEW_MODE", "auto").lower()
+    # 2026.10.03 George: 預設改為 manual(先進 pending 待人工審核);空字串視同未設定
+    review_mode = (os.environ.get("SKILL_REVIEW_MODE") or "manual").strip().lower()
     target_name = os.path.basename(existing_skill_dir)
+
+    # script 型 skill 的邏輯在腳本裡;workflow_patterns 必含程式碼片段,寫進 SKILL.md 等於教模型繞過腳本
+    if knowledge.get("workflow_patterns") and await _is_script_skill(target_name):
+        logger.info(f"[Gatekeeper] {target_name} 為 script 型，捨棄 workflow_patterns，只寫 known_issues")
+        knowledge = {**knowledge, "workflow_patterns": []}
+        if not knowledge.get("known_issues"):
+            return _skip(f"{target_name} 為 script 型，且沒有 known_issues 可寫回")
+
     skill_dir = None
     pending_id = None  # HITL
     changed = False
@@ -1709,7 +1678,7 @@ async def run_gatekeeper(
                 classification=classification,
                 payload=payload,
             )
-            await _notify_logic_app(pending_id, knowledge, existing_skill_dir)
+            await _notify_logic_app(pending_id, knowledge, existing_skill_dir, payload)
             action_taken = GatekeeperAction.PENDING_REVIEW
             reason = f"待審核 — 預計合併回 {target_name}"
         else:
@@ -1803,6 +1772,7 @@ async def _write_to_pending(
         # ── 審核輔助資訊（顯示在 Adaptive Card 上）──
         "user_request": payload.user_request[:500],
         "skills_referenced": payload.skills_referenced,
+        "submitted_by": payload.submitted_by,
     }
 
     await blob_write_pending(pending_id, metadata)
@@ -1816,10 +1786,16 @@ async def _write_to_pending(
     return pending_id
 
 
+def _card_str(text: str) -> str:
+    # Logic App 以字串內插組 Adaptive Card JSON,引號/換行/反斜線須先跳脫
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
 async def _notify_logic_app(
     pending_id: str,
     knowledge: Dict,
     existing_skill_dir: str,
+    payload: "GatekeeperPayload",
 ) -> None:
     """
     2026.03.30 George: v2.6 HITL 新增
@@ -1838,23 +1814,45 @@ async def _notify_logic_app(
         return
 
     # ── 組裝 Adaptive Card 需要的摘要 ──
-    # 把 issues_summary 從 array 改成純文字
+    # 卡片須呈現 approve 後實際寫進 SKILL.md 的內容(含 root_cause / solution / workflow_patterns)
+    issues = knowledge.get("known_issues", [])
     issues_text_lines = []
-    for issue in knowledge.get("known_issues", [])[:5]:
-        title = issue.get("title", "")[:100]
-        error = issue.get("error_pattern", "")[:150]
-        issues_text_lines.append(f"**{title}**\n`{error}`")    
+    for issue in issues[:5]:
+        lines = [f"**{issue.get('title', '')[:100]}**"]
+        if issue.get("error_pattern"):
+            lines.append(f"錯誤: `{issue['error_pattern'][:150]}`")
+        if issue.get("root_cause"):
+            lines.append(f"根因: {issue['root_cause'][:200]}")
+        if issue.get("solution"):
+            lines.append(f"解法: {issue['solution'][:300]}")
+        issues_text_lines.append("\n".join(lines))
+    if len(issues) > 5:
+        issues_text_lines.append(f"…另有 {len(issues) - 5} 條未顯示")
+
+    patterns = knowledge.get("workflow_patterns", [])
+    patterns_text_lines = [
+        f"**{p.get('title', '')[:100]}**\n{p.get('steps', '')[:300]}" for p in patterns[:3]
+    ]
+    if len(patterns) > 3:
+        patterns_text_lines.append(f"…另有 {len(patterns) - 3} 條未顯示")
+
+    user_request = payload.user_request
+    if len(user_request) > 300:
+        user_request = user_request[:300] + "…"
 
     card_payload = {
         "pending_id": pending_id,
         "skill_name": knowledge.get("skill_name", "unknown"),
-        "skill_description": knowledge.get("skill_description", "")[:200],
+        "skill_description": _card_str(knowledge.get("skill_description", "")[:200]),
         "action_type": "merge",
         "merge_target": os.path.basename(existing_skill_dir),
-        "issues_count": len(knowledge.get("known_issues", [])),
-        "issues_text": "\n\n".join(issues_text_lines) if issues_text_lines else "無",
+        "issues_count": len(issues),
+        "issues_text": _card_str("\n\n".join(issues_text_lines) or "無"),
+        "patterns_text": _card_str("\n\n".join(patterns_text_lines) or "無"),
         "tags": knowledge.get("tags", [])[:10],
         "useful_packages": knowledge.get("useful_packages", [])[:10],
+        "submitted_by": payload.submitted_by or "(unverified)",
+        "user_request": _card_str(user_request),
     }
 
     try:
@@ -2027,7 +2025,7 @@ def _extract_package_names(code: str) -> List[str]:
 
 def _extract_tags(payload: GatekeeperPayload) -> List[str]:
     """
-    從 payload 中提取技術標籤，用於 check_relevance_for_merge 維度 1 比對。
+    從 payload 中提取技術標籤（規則萃取 fallback 的 tags 欄位）。
     
     2026.03.10 George: v2.4 重寫 — 移除 hardcoded tech_keywords
     - 舊版問題：維護一個靜態的 tech_keywords 列表不切實際，
@@ -2064,7 +2062,7 @@ def _extract_tags(payload: GatekeeperPayload) -> List[str]:
         "into", "about", "just", "like", "some", "any", "all", "each",
         "how", "what", "when", "where", "which", "who", "why",
         "its", "your", "our", "my", "the", "via", "per", "but",
-        # 太泛的技術詞（在 check_relevance_for_merge 中也會被 generic_tags 過濾）
+        # 太泛的技術詞
         "code", "file", "data", "error", "bug", "fix", "issue",
         "script", "program", "function", "class", "module",
     }

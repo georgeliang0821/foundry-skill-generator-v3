@@ -314,9 +314,12 @@ def test_s11_error_key_on_the_exit_zero_path() -> None:
     assert any(detail.endswith('"error":') for detail in details)
 
 
-def test_s11_greedy_status_pattern() -> None:
-    # `"status":\s*".*error"` spans the whole single-line JSON, so a later key trips it.
+def test_s11_status_pattern_stays_inside_the_status_value() -> None:
+    # `"status":\s*"[^"]*error"` cannot run past the status value into a later key.
     py = _swap(PY, '        "scope": scope,\n', '        "scope": scope,\n        "last_error": None,\n')
+    assert _hits(_lint(py=py), "S11") == []
+
+    py = _swap(PY, '        "status": "ok",', '        "status": "partial_error",')
     details = [detail for _, detail in _hits(_lint(py=py), "S11")]
     assert details and all('"status":' in detail for detail in details)
 

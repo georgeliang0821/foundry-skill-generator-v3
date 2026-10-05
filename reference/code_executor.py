@@ -15,6 +15,12 @@ Agent 時可以「換實作」而不是「改架構」。
 - 階段 2 (POC 通過後):HostedAgentExecutor — 透過 Responses API 委派
   給 Foundry Hosted Agent。本階段不實作。
 
+VERSION: 1.6
+2026.10.03 George : SUBPROCESS_UID_SANDBOX 預設改為開啟;未明設且非 POSIX root 時自動退回關閉。
+
+VERSION: 1.5
+2026.09.30 George : MI 閘門拒絕時改由 proxy 回 403 + 原因(mi_proxy.refuse),不再讓腳本落到 IMDS。
+
 VERSION: 1.4
 2026.09.27 George : S3 — MI 閘門(MI_GATE_ENABLED,預設開;實際生效需 SUBPROCESS_UID_SANDBOX)
 - 腳本 env 一律拿掉平台 MI(IDENTITY_* / MSI_*);execute(mi_scopes=) 有可放行的資源時
@@ -153,9 +159,12 @@ def build_subprocess_env(
 # /proc/1/environ(平台 secret)與其他 session 的 work_dir。2026-09-26 已在 ACA 實測可行。
 # Managed Identity 的隔離見下方 MI_GATE_ENABLED(S3)。
 
-SUBPROCESS_UID_SANDBOX = os.environ.get(
-    "SUBPROCESS_UID_SANDBOX", "false"
-).strip().lower() in ("true", "1", "yes", "on")
+# 預設開啟;未明設時若不是 POSIX root(本機開發等)自動退回關閉,明設 true 則維持「非 root 即失敗」。
+_SANDBOX_RAW = (os.environ.get("SUBPROCESS_UID_SANDBOX") or "").strip()
+SUBPROCESS_UID_SANDBOX_EXPLICIT = bool(_SANDBOX_RAW)
+_SANDBOX_REQUESTED = (_SANDBOX_RAW or "true").lower() in ("true", "1", "yes", "on")
+_SANDBOX_SUPPORTED = hasattr(os, "geteuid") and os.geteuid() == 0
+SUBPROCESS_UID_SANDBOX = _SANDBOX_REQUESTED and (SUBPROCESS_UID_SANDBOX_EXPLICIT or _SANDBOX_SUPPORTED)
 
 # S3:沒有 S2 時腳本讀得到 /proc/1/environ 的真 IDENTITY_HEADER,閘門可被繞過
 _MI_GATE_RAW = os.environ.get("MI_GATE_ENABLED")
@@ -254,24 +263,33 @@ def _harden_shared_dirs() -> None:
 def _apply_mi_gate(
     env: Dict[str, str], proxy, mi_scopes: Optional[Collection[str]], label: str
 ) -> Optional[str]:
-    """拿掉平台 MI;有可放行的 scope 時改指向 proxy。回傳要在結束時撤銷的 header。"""
+    """拿掉平台 MI;改指向 proxy(放行宣告的 scope,或回 403 說明原因)。回傳要在結束時撤銷的 header。"""
     for key in MI_ENV_KEYS:
         env.pop(key, None)
-    if mi_scopes is None:
-        logger.warning(f"[MIGate] {label}: no skill context (static mode) — Managed Identity denied")
-        return None
-    if not mi_scopes:
-        logger.info(f"[MIGate] {label}: no loaded skill declares mi_scopes — Managed Identity denied")
-        return None
     if proxy is None:
         logger.error(f"[MIGate] {label}: MI proxy not running — Managed Identity denied")
         return None
-    header = proxy.grant(mi_scopes, label)
-    if header is None:
-        return None
+    if mi_scopes is None:
+        logger.warning(f"[MIGate] {label}: no skill context (static mode) — Managed Identity denied")
+        header = proxy.refuse(
+            "Managed Identity is not available to scripts in static skill mode "
+            "(DYNAMIC_SKILLS_ENABLED=false).", label)
+    elif not mi_scopes:
+        logger.info(f"[MIGate] {label}: no loaded skill declares mi_scopes — Managed Identity denied")
+        header = proxy.refuse(
+            "no skill loaded in this turn declares metadata.mi_scopes. Add the resource "
+            "(e.g. https://cognitiveservices.azure.com) to metadata.mi_scopes in the SKILL.md "
+            "frontmatter and republish the skill.", label)
+    else:
+        header = proxy.grant(mi_scopes, label)
+        if header is None:
+            header = proxy.refuse(
+                f"declared metadata.mi_scopes {sorted(mi_scopes)} are not in MI_SCOPE_ALLOWLIST "
+                f"(ask the platform operator to add them).", label)
+        else:
+            logger.info(f"[MIGate] {label}: Managed Identity via proxy for {sorted(mi_scopes)}")
     env["IDENTITY_ENDPOINT"] = proxy.endpoint
     env["IDENTITY_HEADER"] = header
-    logger.info(f"[MIGate] {label}: Managed Identity via proxy for {sorted(mi_scopes)}")
     return header
 
 def filter_caller_env(
@@ -325,7 +343,8 @@ def filter_caller_env(
 
 HARD_ERROR_PATTERNS: Dict[str, str] = {
     r'"error":': '回應 JSON 含 "error" 欄位',
-    r'"status":\s*".*error"': '回應 JSON 的 status 欄位值含 error',
+    # [^"]* 而非 .*:單行 json.dumps 時 .* 會跨欄位吃到後面任何以 error" 結尾的字串
+    r'"status":\s*"[^"]*error"': '回應 JSON 的 status 欄位值含 error',
     r'\bHTTP[/ ]\d(?:\.\d)?\s+(?:4\d{2}|5\d{2})\b': '輸出含 HTTP 4xx/5xx 狀態列',
     r'\b(?:status[_ ]?code|statusCode|status|code)\s*[:=]\s*(?:4\d{2}|5\d{2})\b': '輸出含 status_code / code 等於 4xx 或 5xx',
     r'\b(?:4\d{2}|5\d{2})\s+(?:Unauthorized|Forbidden|Not\s+Found|Internal\s+Server\s+Error|Bad\s+Request|Bad\s+Gateway|Service\s+Unavailable|Gateway\s+Timeout|Conflict|Too\s+Many\s+Requests)\b': '輸出含 401 Unauthorized / 502 Bad Gateway 這類狀態片語',
@@ -519,6 +538,11 @@ class LocalSubprocessExecutor:
                 )
             _harden_shared_dirs()
             logger.info("[Sandbox] per-execution uid sandbox ENABLED")
+        elif _SANDBOX_REQUESTED:
+            logger.warning(
+                "[Sandbox] SUBPROCESS_UID_SANDBOX defaults to on but process is not POSIX root — "
+                "sandbox disabled; scripts run with the platform process identity"
+            )
 
         self._mi_gate = False
         self._mi_proxy = None

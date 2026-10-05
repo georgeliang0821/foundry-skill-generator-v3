@@ -59,7 +59,16 @@ Copy-Item .env.example .env
 
 #### Foundry（AI 大腦）
 
-請注意幫此 agent 在 AI foundry 上加入 Web Search 的 tool 方便他進行網頁搜尋來研究
+##### 準備 orchestrator agent
+
+本專案以名稱 + 版本呼叫 Foundry agent，不會自動建立 agent，請先手動新增一個：
+
+1. **Foundry project**：不必另建 project，可在 EAA 所使用的 Microsoft Foundry project 中新增此 agent。
+2. **新增空的 agent**：在 **Build → Agents** 新增 agent，名稱填入 `FOUNDRY_AGENT_NAME` 要用的值（例如 `skill-generator-agent`）。
+3. **Model**：選 `gpt-5.6-terra` 或更新的模型。
+4. **Instructions**：留空即可。每一輪對話，後端都會把 `prompts/` 組裝出的完整提示詞以 `role="system"` 訊息送出，agent 本身不需要 instructions。
+5. **Tools**：加入 **Web search**，讓 agent 在 PREPARE 等階段能上網研究。
+6. **儲存後記下版本**：頁面右上角 **Version** 顯示的數字就是 `FOUNDRY_AGENT_VERSION`。之後在 Foundry 上修改 agent 會產生新版本，需同步更新此變數。
 
 Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET`，因此這三個值也會組成 Foundry 實際使用的 `EnvironmentCredential`；本機的 `az login` 帳號通常不會被選到。請將該 `AZURE_CLIENT_ID` 對應的 service principal 加入目標 Foundry project，僅呼叫既有 agent 時至少授予 **Foundry Agent Consumer**；需要 project data actions 時授予 **Foundry User**。
 

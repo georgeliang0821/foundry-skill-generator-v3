@@ -5,6 +5,10 @@
 (GET ?resource=&api-version=2019-08-01 + X-IDENTITY-HEADER),azure-identity 不需任何改動。
 2026-09-27 已在 ACA 實測(poc/poc_s3_mi.py)。
 
+VERSION: 1.1
+2026.09.30 George : refuse() — 閘門拒絕時腳本仍指向 proxy,拿到說明原因與修法的 403,
+  不再落到 IMDS 回「no response from the IMDS endpoint」。
+
 VERSION: 1.0
 2026.09.27 George : 初版
 """
@@ -97,7 +101,7 @@ class MiProxy:
     def __init__(self, allowlist: Collection[str], credential=None):
         self.allowlist = frozenset(allowlist)
         self._credential = credential
-        self._grants: Dict[str, Tuple[FrozenSet[str], str]] = {}
+        self._grants: Dict[str, Tuple[FrozenSet[str], str, Optional[str]]] = {}
         self._runner = None
         self.port = 0
 
@@ -115,7 +119,13 @@ class MiProxy:
         if not allowed:
             return None
         header = secrets.token_urlsafe(32)
-        self._grants[header] = (allowed, label)
+        self._grants[header] = (allowed, label, None)
+        return header
+
+    def refuse(self, reason: str, label: str) -> str:
+        """發一把不放行任何資源的 header;腳本取 token 時收到 403 + reason。"""
+        header = secrets.token_urlsafe(32)
+        self._grants[header] = (frozenset(), label, reason)
         return header
 
     def revoke(self, header: str) -> None:
@@ -157,7 +167,11 @@ class MiProxy:
         if grant is None:
             logger.warning("[MIGate] token request with unknown or revoked header")
             return deny(401, "invalid_header", "unknown or revoked X-IDENTITY-HEADER")
-        allowed, label = grant
+        allowed, label, refusal = grant
+
+        if refusal is not None:
+            logger.info(f"[MIGate] {label}: refused token request ({refusal})")
+            return deny(403, "mi_not_available", refusal)
 
         if any(k in request.query for k in _IDENTITY_SELECTORS):
             logger.warning(f"[MIGate] {label}: identity selector rejected")
@@ -171,7 +185,8 @@ class MiProxy:
             logger.warning(f"[MIGate] {label}: denied resource {raw!r}")
             return deny(403, "mi_scope_not_declared",
                         f"scope {raw!r} is not declared in metadata.mi_scopes of any skill "
-                        f"loaded in this turn (allowed: {', '.join(sorted(allowed))})")
+                        f"loaded in this turn, or is not in MI_SCOPE_ALLOWLIST "
+                        f"(allowed: {', '.join(sorted(allowed))})")
 
         try:
             token = await self._credential.get_token(f"{resource}/.default")

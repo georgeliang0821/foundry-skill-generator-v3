@@ -36,7 +36,7 @@ STATIC_OBO_REGISTRY_KEYS = frozenset({"AZURE_SQL_ACCESS_TOKEN", "GRAPH_ACCESS_TO
 # any hit downgrades the run to content_error unless a line starts with [NEEDS_INFO].
 CONTENT_ERROR_HARD_PATTERNS = (
     r'"error":',
-    r'"status":\s*".*error"',
+    r'"status":\s*"[^"]*error"',
     r'\bHTTP[/ ]\d(?:\.\d)?\s+(?:4\d{2}|5\d{2})\b',
     r'\b(?:status[_ ]?code|statusCode|status|code)\s*[:=]\s*(?:4\d{2}|5\d{2})\b',
     r'\b(?:4\d{2}|5\d{2})\s+(?:Unauthorized|Forbidden|Not\s+Found|Internal\s+Server\s+Error|Bad\s+Request|Bad\s+Gateway|Service\s+Unavailable|Gateway\s+Timeout|Conflict|Too\s+Many\s+Requests)\b',
