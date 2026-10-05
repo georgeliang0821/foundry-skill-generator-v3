@@ -39,25 +39,32 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 
 ### 業務輸入來源：credentials / request
 
-| 名詞 | 在本專案中的意思 | 不代表什麼 |
+> **一句話：** Child skill 需要的每個業務欄位（例如 `operation`、`description`），都要在
+> SKILL.md 裡宣告「值從哪個管道傳進來」——`credentials` 或 `request`。Host 依這份宣告
+> 放資料，Child 依這份宣告取資料，lint 依這份宣告檢查程式。
+
+#### 兩種來源比較
+
+| | `credentials` | `request` |
 | --- | --- | --- |
-| `request` | 當次呼叫 Child 的任務內容，可以包含指令與明確標示的業務資料。宣告 `source: request` 時，由 Coding Agent 取得欄位值並填入 `request_inputs` 樣板，供 Python 使用。 | 不是整個 HTTP request，也不是 Python 自動可讀的全域 `request` 物件；不保證原文不變。 |
-| `credentials` | 呼叫介面提供的具名 key/value 資料通道。本專案既有契約也用它傳遞業務資料，Child Python 從對應環境變數取值。 | 不一定是密碼、token 或其他機密；名稱也不代表其中所有資料都經過身分驗證。 |
+| **是什麼** | 呼叫 Child 時附帶的具名 key/value 資料（例如 key `TASK_JSON`）。 | 當次呼叫 Child 的任務內容：指令＋一段明確標示的業務資料。 |
+| **Python 怎麼拿到值** | 直接從同名環境變數讀取。 | Python **讀不到** request。要由 Child 的 Coding Agent 在執行前，把值從 request 抄進程式裡的 `request_inputs` 樣板，Python 再從樣板讀取。 |
+| **常見誤解** | 名稱叫 credentials，但**不一定是機密**；本專案本來就用它傳業務資料，也不代表內容都經過身分驗證。 | 不是整個 HTTP request，也不是 Python 自動可讀的全域變數；Agent 轉抄時不保證原文一字不差。 |
 
-**`source` 指定的是「欄位從哪裡取得」，不是「欄位是否敏感」。** 業務欄位可以選擇來源，
-但 token、部署設定與平台驗證身分仍遵循各自的既有規則，不能因此改走 request。
+`source` 回答的是「值**從哪裡來**」，**不是**「值是否敏感」。token、部署設定、平台驗證身分
+不屬於業務欄位，照各自既有規則處理，不能改走 request；因此 `aca_env`、`obo_token`、
+`platform_identity` 不能設為 `source: request`。
 
-runtime 業務欄位可各自指定 `source`。
-例如 operation 來自 credentials，而原始 description 來自 request；每個欄位只有一個來源，
-不合併衝突副本，也不從另一來源 fallback。設定在 PREPARE 中記錄，來源變更會清除確認。
-`aca_env`、`obo_token` 與 `platform_identity` 不能指定 request 來源。
+#### 三條基本規則
 
-對話指示要求 Agent 將業務輸入來源與部署／身分設定分開詢問，先列出每個業務欄位及
-來源建議，再提供 credentials、request 或逐欄位混合的選擇。不得把接受整套 Managed
-Identity 建議當成來源確認。若只選了「混合」但未確定欄位對應，必須先補問再確認。
-這是 Agent 的對話規則；靜態 prompt 測試不等於已驗證每次真實模型回覆都遵守。
+1. **逐欄位指定，可以混用。** 例如 `operation` 走 credentials、`description` 走 request。
+2. **每個欄位只有一個來源。** 不合併兩邊的值；缺值時也不從另一個來源補（沒有 fallback）。
+3. **沒宣告就是 credentials。** 沒有明確來源契約的舊 child 維持既有 credentials 行為，
+   parent 不能單方面改成 request。
 
-Capability 在既有 `## Required Inputs` 中保存唯一的機器可讀來源清單：
+#### 在 SKILL.md 裡怎麼宣告
+
+在既有的 `## Required Inputs` 裡放一個 `input-bindings` 區塊，這是唯一的機器可讀來源清單：
 
 ````markdown
 ## Required Inputs
@@ -73,38 +80,75 @@ Capability 在既有 `## Required Inputs` 中保存唯一的機器可讀來源�
 ```
 ````
 
-`credentials_key` 未填時等同 `name`。`payload_field` 未填表示 entry 的原始字串，
-有填則表示該 entry 內 JSON object 的頂層成員，不是巢狀路徑。欄位型別、合法值、條件式
-必填及缺值代碼仍寫在 child 的既有輸入契約中。重複來源、重複 YAML 鍵或無效宣告會被拒絕。
+| 欄位 | 意思 |
+| --- | --- |
+| `name` | 業務欄位名稱。request 欄位會用它當 request 資料區的標籤，以及 `request_inputs` 的 key。 |
+| `source` | `credentials` 或 `request`。 |
+| `credentials_key` | 只用於 credentials。值放在哪個 credentials key；未填時等於 `name`。 |
+| `payload_field` | 只用於 credentials。未填＝取該 key 的整個字串；有填＝該 key 是 JSON object，取其中這個**頂層**成員（不支援巢狀路徑）。 |
+| `required` | 是否必填。 |
 
-Request 不會自動變成 Python 參數或環境變數。產生的無參數 `main()` 使用
-`request_inputs = {"description": None}` 樣板，Coding Agent 在執行前從當次 request
-綁定 Python literal，再以 `.get("description")` 讀取。未綁定樣板必須在外部動作前
-輸出 `[NEEDS_INFO] missing=DESCRIPTION` 並結束，不能執行範例資料。
+上例的意思：`operation` 從 credentials key `TASK_JSON`（JSON 字串）裡的 `operation` 成員取得；
+`description` 從 request 取得。
 
-Scenario 讀取 child 的契約並記錄 delegation `input_bindings`；不可覆寫來源或在 parent
-重建欄位 schema。Host 先收集缺值，再依 child 契約送出資料；child 仍需再次驗證。
-沒有明確來源契約的舊 child 維持既有 credentials 行為，不能由 parent 單方面改成 request。
+欄位型別、合法值、條件式必填與缺值代碼，仍寫在 child 既有的輸入契約文字中。重複的來源、
+重複的 YAML 鍵或無效宣告都會被拒絕。
 
-#### Host 呼叫 Child 時的差異
+#### request 欄位在程式裡長什麼樣
 
-| Child 宣告 | Host 準備輸入 | Child Coding Agent／Python 如何取值 |
+Request 不會自動變成 Python 參數或環境變數。產生的程式是一個**樣板**：
+
+```python
+def main():
+    # Coding Agent 執行前，把 None 換成當次 request 裡的值
+    request_inputs = {"description": None}
+    description = request_inputs.get("description")
+    if not description:
+        print("[NEEDS_INFO] missing=DESCRIPTION")
+        return
+    ...  # 驗證通過後才建立 client、呼叫外部服務
+```
+
+- `main()` 不帶參數；`request_inputs` 只列宣告為 request 的欄位，初始值都是 `None`。
+- 如果樣板沒被填值就執行，必須在任何外部動作**之前**輸出 `[NEEDS_INFO] missing=<欄位代碼>`
+  並結束，不能拿範例資料繼續跑。
+
+#### 端到端：Host 呼叫 Child 時誰做什麼
+
+| Child 宣告 | Host 怎麼準備輸入 | Child 怎麼取值 |
 | --- | --- | --- |
-| `source: request` | 把 `operation: READ` 放進 request 的明確資料區。 | Coding Agent 從當次 request 取得值，填入 `request_inputs` 樣板；Python 再讀取它。 |
-| `source: credentials` | 把值放入指定 credentials key；若指定 `payload_field`，則放入該 key 的 JSON 字串中對應的頂層成員。 | Python 從對應環境變數讀取；有指定 JSON member 才依該映射解析成員。 |
+| `source: request` | 把值（如 `operation: READ`）放進 request 的明確資料區。 | Coding Agent 從 request 取值、填入 `request_inputs` 樣板，Python 再讀取。 |
+| `source: credentials` | 把值放進宣告的 credentials key；有 `payload_field` 時，放進該 key 的 JSON 字串中對應的頂層成員。 | Python 從對應環境變數讀取；有 `payload_field` 才解析 JSON 取成員。 |
 
-同一個 child 可以混合來源，但每個欄位都必須依自己的宣告放置，不能因為 `operation`
-走 request 就把其他欄位一起移入 request。缺值時遵循 child 的 `[NEEDS_INFO]` 契約，
-不得自行切換來源補值。
+- 混用時，每個欄位各自依宣告放置，不能因為 `operation` 走 request 就把其他欄位一起搬過去。
+- 缺值時遵循 child 的 `[NEEDS_INFO]` 契約，不得自行切換來源補值。
+- Scenario（parent）只讀取 child 的契約並記錄在 delegation 的 `input_bindings`，不能覆寫來源，
+  也不在 parent 重建欄位 schema。Host 先收集缺值再依契約送出；child 收到後仍要自己再驗證一次。
 
-這張表描述 scenario 指示 Host 與 Child 應遵循的行為，不是 runtime 看到 `source`
-就自動搬移資料。來源宣告、scenario 呼叫指示及 child 的取值／驗證程式必須一致。
+> ⚠️ 上表是 scenario 指示 Host 與 Child **應該**遵循的行為，**不是** runtime 看到 `source`
+> 就自動搬移資料。來源宣告、scenario 的呼叫指示、child 的取值／驗證程式三者必須自己保持一致。
 
-#### 契約檢查與驗證範圍
+#### Agent 在 PREPARE 怎麼問使用者
 
-Lint `A13` 拒絕無效契約，`A14` 拒絕缺少樣板、宣告與樣板綁定不符、缺少對應缺值代碼，
-以及可直接執行的 request 範例值。這些是靜態結構檢查，**不是完整控制流程或無副作用證明**。
-既有 `A12` 外部呼叫結果檢查仍為 advisory。
+來源設定在 PREPARE 記錄；之後來源若有變更，原本的確認會被清除，要重新確認。對話規則如下：
+
+1. 業務輸入來源要**單獨問**，不和部署／身分設定綁在一起。使用者接受整套 Managed Identity
+   建議，**不算**確認了來源。
+2. 發問前先列出每個業務欄位及建議來源，再讓使用者選：全部 credentials、全部 request，或逐欄位混合。
+3. 使用者只回「混合」但沒說清楚哪個欄位走哪邊時，必須先補問，不能自行推斷。
+
+這些是寫在 prompt 裡的對話規則（[prompts/12_input_sources.md](../prompts/12_input_sources.md)）；
+靜態 prompt 測試通過，不代表真實模型每次回覆都會遵守。
+
+#### Lint 能檢查什麼、不能檢查什麼
+
+| 規則 | 擋下的情況 |
+| --- | --- |
+| `A13` | `input-bindings` 契約本身無效。 |
+| `A14` | 缺少 `request_inputs` 樣板、宣告與樣板綁定不符、缺少對應的缺值代碼，或樣板裡放了可直接執行的範例值。 |
+
+這些都是**靜態結構檢查**，不能證明完整控制流程正確，也不能證明沒有副作用。既有的 `A12`
+（外部呼叫結果檢查）仍只是 advisory。
 
 #### EAA 平台規則（D4–D8、A15）
 
