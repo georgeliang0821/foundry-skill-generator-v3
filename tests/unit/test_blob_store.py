@@ -141,10 +141,8 @@ def test_blob_paths_mirror_the_computed_columns() -> None:
 
 def test_azure_store_rejects_a_prefix_that_drifts_from_the_computed_column(monkeypatch) -> None:
     monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://example.blob.core.windows.net")
-    monkeypatch.setenv("AZURE_BLOB_CONTAINER", "skills-container")
-    monkeypatch.setenv("AZURE_BLOB_PREFIX", "not-skills")
-    monkeypatch.delenv("SKILL_BLOB_PREFIX", raising=False)
-    with pytest.raises(ValueError, match="AZURE_BLOB_PREFIX"):
+    monkeypatch.setenv("AZURE_BLOB_CONTAINER", "skills-container/not-skills")
+    with pytest.raises(ValueError, match="AZURE_BLOB_CONTAINER"):
         AzureBlobSkillStore()
 
 

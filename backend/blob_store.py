@@ -278,16 +278,11 @@ class AzureBlobSkillStore:
         if not container:
             raise ValueError("Azure Blob container is not configured. Set AZURE_BLOB_CONTAINER.")
         self.container = container
-        configured_prefix = _normalize_prefix(
-            os.getenv("AZURE_BLOB_PREFIX", "").strip()
-            or os.getenv("SKILL_BLOB_PREFIX", "").strip()
-            or embedded_prefix
-        )
-        if configured_prefix and configured_prefix != BLOB_ROOT:
+        if embedded_prefix and embedded_prefix != BLOB_ROOT:
             raise ValueError(
-                f"AZURE_BLOB_PREFIX must be '{BLOB_ROOT}' (got '{configured_prefix}'). "
-                "dbo.skills.blob_path is a computed column that hard-codes that "
-                "root, so any other value makes SQL point at blobs this app "
+                f"AZURE_BLOB_CONTAINER must be a bare container name (got prefix '{embedded_prefix}'). "
+                f"dbo.skills.blob_path is a computed column that hard-codes the '{BLOB_ROOT}' "
+                "root, so any other prefix makes SQL point at blobs this app "
                 "never writes -- and the mismatch fails silently."
             )
         self.prefix = BLOB_ROOT

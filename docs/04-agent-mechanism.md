@@ -119,7 +119,7 @@ EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且
 | `D8` | 只掃程式碼：引用 `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` / `MSI_ENDPOINT` / `MSI_SECRET` 等 MI 端點變數、直接呼叫 `169.254.169.254` 或 `/msi/token`、對 `DefaultAzureCredential` / `ManagedIdentityCredential` 傳 `managed_identity_client_id=` / `client_id=` / `object_id=` / `mi_res_id=` 等選擇器，或 MI skill 同時用 `ChainedTokenCredential`、`ClientSecretCredential`、`AzureKeyCredential` 等備援憑證。 |
 | `A15` | caller 的 `credentials` 鍵名（`input-bindings` 的 `credentials_key`，或 legacy 的 Required Inputs 與 runtime 讀取）是 `PATH`、`PYTHON*`、`LD_*`、`EAA_VERIFIED_*` 或 `OBO_SCOPE_REGISTRY` 的 key。registry 以 MCP 查到的為準，取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。 |
 
-Managed Identity 不是變數種類，結構化資訊只有 frontmatter 的 `metadata.mi_scopes`，判斷靠 prompt 與 D6–D8 從程式碼偵測，不動 `models.py` 與 UI。`save_skill_dual_write()` 另外會呼叫 EAA 的 MCP tool `lint_skill_package`（見 [02-setup.md](02-setup.md#eaa-skill-lint儲存必要)）。
+Managed Identity 不是變數種類，結構化資訊只有 frontmatter 的 `metadata.mi_scopes`，判斷靠 prompt 與 D6–D8 從程式碼偵測，不動 `models.py` 與 UI。`save_skill_dual_write()` 另外會呼叫 EAA 的 MCP tool `lint_skill_package`（見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)）。
 
 平台另有全域白名單 `MI_SCOPE_ALLOWLIST`，預設只有 `https://storage.azure.com,https://ai.azure.com`。宣告白名單以外的資源不擋儲存：本機 D7 顯示 INFO，EAA `lint_skill_package` 回傳的 `is not in MI_SCOPE_ALLOWLIST` 是 warning，儲存後與其他 warnings 一起寫成一則 system message，要 Agent 在回覆中附上「部署前需把 `<資源>` 加入 ACA 環境變數 `MI_SCOPE_ALLOWLIST`，並替平台 MI 指派 `<最小 RBAC 角色>`」（角色對照表：`MI_RESOURCE_ROLES`）。`database.windows.net` / `management.azure.com` 會加註「取得平台 MI 在該資源的全部權限，優先改用 OBO」。執行測試（`mode: "execute"`）時同一輪必須載入該 skill 才拿得到 MI token，這是預期行為；本產生器只送 `route_only`，不受影響。
 
@@ -336,6 +336,17 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > - runtime 必須在回應頂層回顯同一個 `mode`。缺漏或不符會**中止整批**並回 HTTP 502，沒有降級開關。
 > - 使用者委派 token 只在 `Authorization: Bearer` header，body 的 `credentials` 是空物件。runtime 回 HTTP 401 時同樣**中止整批**並回 502，訊息提示聯絡 EAA 管理員查 `[oauth] Token rejected:` log。
 
+> 🔌 **Runtime `/run` 契約：**
+>
+> - `SKILL_SELECTION_TEST_RUN_URL` 只做一般 HTTP POST，不檢查主機名稱。APIM 只是可選閘道（subscription key、rate limit、policy）；未使用時，runtime 本身要處理驗證與 token 轉換。
+> - 請求：POST JSON，欄位 `request` / `session_id` / `mode` / `scenario` / `credentials`。回應：JSON 頂層要有 `response`，並原樣回顯 `mode`；需在 120 秒內回應。
+> - runtime 必須能驗證 `Authorization: Bearer` 帶的使用者委派 token（登入時以 `MICROSOFT_OBO_SCOPE` 取得，`aud` 為 `api://<app-id>` 或 `<app-id>`）。EAA 在 `MCP_AUTH_ENFORCE=validate` 下驗證 `aud` / `iss` / `exp`，回給 client 的 `error_description` 刻意模糊。
+> - token 不放 body 的原因：EAA 會把 `credentials` 的每個鍵原樣變成 skill 執行環境的環境變數，放進 body 等於把使用者的原始 token 交給 script。`tests/unit/test_testing_helpers.py` 鎖住這一點。
+> - token 種類決定看得到哪些 skill：委派 token 讓 EAA 做 OBO，只看得到登入者被授權的 skill（儲存時會自動 grant 給儲存者）。若改用 app-only token，EAA 會改用自己的 Managed Identity 查詢，待測 skill 沒 grant 給該 MI 就會被誤判成「沒命中」。
+> - `mode` 沒有降級開關：未經確認的 mode 無法與「靜默升級成 execute」區分，而那會讓一次路由測試寫進真實資料。不支援此協定的 runtime 需先升級。`scenario` 則全程 fail-open，不認得的 runtime 會直接忽略。
+> - 除了 401 與 `mode` 回顯失敗，其他 HTTP 錯誤只記在單一樣本上。
+> - runtime 每次請求都直接從 SQL + Blob 解析 skill，儲存（雙寫）完成即可測試，不需要 sync 步驟。
+
 > 🔍 **Prepared code 的靜態檢核（機械層與語意層分工）：**
 >
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
@@ -544,7 +555,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | `user_choice` | 使用者沒有選擇 inline（`prepare_brief.prefer_inline` 為 `false`）。使用者在 Checklist 的 Output form 選「Inline sample code」，或在對話中明確表示要 inline、由 Agent 呼叫 `record_variables(prefer_inline=true)` 時，即使其他條件全部成立也是 inline；此時 `## Skill Form` 只列這一項，也不附加 script addendum |
 | `skill_kind` | capability（scenario 沒有自己的 script） |
 | `mode` | NEW（MODIFY 沿用 Blob 上的形式；IMPORT 不適用） |
-| `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)） |
+| `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [EAA script 旗標](#eaa-script-旗標)） |
 | `code_material` | 恰好一份 `code` 素材 |
 | `parses` | 該素材可被 `ast` 解析 |
 | `entry_point` | 模組頂層除了 import、函式／類別定義、賦值與 docstring 之外，至少還有一個會執行的語句（例如 `main()` 或 `if __name__ == "__main__":`）；只有定義的函式庫直接執行時什麼都不做 |
@@ -630,9 +641,22 @@ Agent 端的寫法由 [prompts/01_prepare_script_addendum.md](../prompts/01_prep
 
 提出時被拒走一般的 `tool_effect_rejected`；接受時被拒回 409 `material_patch_rejected`，素材不變。接受成功後素材 `origin="agent_patch"`，`user_content` 保留第一次被改前的使用者原文；覆蓋確認照上表重置，並寫入 system 訊息要求使用者先實際執行一次。`## Materials` 的素材標頭會加上 `origin=agent_patch, not run by the user`。使用者之後自行編輯素材（`PUT`）即回到 `origin="user"`。沒有 undo；是否已執行只靠 prompt 與 UI 標記，後端不擋 `script_covers_operations`。
 
-**儲存**：script 型 session 每次儲存都重新查 EAA 旗標，關閉時回 409 `script_flags_off`（可恢復，不寫入）；script 與 `SKILL.md` 一起送 EAA `lint_skill_package`。見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)。
-
 **路由測試**：旗標開啟的 runtime 會在回應帶 `requested_scripts`。Generator 檢查每筆 `args` 必須是字串陣列，且本 skill 的每個 `--flag` 都是 script 宣告過的（S3 accepted set），結果以 `valid` / `problems` 存在 `TestResult.requested_scripts`，並列在 `## Latest Test Run` 與 Tests 分頁。
+
+#### EAA script 旗標
+
+Script 型 skill 只有在 EAA 會執行 script 時才有意義。判斷依據是 ACA 查詢結果 `architectural_config` 裡的兩個旗標，**兩個都要是 `true`**（字串比對不分大小寫；缺值視為 `false`）。ACA 查詢的設定見 [02-setup.md](02-setup.md#52-aca-環境變數查詢與-script-型-skill)；未啟用查詢時旗標一律視為關閉。
+
+| 旗標 | 意義 |
+| --- | --- |
+| `DYNAMIC_SKILLS_ENABLED` | EAA 從 Blob 動態載入 skill |
+| `SKILL_SCRIPTS_ENABLED` | EAA 執行 skill 附帶的 script |
+
+- **PREPARE**：旗標關閉時，新 skill 只能是 inline；Materials 與 Checklist 只顯示這一個原因（其他條件此時都無意義）。
+- **查詢失敗 ≠ 旗標關閉**：ACA 查詢失敗（例如 Container App 冷啟動時回 404「Unavailable」）時，`eaa_flags` 顯示「Could not read the EAA script flags」，Agent 會告知使用者形式暫時無法判定。離開 PREPARE 前（`request_stage_transition` 到 DRAFT）若是有 `code` 素材的新 capability skill 且尚未讀到旗標，會以 `reason="form_lock"` 重查一次：重查後旗標開啟 → 這一次轉移被擋下（`FormLockDeferred`），讓 Agent 先與使用者處理 script 形式；仍失敗 → 以 inline 鎖定，並寫入 system 訊息說明原因。
+- **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），旗標若已關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags` 列出關閉的旗標，**什麼都不寫入**。處理方式是請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。script 與 `SKILL.md` 一起送 EAA `lint_skill_package`（見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)）。
+- 其他 script 相關的 409：`script_form_mismatch`（inline session 想覆寫 Blob 上已有 script 的 skill，不可恢復）、`version_conflict`（Blob 上的 `SKILL.md` 在載入後被改過，例如 Gatekeeper Addendum）。
+- Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，只有 scenario `script_flags_on` 會把旗標打開。
 
 ---
 

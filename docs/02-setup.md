@@ -1,371 +1,208 @@
 # 02 - 啟動與設定指南
 
-> 本文件說明如何在**本機**啟動整個專案，以及需要哪些外部服務、環境變數與連線設定。
-> 專案在做什麼請見 [01-overview.md](01-overview.md)；程式碼架構請見 [03-architecture.md](03-architecture.md)。
+> 本文件帶你在**本機**跑起整個專案：先準備雲端資源並記下各項值，再填 `.env`，最後啟動。
+> 專案在做什麼請見 [01-overview.md](01-overview.md)；程式碼架構與執行期行為請見 [03-architecture.md](03-architecture.md)、[04-agent-mechanism.md](04-agent-mechanism.md)。
 
 ---
 
-## 1. 需要的外部服務
+## 0. 快速總覽
 
-這是一個本機執行、但**依賴雲端服務**的應用。啟動前請先備妥：
+設定順序：
 
-| 服務 | 用途 | 必要 |
+1. 安裝前置工具（[§1](#1-前置工具與外部服務)）。
+2. 準備雲端資源、指派權限，並記下各項值（[§2](#2-準備雲端資源)）。
+3. 複製 `.env.example` 為 `.env` 並填值（[§3](#3-填寫-env)）。
+4. 啟動並登入（[§4](#4-啟動與登入)）。
+
+下列變數全部填好，就能啟動並儲存 skill：
+
+| 變數 | 去哪裡取得 | 準備步驟 |
 | --- | --- | --- |
-| **Microsoft Foundry Project（Agent）** | AI 大腦：對話 orchestrator 與 PREPARE 階段的網路研究 | 是 |
-| **Microsoft Entra ID App Registration** | 使用者登入（OAuth2 授權碼 + PKCE），核發 access token | 是 |
-| **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 是 |
-| **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 是 |
-| **Router runtime endpoint** | 路由測試（TEST）；可直接指向任何實作 `/run` 契約的 runtime，也可選擇經由 APIM 等閘道對外提供。儲存後不需要同步 Skill 清單 | 選用（僅 TEST 功能需要） |
+| `FOUNDRY_PROJECT_ENDPOINT` | Foundry 入口網站 → 專案 Overview 的 project endpoint | [2.3](#23-foundry-agent) |
+| `FOUNDRY_AGENT_NAME`、`FOUNDRY_AGENT_VERSION` | 你建立的 agent 名稱與 Version | [2.3](#23-foundry-agent) |
+| `MICROSOFT_TENANT_ID`、`MICROSOFT_CLIENT_ID` | 登入用 App Registration 的 Overview | [2.1](#21-登入用-app-registration) |
+| `MICROSOFT_CLIENT_SECRET` | 同一支 app 的 Certificates & secrets | [2.1](#21-登入用-app-registration) |
+| `MICROSOFT_OBO_SCOPE` | 同一支 app 的 Expose an API | [2.1](#21-登入用-app-registration) |
+| `AZURE_TENANT_ID`、`AZURE_CLIENT_ID` | 後端用 App Registration 的 Overview | [2.2](#22-後端-service-principal) |
+| `AZURE_CLIENT_SECRET` | 同一支 app 的 Certificates & secrets | [2.2](#22-後端-service-principal) |
+| `AZURE_SQL_SERVER`、`AZURE_SQL_DATABASE` | Azure 入口網站 → SQL database Overview 的 Server name 與資料庫名稱 | [2.4](#24-azure-sql) |
+| `AZURE_STORAGE_ACCOUNT_URL`、`AZURE_BLOB_CONTAINER` | 儲存體帳戶 → Endpoints 的 Blob service，以及容器名稱 | [2.5](#25-azure-blob) |
+| `MCP_ENDPOINT` | EAA 管理員提供（`https://<eaa-host>/mcp`） | [2.6](#26-eaa-mcp) |
+
+選用功能（TEST 路由測試、ACA 查詢與 script 型 skill、多實例）見 [§5](#5-選用功能)。
 
 ---
 
-## 2. 前置工具
+## 1. 前置工具與外部服務
 
 | 工具 | 版本 | 說明 |
 | --- | --- | --- |
 | **Python** | 3.10 – 3.13 | 見 `pyproject.toml` 的 `requires-python` |
 | **uv** | 最新 | 套件管理與執行（`uv run ...`）。若公司網路封鎖公開 PyPI，需另外指定內部套件來源，見 [6. 疑難排解](#6-疑難排解公司網路擋住公開-pypi) |
-| **Azure CLI（az）** | 最新 | 本機執行時用 `az login` 提供 Blob 驗證身分；該登入帳號必須具備 Blob 資料權限。Foundry 與 SQL 則使用 `.env` 裡 `AZURE_CLIENT_ID` 那組 service principal（App Registration） |
+| **Azure CLI（az）** | 最新 | 本機以 `az login` 的帳號存取 Blob |
 | **Node.js / npm** | 最新 LTS | 必要；執行 `npm ci` 安裝 Cytoscape、Markdown 與語法上色等前端執行期套件。未安裝時 Agent Graph 無法繪製 |
+
+這是一個本機執行、但**依賴雲端服務**的應用：
+
+| 服務 | 用途 | Generator 使用的身分 | 必要 |
+| --- | --- | --- | --- |
+| **Microsoft Foundry Project（Agent）** | AI 大腦：對話 orchestrator 與 PREPARE 階段的網路研究 | 後端 service principal（`AZURE_*`） | 是 |
+| **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 後端 service principal（`AZURE_*`），與 Foundry 共用 | 是 |
+| **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 本機 `az login` 帳號 | 是 |
+| **EAA MCP** | 儲存前用 EAA 的規則檢核 skill | 登入用 App Registration（`MICROSOFT_*`）的 app-only token | 是 |
+| **Router runtime endpoint** | TEST 階段的路由測試 | 網頁登入者的委派 token（`MICROSOFT_OBO_SCOPE`） | 選用 |
+
+使用者透過 **Microsoft Entra ID** 登入。登入者的 token 只用來識別使用者、套用 Skill ACL，以及在路由測試時交給 runtime 做 OBO；**不會**被轉送給 Foundry、SQL 或 Blob。各身分的設定與權限見 [§2](#2-準備雲端資源)，實際使用的 credential 見 [03-architecture.md](03-architecture.md#雲端存取身分)。
 
 ---
 
-## 3. 設定 `.env`
+## 2. 準備雲端資源
 
-複製範本後填入實際值：
+需要設定的身分有三種（登入者的委派 token 不需另外設定），權限彼此獨立：
+
+| 身分 | 需要的設定 / 權限 | 不需要 |
+| --- | --- | --- |
+| **登入用 App Registration（`MICROSOFT_*`）** | Web 平台 Redirect URI、client secret、暴露委派 scope；委派權限 `openid`、`profile`、`offline_access` 與自己暴露的 scope；EAA 端必須接受 `aud = api://<app-id>` | 任何 Azure RBAC、Foundry、SQL、Blob 權限；Microsoft Graph 權限；app role |
+| **後端 service principal（`AZURE_*`）** | Foundry project 的 **Foundry Agent Consumer**（或 **Foundry User**）；SQL 資料庫使用者，並對 `dbo.skills`、`dbo.user_skill_grants` 具備 `SELECT` / `INSERT` / `UPDATE` / `DELETE` | Redirect URI、暴露 scope、Blob 權限、資料庫層級角色（例如 `db_datareader` / `db_datawriter`） |
+| **`az login` 帳號** | 儲存體帳戶的 **Storage Blob Data Contributor** | Foundry、SQL 權限 |
+
+> 登入用與後端用可以是同一支 App Registration（兩組變數填相同的值），但那支 app 就要同時具備上表前兩列的所有設定與權限。
+
+### 2.1 登入用 App Registration
+
+對應 `.env` 的 `MICROSOFT_*`。登入採 OAuth2 授權碼 + PKCE。
+
+1. 在 Microsoft Entra 註冊一個 App Registration。Overview 頁的 **Directory (tenant) ID** → `MICROSOFT_TENANT_ID`，**Application (client) ID** → `MICROSOFT_CLIENT_ID`。
+2. **Authentication** → 新增 **Web** 平台，Redirect URI 填 `http://localhost:6274/api/auth/callback`。不能用 SPA 平台：後端以授權碼換 token 時會帶 client secret。
+3. **Certificates & secrets** → 新增 client secret，其值 → `MICROSOFT_CLIENT_SECRET`。
+4. **Expose an API** → 設定 Application ID URI（預設 `api://<app-id>`），新增委派 scope `user_impersonation`。完整 scope → `MICROSOFT_OBO_SCOPE`，例如 `api://<app-id>/user_impersonation`。
+5. 登入時請求的 scope 是 `openid profile offline_access {MICROSOFT_OBO_SCOPE}`，由使用者首次登入時同意，或由管理員事先 admin consent。使用者 email 直接取自 token claims，不呼叫 Microsoft Graph，因此不需要 Graph 權限。
+6. 請 EAA 管理員確認 EAA 接受這支 app 的 audience（見 [2.6](#26-eaa-mcp)）。
+
+> authority / authorize / token 端點由 `MICROSOFT_TENANT_ID` 自動推導，不需另外設定。登入背後的流程見 [03-architecture.md](03-architecture.md#6-登入與-token-流程)。
+
+### 2.2 後端 service principal
+
+對應 `.env` 的 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET`，**Foundry 與 Azure SQL 共用**。這三個名稱是 azure-identity 的慣例：Foundry 的 `DefaultAzureCredential()` 會自動讀取它們。
+
+1. 註冊一個 App Registration（或沿用 2.1 那支）。Overview 頁的 tenant ID → `AZURE_TENANT_ID`，client ID → `AZURE_CLIENT_ID`。
+2. **Certificates & secrets** → 新增 client secret → `AZURE_CLIENT_SECRET`。
+3. 不需要 Redirect URI，也不需要暴露 scope。權限在 [2.3](#23-foundry-agent) 與 [2.4](#24-azure-sql) 指派。
+
+> Blob **不使用**這組 service principal，而是使用 `az login` 帳號（見 [2.5](#25-azure-blob)）。
+
+### 2.3 Foundry agent
+
+本專案以名稱 + 版本呼叫 Foundry agent，不會自動建立 agent，請先手動新增：
+
+1. **Foundry project**：不必另建 project，可在 EAA 所使用的 Microsoft Foundry project 中新增此 agent。專案 Overview 的 project endpoint → `FOUNDRY_PROJECT_ENDPOINT`。
+2. **新增空的 agent**：在 **Build → Agents** 新增 agent，名稱 → `FOUNDRY_AGENT_NAME`（例如 `skill-generator-agent`）。
+3. **Model**：選 `gpt-5.6-terra` 或更新的模型。
+4. **Instructions**：留空即可。每一輪對話，後端都會把 `prompts/` 組裝出的完整提示詞以 `role="system"` 訊息送出。
+5. **Tools**：加入 **Web search**，讓 agent 在 PREPARE 等階段能上網研究。
+6. **儲存後記下版本**：頁面右上角 **Version** 的數字 → `FOUNDRY_AGENT_VERSION`。之後在 Foundry 上修改 agent 會產生新版本，需同步更新此變數。
+7. **指派權限**：將 [2.2](#22-後端-service-principal) 的 service principal 加入此 Foundry project。只呼叫既有 agent 時授予 **Foundry Agent Consumer**；需要 project data actions 時授予 **Foundry User**。一般 Azure **Owner**、**Contributor** 或 **Reader** 不等同於 Foundry agent 的 data-plane 呼叫權限。
+
+### 2.4 Azure SQL
+
+EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runtime 讀取的同一個資料庫**。
+
+> **資料庫的建置與授權應該已在部署 EAA 時完成，請勿重複執行。** EAA repo 的 `skill_rbac_schema v2.sql` 建立 `dbo.skills`、`dbo.user_skill_grants` 與 `dbo.v_my_skills`；`sql-database-permission.sql` 的 Case C 以最小權限把 Skill Generator 的 service principal 加入資料庫。若不確定是否已執行，請向 EAA 管理員確認。
+
+1. Azure 入口網站 → SQL database 的 Overview：**Server name** → `AZURE_SQL_SERVER`（例如 `your-server.database.windows.net`），資料庫名稱 → `AZURE_SQL_DATABASE`。
+2. 確認 `sql-database-permission.sql` Case C 中的 service principal 名稱就是 [2.2](#22-後端-service-principal) 那一支。Case C 只授予 `dbo.skills` 與 `dbo.user_skill_grants` 的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`；本專案也只需要這些。若名稱不同，請 EAA 管理員以這支 service principal 重新執行 Case C。
+3. 確認 SQL Server 的防火牆允許你本機的 IP。
+
+> 所有使用者共用這個連線身分；寫進 `dbo.user_skill_grants` 的仍是各自登入者的 email。細節見 [03-architecture.md](03-architecture.md#5-資料庫細節azure-sql--skill-rbac-schema-v22)。
+
+### 2.5 Azure Blob
+
+與 SQL 相同，要指向 **EAA runtime 讀取的同一個儲存體帳戶與容器**。
+
+1. 儲存體帳戶 → **Endpoints** → Blob service 的 URL → `AZURE_STORAGE_ACCOUNT_URL`（例如 `https://youraccount.blob.core.windows.net`）；容器名稱 → `AZURE_BLOB_CONTAINER`。
+2. 執行 `az login`，並在儲存體帳戶上將 **Storage Blob Data Contributor** 指派給該登入帳號。一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。
+
+> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，刻意忽略 `AZURE_*` service principal，也不支援連線字串。
+
+### 2.6 EAA MCP
+
+儲存 skill 前，後端會透過 EAA 的 MCP 伺服器呼叫 `lint_skill_package`，用 EAA 自己的規則檢核。此檢核為 **fail-closed**：取不到判定就回 HTTP 503，不會儲存。
+
+1. 向 EAA 管理員取得 MCP 根 URL → `MCP_ENDPOINT`（例如 `https://eaa.foundryeaa.org/mcp`）。
+2. 請 EAA 管理員確認：EAA 驗證的 token audience 是 [2.1](#21-登入用-app-registration) 那支 app 的 `api://<app-id>`。後端以該 app 對自己做 client credentials 取得 app-only token，不需要另外設定 app role。
+3. 若 EAA 驗證的是另一支 app，將那支 app 的 audience 填入 `MCP_OAUTH_AUDIENCE`。
+
+> audience 不符時，儲存會因 lint 取不到判定而回 HTTP 503，路由測試則回 HTTP 502。lint 的完整行為見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)，呼叫身分的細節見 [03-architecture.md](03-architecture.md#24-呼叫-eaa-mcp-的身分)。
+
+---
+
+## 3. 填寫 `.env`
+
+複製範本後，把 [§2](#2-準備雲端資源) 記下的值填入：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-啟動時 `backend/main.py` 會 `load_dotenv(override=True)`，**`.env` 會覆蓋現有的環境變數**。
+啟動時 `backend/main.py` 會 `load_dotenv(override=True)`，**`.env` 會覆蓋現有的環境變數**。下列分組與 `.env.example` 的順序一致。
 
-### 3.1 環境變數完整清單
-
-#### 雲端服務使用的身分
-
-網頁登入者與後端存取雲端服務的身分彼此獨立。依目前實作，各服務實際使用的身分如下：
-
-| 服務 | 本機執行 | 部署至 Azure | Credential 實作 |
-| --- | --- | --- | --- |
-| **Microsoft Foundry Project** | `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 這組 service principal | 同一組 `.env` service principal；目前不會因部署至 Azure 而自動改用 Managed Identity | `DefaultAzureCredential()`；完整的 `AZURE_*` 三件套會由 `EnvironmentCredential` 優先採用 |
-| **Azure SQL Database** | 與 Foundry 相同，即 `.env` 中 `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` 這組 service principal | 同一組 `.env` service principal | `Authentication=ActiveDirectoryServicePrincipal`，沒有 Managed Identity 或 `az login` fallback |
-| **Azure Blob Storage** | 目前 `az login` 的使用者帳號 | 應用程式的 Managed Identity | `DefaultAzureCredential(exclude_environment_credential=True)`，刻意不採用上述 service principal |
-| **MCP（ACA 環境變數查詢）** | `MICROSOFT_*` App Registration 的 app-only token | 同一支 App Registration | client credentials 對自己換 `api://<app-id>/.default`；詳見下方 MCP 章節 |
-
-> 瀏覽器的 Microsoft 登入只用來識別目前網頁使用者、套用 Skill ACL，以及取得需要的 delegated/OBO token；該使用者 token **不會**被轉送給 Foundry、SQL 或 Blob。由於 Foundry 與 SQL 共用 `AZURE_*` 這組 service principal，它必須分別取得兩邊的權限。
-
-> **上表「部署至 Azure」欄尚未實測**。那一欄是依程式碼推導的預期行為，並非驗證結果；實際搬上去前請先看 [4.1 部署至 Azure：尚未實測](#41-部署至-azure尚未實測)。
-
-#### Foundry（AI 大腦）
-
-##### 準備 orchestrator agent
-
-本專案以名稱 + 版本呼叫 Foundry agent，不會自動建立 agent，請先手動新增一個：
-
-1. **Foundry project**：不必另建 project，可在 EAA 所使用的 Microsoft Foundry project 中新增此 agent。
-2. **新增空的 agent**：在 **Build → Agents** 新增 agent，名稱填入 `FOUNDRY_AGENT_NAME` 要用的值（例如 `skill-generator-agent`）。
-3. **Model**：選 `gpt-5.6-terra` 或更新的模型。
-4. **Instructions**：留空即可。每一輪對話，後端都會把 `prompts/` 組裝出的完整提示詞以 `role="system"` 訊息送出，agent 本身不需要 instructions。
-5. **Tools**：加入 **Web search**，讓 agent 在 PREPARE 等階段能上網研究。
-6. **儲存後記下版本**：頁面右上角 **Version** 顯示的數字就是 `FOUNDRY_AGENT_VERSION`。之後在 Foundry 上修改 agent 會產生新版本，需同步更新此變數。
-
-Foundry client 使用 `DefaultAzureCredential()`。本專案同時要求 SQL 的 `AZURE_TENANT_ID`、`AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET`，因此這三個值也會組成 Foundry 實際使用的 `EnvironmentCredential`；本機的 `az login` 帳號通常不會被選到。請將該 `AZURE_CLIENT_ID` 對應的 service principal 加入目標 Foundry project，僅呼叫既有 agent 時至少授予 **Foundry Agent Consumer**；需要 project data actions 時授予 **Foundry User**。
+### 3.1 Microsoft Foundry project
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| `FOUNDRY_PROJECT_ENDPOINT` | 是 | Foundry 專案端點，例如 `https://your-project.services.ai.azure.com` |
-| `FOUNDRY_AGENT_NAME` | 是 | orchestrator agent 名稱，預設 `skill-generator-agent` |
-| `FOUNDRY_AGENT_VERSION` | 是 | agent 版本，例如 `2` |
+| `FOUNDRY_PROJECT_ENDPOINT` | 是 | 例如 `https://your-project.services.ai.azure.com` |
+| `FOUNDRY_AGENT_NAME` | 是 | 預設 `skill-generator-agent` |
+| `FOUNDRY_AGENT_VERSION` | 是 | 例如 `2` |
 
-#### Microsoft Entra 登入（OAuth2 授權碼 + PKCE）
+### 3.2 Microsoft Entra sign-in
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| `MICROSOFT_TENANT_ID` | 是 | Entra 租用戶 ID |
-| `MICROSOFT_CLIENT_ID` | 是 | App Registration 的 client id |
-| `MICROSOFT_CLIENT_SECRET` | 是 | App Registration 的 client secret |
-| `MICROSOFT_OBO_SCOPE` | 是 | access token 要求的委派 scope，例如 `api://<app-id>/user_impersonation` |
+| `MICROSOFT_TENANT_ID` | 是 | 登入用 App Registration 的 tenant ID |
+| `MICROSOFT_CLIENT_ID` | 是 | 同一支 app 的 client ID |
+| `MICROSOFT_CLIENT_SECRET` | 是 | 同一支 app 的 client secret |
+| `MICROSOFT_OBO_SCOPE` | 是 | 例如 `api://<app-id>/user_impersonation` |
 
-#### Azure SQL（metadata 與權限）
+### 3.3 Foundry + Azure SQL service principal
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
 | `AZURE_SQL_SERVER` | 是 | 例如 `your-server.database.windows.net` |
 | `AZURE_SQL_DATABASE` | 是 | 資料庫名稱 |
-| `AZURE_TENANT_ID` | 是 | Foundry 與 SQL 共用的 service principal（App Registration）驗證用；三個一組必填 |
-| `AZURE_CLIENT_ID` | 是 | 同上；此 client id 對應的 service principal 也必須取得 Foundry project/agent 權限 |
-| `AZURE_CLIENT_SECRET` | 是 | 同上 |
+| `AZURE_TENANT_ID` | 是 | 後端 service principal 的 tenant ID；Foundry 與 SQL 共用 |
+| `AZURE_CLIENT_ID` | 是 | 同上，client ID |
+| `AZURE_CLIENT_SECRET` | 是 | 同上，client secret |
 
-#### Azure Blob（SKILL.md 儲存）
-
-| 變數 | 必要 | 說明 |
-| --- | --- | --- |
-| `AZURE_STORAGE_ACCOUNT_URL` | 是 | 例如 `https://youraccount.blob.core.windows.net`；Blob 使用 `DefaultAzureCredential(exclude_environment_credential=True)`，不支援連線字串 |
-| `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `skills` |
-| `AZURE_BLOB_PREFIX` | 否 | blob 前綴；**只能是 `skills`**（或留空，預設即為 `skills`）。`dbo.skills.blob_path` 是寫死 `skills/` 的計算欄位，填其他值會使 SQL 指向應用程式從未寫入的位置，因此服務會在啟動時直接拋錯 |
-
-> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，會刻意忽略 `.env` 中供 Foundry 與 SQL 使用的 `AZURE_CLIENT_ID`、`AZURE_CLIENT_SECRET` 等 service principal 設定。本機執行時，實際使用目前 `az login` 的個人帳號，因此必須將 **Storage Blob Data Contributor** 指派給該帳號；一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。部署至 Azure 時，則將 **Storage Blob Data Contributor** 指派給應用程式的 Managed Identity。
-
-#### 本機開發 / 測試選項
-
-以下都有合理預設，本機通常**不需要設定**（`.env` 已直接填入下列預設值）：
-
-| 變數 | 預設值 | 說明 |
-| --- | --- | --- |
-| `SGV2_SESSION_DIR` | `./.sessions` | 撰寫中的 session JSON 檔案存放目錄（只在 `SGV2_SESSION_STORE=local` 時有作用） |
-| `SGV2_SESSION_STORE` | `local`（檔案） | session 儲存方式：`local`＝存本機 JSON 檔；`blob`＝改存 Azure Blob（多實例共用才需要） |
-
-#### 多實例部署：session 與登入狀態改存 Blob（選用）
-
-單機執行時 session 存本機檔案、登入 token 只存在**行程記憶體**，兩者都不跨實例共享。若要跑多個後端實例（例如 ACA 多副本），需要把這兩份狀態改存 Blob，否則使用者會隨著被路由到不同實例而看不到自己的 session 或被登出。
-
-| 變數 | 預設值 | 說明 |
-| --- | --- | --- |
-| `SGV2_SESSION_BLOB_CONTAINER` | 沿用 `AZURE_BLOB_CONTAINER` | session 專用容器；想與 `SKILL.md` 分開存放時才設 |
-| `SGV2_SESSION_BLOB_PREFIX` | `sessions` | session blob 前綴。**不像 `AZURE_BLOB_PREFIX` 受 SQL 計算欄位限制**，可自由改名 |
-| `SGV2_AUTH_STORE` | `local`（行程記憶體） | 登入 token 與 OAuth state 的儲存方式；`blob`＝改存 Azure Blob |
-| `SGV2_AUTH_STORAGE_ACCOUNT_URL` | 沿用 `AZURE_STORAGE_ACCOUNT_URL` | auth 專用儲存體帳號 |
-| `SGV2_AUTH_STORAGE_CONNECTION_STRING` | 沿用 `AZURE_STORAGE_CONNECTION_STRING` | 改用連線字串驗證時才設；設了就優先於帳號 URL |
-| `SGV2_AUTH_BLOB_CONTAINER` | 依序沿用 `SGV2_SESSION_BLOB_CONTAINER`、`AZURE_BLOB_CONTAINER` | auth 專用容器 |
-| `SGV2_AUTH_BLOB_PREFIX` | `auth` | auth blob 前綴 |
-
-以現有 `.env` 為例，只要加一行就會沿用同一個儲存體帳號與容器：
-
-```dotenv
-SGV2_SESSION_STORE=blob
-SGV2_AUTH_STORE=blob
-```
-
-實際寫入的位置分別是 `<container>/sessions/<owner_upn>/<session_id>.json` 與 `<container>/auth/<kind>/<key>.json`，與 skill 的 `skills/` 前綴互不重疊。
-
-> **驗證身分與 skill 儲存不同**。skill 用 `DefaultAzureCredential(exclude_environment_credential=True)`；session 與 auth 的 Blob 用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，兩者一樣都**不會**採用 `.env` 的 `AZURE_CLIENT_*` service principal，所以同樣需要把 **Storage Blob Data Contributor** 指派給本機 `az login` 帳號或 Azure 上的 Managed Identity。
-
-> **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
-
-#### 路由測試端點（選用，TEST 功能需要）
-
-這是 TEST 階段「路由測試」的端點。不設時，其他流程照常運作，只是無法跑路由測試。
-
-| 變數 | 說明 |
-| --- | --- |
-| `SKILL_SELECTION_TEST_RUN_URL` | runtime 的 `/run` 端點；TEST 把正 / 負面範例送去，看 Router 是否路由到本 skill（讀取位置：`backend/testing.py`） |
-
-**這是 runtime HTTP 契約，不是 APIM 依賴。**程式只做一般 HTTP POST，不檢查主機名稱，因此任何實作下方契約的端點都可以，例如直接指向 Azure Container Apps。APIM 只是可選閘道，用於 subscription key、rate limit 或 policy；未使用 APIM 時，請確認 runtime 本身已處理部署所需的驗證與 token 轉換。
-
-```dotenv
-# 正式網域（EAA 的 MCP_PUBLIC_BASE_URL），與 ACA FQDN 指向同一個 ACA、驗證方式相同
-SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
-# 也可選擇指向 APIM 等閘道
-#SKILL_SELECTION_TEST_RUN_URL=https://example-apim.azure-api.net/coding-tool-apis/run
-```
-
-端點必須符合的契約：接受 POST JSON（`request` / `session_id` / `mode` / `scenario` / `credentials`），回應 JSON 頂層要有 `response`，並原樣回顯 `mode`；同時能驗證 `Authorization: Bearer` 帶的使用者委派 token，且在 120 秒內回應。
-
-> **token 只放在 `Authorization` header**。使用者委派 token（登入時以 `MICROSOFT_OBO_SCOPE` 取得，`aud` 為 `api://<app-id>` 或 `<app-id>`）只出現在 header；body 的 `credentials` 一律是空物件。EAA 會把 `credentials` 的每個鍵原樣變成 skill 執行環境的環境變數，從來沒有讀過 body 裡的 token；把 token 放進 body 等於把使用者的原始 token 交給 script。`tests/unit/test_testing_helpers.py` 有測試鎖住這一點。
-
-> **token 種類決定「看得到哪些 skill」**。這裡送的是使用者委派 token，EAA 會做 OBO，路由測試只看得到登入者被授權的 skill。儲存時會自動 grant 給儲存者，所以請用同一個帳號儲存與測試。若改用 app-only token，EAA 會改用自己的 Managed Identity 查詢，只看得到 grant 給該 MI 的 skill，待測 skill 沒 grant 會被誤判成「沒命中」。
-
-> **HTTP 401 會中止整批**。EAA 在 `MCP_AUTH_ENFORCE=validate` 下驗證 token 的 `aud` / `iss` / `exp`；被拒時整批中止並回 **HTTP 502**（比照 `mode` 回顯失敗），因為後續樣本帶的是同一個 token。EAA 回給 client 的 `error_description` 刻意寫得模糊，真正原因只記在 EAA 的 ACA log（`[oauth] Token rejected:`），請聯絡 EAA 管理員查 log。其他 HTTP 錯誤仍記在單一樣本上。
-
-> 已移除：舊版的 `SKILL_SYNC_APIM_URL`（儲存後同步 skill 清單給 Router）。本產生器現在只支援「動態載入」（Mode B）：runtime 每次請求都直接從 SQL + Blob 解析 skill，雙寫完成即生效，不需要任何 sync 步驟。若你的 runtime 仍採靜態快照（Mode A），需自行在外部呼叫 `sync_skills`。
-
-> **Runtime 需求：`mode` 欄位**。路由測試在 REST body 頂層送 `mode`（與 `request`、`credentials` 平行），**一律送 `"route_only"`** —— capability 與 scenario 的每一層都是，沒有任何一層會執行技能。runtime **必須把收到的 `mode` 原樣回顯在回應頂層**；缺漏或不符會讓整批測試中止並回 **HTTP 502**（沒有降級開關 —— 未經確認的 mode 無法與「靜默升級成 execute」區分，而那會讓一次路由測試寫進真實資料）。若你的 runtime 版本早於此協定，需先升級才能跑路由測試。
-
-> **Runtime 需求：`scenario` 欄位**。body 頂層同時帶 `scenario`。測 scenario skill 時送它自己的名稱，讓 runtime 只落地該 scenario `metadata.children` 列出的 skills，重現 production 的收斂條件；測 capability skill 時送空字串。Runtime 對此欄位全程 fail-open，舊版 runtime 會直接忽略它，不影響路由測試運作。
-
-#### MCP / ACA 環境變數查詢（選用）
-
-設定後，PREPARE 階段會透過 MCP 讀取目標 Azure Container Apps（ACA）應用**目前已有的環境變數**與 **OBO scope 註冊表**，讓 Agent 在確認 skill 變數時能分辨「ACA 已有（reuse）」或「需新增（add）」。**四個都填才會啟用**；任一留空即停用（功能 no-op，不影響其他流程）。
-
-> `MCP_ENDPOINT` 本身不是選用的：儲存時要用它呼叫 EAA 的 `lint_skill_package`（見 [EAA skill lint](#eaa-skill-lint儲存必要)）。選用的是 ACA 查詢這個功能。
-
-> **Script 型 skill 需要 ACA 查詢**。是否能產出 script 型 skill（見下方 [Script 型 skill 的 EAA 旗標](#script-型-skill-的-eaa-旗標)）是從這個查詢結果的 `architectural_config` 判斷的；四個變數沒填齊，旗標一律視為關閉，所有 skill 都只會是 inline 形式。
-
-| 變數 | 說明 |
-| --- | --- |
-| `MCP_ENDPOINT` | MCP 伺服器根 URL（`/mcp`），提供「列出 ACA 環境變數」的工具；例如 `https://eaa.foundryeaa.org/mcp` |
-| `ACA_APP_NAME` | 要查詢的 ACA 應用名稱 |
-| `ACA_RESOURCE_GROUP` | 該 app 的資源群組 |
-| `ACA_SUBSCRIPTION_ID` | 訂閱 ID |
-| `MCP_OAUTH_AUDIENCE` | 選用。只有當 MCP 伺服器驗證的 audience 與 `MICROSOFT_OBO_SCOPE` 不同支 app 時才需要填 |
-
-##### 呼叫 MCP 用的身分
-
-呼叫 `list_aca_environment_variables` 與 `lint_skill_package` 時帶的都是 **app-only token**，由 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`（也就是負責網頁登入的那支 App Registration）以 **client credentials** 對**自己**換取，scope 為 `api://<app-id>/.default`。
-
-- **為什麼不是使用者委派身分**：PREPARE 進入時的查詢跑在背景執行緒，只拿得到 session，沒有 HTTP request 也沒有使用者 token，等同無人值守。手動重新整理（`POST /api/sessions/{id}/aca-env`）雖然有登入者，仍刻意沿用同一個 app-only 身分，避免兩條路徑結果不一致。
-- **audience 從哪來**：預設把 `MICROSOFT_OBO_SCOPE` 去掉 `/user_impersonation` 得到 `api://<app-id>`。MCP 伺服器驗證的正是這個值。若兩者不同支 app，才需要另外設 `MCP_OAUTH_AUDIENCE` 覆寫。
-- **token 內容**：app 對自己做 client credentials，取得的 token **沒有 `scp` 也沒有 `roles`**。MCP 伺服器的 token 驗證不檢查這兩者，因此可以通過。
-- **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
-
-> 這條身分**與路由測試無關**。TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；無論端點是直連或經過閘道，app-only token 都沒有使用者身分，不能用在那條路徑上。
-
-> **平台 secret 不會交給 Agent**。查到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
-
-#### EAA skill lint（儲存必要）
-
-儲存（`save_skill_dual_write()`）在寫入 Blob 前，先跑本專案的 skill lint，再透過 `MCP_ENDPOINT` 呼叫 EAA 的 MCP tool `lint_skill_package`，用 EAA 自己的規則檢核整個 skill package（實作：`backend/eaa_platform.py`、`backend/mcp_jsonrpc.py`）。本機不需要 EAA repo。
+### 3.4 Azure Blob storage
 
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| `MCP_ENDPOINT` | 是 | EAA MCP 根 URL（`/mcp`）；身分與 ACA 查詢相同，見上方「呼叫 MCP 用的身分」 |
-| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`。只影響本機 lint 的 D7 INFO；EAA 端用的是 ACA 上的值 |
+| `AZURE_STORAGE_ACCOUNT_URL` | 是 | 例如 `https://youraccount.blob.core.windows.net` |
+| `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `skills`。只填容器名稱；skill 一律寫在容器內的 `skills/` 下，這是 `dbo.skills.blob_path` 計算欄位寫死的前綴，不可設定 |
 
-- Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。有 script 但 EAA 回報的 `ruleset_version` 低於 `1.1`（還沒有 script 檢核）時回 **HTTP 503** 拒絕儲存，因為無法驗證。
-- **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
-- `status == "failed"`（request 或 package 不合法）回 **HTTP 400**，訊息列出 EAA 的 `error`。
-- 本機 skill lint 或 EAA lint 有 ERROR 時回 **HTTP 400**，`detail` 為 `{kind: "skill_lint_failed" | "eaa_lint_failed", recoverable: true, message, issues}`。前端不顯示原始規則文字，而是告知使用者「未儲存、已請 Agent 修正」，並把 `issues` 送回 Agent：DRAFT 尚未儲存時重送完整 `propose_skill_draft`，之後則用 `propose_patch`。
-- `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。
-- `ruleset_version` 記在 session 的 `eaa_ruleset_version` 與 `skill.save.done` / `mcp.lint.done` log。
-- 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
-- pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
-- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
+### 3.5 EAA MCP
 
-#### Script 型 skill 的 EAA 旗標
-
-Script 型 skill（`SKILL.md` 加上一支 `scripts/<name>.py`）只有在 EAA 會執行 script 時才有意義。判斷依據是 ACA 查詢結果 `architectural_config` 裡的兩個旗標，**兩個都要是 `true`**（字串比對不分大小寫；缺值視為 `false`）：
-
-| 旗標 | 意義 |
-| --- | --- |
-| `DYNAMIC_SKILLS_ENABLED` | EAA 從 Blob 動態載入 skill |
-| `SKILL_SCRIPTS_ENABLED` | EAA 執行 skill 附帶的 script |
-
-- **PREPARE**：旗標關閉時，新 skill 只能是 inline；Materials 與 Checklist 只顯示這一個原因（其他條件此時都無意義）。
-- **查詢失敗 ≠ 旗標關閉**：ACA 查詢失敗（例如 Container App 冷啟動時回 404「Unavailable」）時，`eaa_flags` 顯示「Could not read the EAA script flags」，Agent 會告知使用者形式暫時無法判定。離開 PREPARE 前（`request_stage_transition` 到 DRAFT）若是有 `code` 素材的新 capability skill 且尚未讀到旗標，會以 `reason="form_lock"` 重查一次：重查後旗標開啟 → 這一次轉移被擋下（`FormLockDeferred`），讓 Agent 先與使用者處理 script 形式；仍失敗 → 以 inline 鎖定，並寫入 system 訊息說明原因。
-- **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），旗標若已關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags` 列出關閉的旗標，**什麼都不寫入**。處理方式是請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定，見 [04-agent-mechanism.md](04-agent-mechanism.md#75-code-素材與-script-形式)）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。
-- 其他 script 相關的 409：`script_form_mismatch`（inline session 想覆寫 Blob 上已有 script 的 skill，不可恢復）、`version_conflict`（Blob 上的 `SKILL.md` 在載入後被改過，例如 Gatekeeper Addendum）。
-- Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，只有 scenario `script_flags_on` 會把旗標打開。
-
-### 3.2 Azure SQL 連線與驗證策略
-
-後端使用 **`mssql-python`** 我們會分兩種不同角色 **(A) 用誰連資料庫**、**(B) 寫進去的是誰**。
-
-#### A. 連線身分（誰打開 SQL 連線）
-
-整個應用**共用一個固定身分**連線——**只支援 service principal（App Registration）**，而且就是 Foundry 用的那一組，由 `backend/db.py` 組裝連線字串：
-
-| 連線身分 | 必要環境變數 | 驗證方式 |
+| 變數 | 必要 | 說明 |
 | --- | --- | --- |
-| **service principal（App Registration）** | `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`（三個都必填） | `ActiveDirectoryServicePrincipal` |
+| `MCP_ENDPOINT` | 是 | EAA MCP 根 URL（`/mcp`）；未設定時無法儲存 |
+| `MCP_OAUTH_AUDIENCE` | 否 | 只有 EAA 驗證的 audience 與 `MICROSOFT_OBO_SCOPE` 不同支 app 時才填 |
+| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`；只影響本機 lint 的提示 |
 
-> 這個連線身分只決定「**能不能連、能不能讀寫資料表**」，它**不代表**當下在用網頁的人，也不會自動帶入登入者資訊。
+### 3.6 本機預設值
 
-#### B. 帶入身分（寫進資料表的是哪個人）
+以下保留 `.env.example` 的值即可：
 
-`dbo.user_skill_grants` 的 `user_upn` / `granted_by` 寫的是**目前網頁登入者的 email**，與上面的連線身分**無關**——email 是被當成「資料值」用 SQL 參數傳入的：
+| 變數 | 預設值 | 說明 |
+| --- | --- | --- |
+| `SGV2_SESSION_DIR` | `./.sessions` | 撰寫中的 session JSON 存放目錄（只在 `SGV2_SESSION_STORE=local` 時有作用） |
+| `SGV2_SESSION_STORE` | `local` | `local`＝存本機 JSON 檔；`blob` 見 [5.3](#53-多實例部署) |
+| `SGV2_AUTH_STORE` | `local` | 登入狀態存在行程記憶體；`blob` 見 [5.3](#53-多實例部署) |
 
-```text
-網頁 Microsoft 登入 → access token 內的 email
-  → cookie sgv2_auth → require_upn 取出 email 當 UPN
-  → add_grant(skill, user_upn=你的email, granted_by=你的email)
-  → 以 SQL 參數（?）INSERT 進 dbo.user_skill_grants
-```
-
-所以即使**所有人共用同一個 App Registration 連線**，每筆 grant 仍會記成各自登入的 email。**資料列級隔離（RLS）** 也是用這個 email 比對 `dbo.user_skill_grants`，決定你看得到哪些 skill（見 [03-architecture.md](03-architecture.md) 的登入章節）。
-
-> 只有**私有 skill**（`is_public = 0`）才會寫這一列。公開 skill 的可見性直接由 `is_public = 1` 決定，不需要也不會產生 grant 列；把一支 skill 從公開改回私有時，才會補上作者自己的 grant，避免作者反而看不到自己的 skill。
-
-> 可見性只由 `PATCH /api/skills/{name}/visibility` 寫入，儲存內容（接受 SKILL.md / patch / 改名）一律沿用現有值。切換一支 skill 的可見性時，它宣告的 **internal children**（不在 host catalog 的子 skill）會跟著一起切換；降回私有時 children 也會各自補上呼叫者的 grant。
-
-#### 需要的資料表（Skill RBAC schema v2.2）
-
-- `dbo.skills(skill_name, owner_upn NULL, is_public, is_internal, enabled, created_at, updated_at)`，另有 PERSISTED 計算欄位 `skill_key`（PK）、`blob_path`、`blob_prefix`
-- `dbo.user_skill_grants(user_upn, skill_key FK CASCADE, granted_at, granted_by, expires_at)`，PK = (user_upn, skill_key)
-- `dbo.v_my_skills`：可見性的官方定義（`enabled = 1 AND (未過期 grant OR is_public = 1)`）
-
-建置腳本見 `db/skill_rbac_schema v2.sql` 及其後續 migration。**計算欄位不可寫入**，應用程式只寫 `skill_name` / `owner_upn` / `is_public` / `enabled`。
-
-### 3.3 Entra App Registration 設定
-
-登入採 **OAuth2 授權碼流程 + PKCE**。設定步驟：
-
-1. 註冊一個 App Registration，取得 `client_id` / `client_secret`。
-2. 新增 **Redirect URI**：`http://localhost:6274/api/auth/callback`（本機）。
-3. 暴露一個委派 scope（delegated permission），例如 `api://<app-id>/user_impersonation`。
-
-把上面取得的資訊填入 `.env` 對應變數：
-
-| 環境變數 | 對應 App Registration 的 |
-| --- | --- |
-| `MICROSOFT_TENANT_ID` | 租用戶（Directory）ID |
-| `MICROSOFT_CLIENT_ID` | Application (client) ID |
-| `MICROSOFT_CLIENT_SECRET` | client secret 的值 |
-| `MICROSOFT_OBO_SCOPE` | 暴露的委派 scope，例如 `api://<app-id>/user_impersonation` |
-
-> 登入時實際請求的 scope 是 `openid profile offline_access {MICROSOFT_OBO_SCOPE}`；authority / authorize / token 端點由 `MICROSOFT_TENANT_ID` 自動推導，**不需另外設定**。
-> 登入背後的流程（授權碼換 token、如何拿到 email、token 存哪裡）請見 [03-architecture.md](03-architecture.md) 的「6. 登入與 Token 流程」。
+其餘變數屬於選用功能，見 [§5](#5-選用功能)。
 
 ---
 
-## 4. 指派身分權限
-
-Foundry 與 SQL 共用 `.env` 的 App Registration service principal；Blob 會排除它，本機使用 `az login` 帳號，部署至 Azure 時使用 Managed Identity。這些權限彼此獨立，請分別授權：
-
-- **Foundry Project / Agent**：將 `AZURE_CLIENT_ID` 對應的 service principal 加入目標 Foundry project。只需呼叫既有 agent endpoint 時授予 **Foundry Agent Consumer**；若還需要 project data actions，授予 **Foundry User**。一般 Azure **Owner**、**Contributor** 或 **Reader** 不等同於 Foundry agent 的 data-plane 呼叫權限。
-
-- **SQL（連線身分）**：把同一個 service principal 加入資料庫並授予讀寫權限，例如：
-
-  ```sql
-  CREATE USER [<app-registration-name>] FROM EXTERNAL PROVIDER;
-  ALTER ROLE db_datareader ADD MEMBER [<app-registration-name>];
-  ALTER ROLE db_datawriter ADD MEMBER [<app-registration-name>];
-  ```
-
-- **Blob（本機）**：先執行 `az login`，再於儲存體帳號上將 **Storage Blob Data Contributor** 指派給該登入帳號。一般 **Contributor** 不包含 Blob data-plane 權限。`AZURE_CLIENT_*` 供 Foundry 與 SQL 使用，不會被 Blob credential 採用。
-
-- **Blob（Azure）**：將 **Storage Blob Data Contributor** 指派給執行應用程式的 Managed Identity。
-
-### 4.1 部署至 Azure：尚未實測
-
-> **本專案只在本機驗證過。** 未曾實際部署到 Azure Container Apps、App Service 或任何雲端執行環境，也沒有對應的 Dockerfile / IaC / CI。下面列的是**審視程式碼後已知會擋住部署的問題**，供日後要推上雲的人參考；清單未必完整。
-
-**架構上本來就可行的部分**：前端是純靜態 HTML/CSS/ES module（無 build step），由 `backend/main.py` 自己掛載後提供：`/` → `frontend/index.html`、`/assets` → `frontend/`、`/vendor` → `node_modules/`。因此**不需要另一個前端主機服務**，一個容器同時 serve 前端與 API 即可。
-
-#### 已知問題
-
-**1. Blob 的 Managed Identity 拿不到 token（需改程式，無法用設定繞過）**
-
-容器裡沒有 `az login`，`backend/blob_store.py` 的 `DefaultAzureCredential(exclude_environment_credential=True)` 只能落到 `ManagedIdentityCredential`。但 azure-identity 的 `DefaultAzureCredential` 會把 `AZURE_CLIENT_ID` 當成 **user-assigned MI 的 client id**：
-
-```python
-# azure/identity/_credentials/default.py
-managed_identity_client_id = kwargs.pop(
-    "managed_identity_client_id", os.environ.get(EnvironmentVariables.AZURE_CLIENT_ID)
-)
-```
-
-而本專案的 `AZURE_CLIENT_ID` 是 SQL / Foundry 那支 **App Registration**，不是任何 UAMI，所以 MI 端點會被要求發一個不存在的身分的 token 而失敗，導致所有 `SKILL.md` 讀寫壞掉。這**不能靠調整環境變數解決**（App Registration 與 UAMI 是不同物件，client id 不可能相同），必須改程式明確指定要用哪個 MI。
-
-附帶一個不一致：`backend/session_store.py` 與 `backend/auth_store.py` 用的是明寫的 `ManagedIdentityCredential()`（不帶 client id），走 **system-assigned**，與 skill store 的行為不同。
-
-**2. uvicorn 綁定位址**
-
-[5. 啟動](#5-啟動) 的指令是 `--host 127.0.0.1`。容器內這樣綁，ingress 從外面連不進來，健康檢查直接失敗。需改 `--host 0.0.0.0` 並與 ingress 的 `targetPort` 對齊。
-
-**3. Redirect URI 與反向代理**
-
-App Registration 要加上正式網域的 `https://<fqdn>/api/auth/callback`。另外 `public_url_for()` 直接用 `request.url_for` 組 redirect_uri；TLS 在 ingress 終止，若未處理 `X-Forwarded-Proto` 會組出 `http://…` 而與 Entra 註冊值不符——啟動時需帶 `--proxy-headers --forwarded-allow-ips=…`。
-
-**4. 登入 cookie 的 `secure` 旗標**
-
-`set_cookie` 目前寫死 `secure=False`（本機 http 專用），HTTPS 上應改為 `True`。
-
-**5. 映像檔內容**
-
-必須包含 `frontend/` 與**完整的 `node_modules/`**（`/vendor` 掛的是 node_modules 本身，不是打包產物）。兩個掛載都是條件式的，**缺了不會報錯**：`frontend/` 缺 → `/` 回 404 `Frontend not built`；`node_modules/` 缺 → `/vendor` 靜默不掛載，頁面出得來但 Agent Graph 不畫圖。
-
-**6. session 與登入狀態**
-
-容器檔案系統是 ephemeral，且登入 token 預設只在行程記憶體，需依 [多實例部署](#多實例部署session-與登入狀態改存-blob選用) 改成 Blob——但那一段本身也只在本機跑過。
-
-**7. 確認 `SGV2_E2E_MODE` 沒設**
-
-預設就是關的，但別跟著本機 `.env` 一起帶進正式環境——`POST /api/e2e/reset` 會清資料。
-
----
-
-## 5. 啟動
+## 4. 啟動與登入
 
 首次下載專案或 `package-lock.json` 更新後，先安裝前端執行期套件：
 
@@ -384,6 +221,75 @@ uv run python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 6274
 > 若上面這行指令因為下載套件失敗而無法啟動（而非程式錯誤），請見 [6. 疑難排解](#6-疑難排解公司網路擋住公開-pypi)。
 
 開啟瀏覽器：<http://localhost:6274/>
+
+登入：
+
+1. 點前端的登入按鈕（或造訪 `/api/auth/login`）開始 Microsoft 登入。
+2. 完成授權後會自動導回並設定登入 cookie，即可開始使用。
+3. 登出：呼叫 `POST /api/auth/logout`。
+
+---
+
+## 5. 選用功能
+
+### 5.1 路由測試
+
+TEST 階段把正 / 負面範例送到 runtime，看 Router 是否路由到本 skill。不設定時，其他流程照常運作，只是無法跑路由測試。
+
+| 變數 | 說明 |
+| --- | --- |
+| `SKILL_SELECTION_TEST_RUN_URL` | runtime 的 `/run` 端點。任何實作 `/run` 契約的端點都可以；可直連 EAA，也可經由 APIM 等閘道 |
+
+```dotenv
+SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
+# 經由 APIM 等閘道時
+#SKILL_SELECTION_TEST_RUN_URL=https://example-apim.azure-api.net/coding-tool-apis/run
+```
+
+- 路由測試送的是**登入者的委派 token**，只看得到登入者被授權的 skill。儲存時會自動 grant 給儲存者，請用同一個帳號儲存與測試。
+- 整批回 HTTP 502 且提到 token 被拒時，請聯絡 EAA 管理員查 ACA log 的 `[oauth] Token rejected:`，並確認 [2.6](#26-eaa-mcp) 的 audience 設定。
+- runtime 必須符合的契約見 [04-agent-mechanism.md](04-agent-mechanism.md#34-testrouter-endpoint-路由盲測)。
+
+### 5.2 ACA 環境變數查詢與 script 型 skill
+
+設定後，PREPARE 階段會透過 EAA MCP 讀取 EAA 所在 Azure Container Apps（ACA）應用**目前已有的環境變數**與 **OBO scope 註冊表**，讓 Agent 分辨 skill 變數是「ACA 已有（reuse）」或「需新增（add）」。值請向 EAA 管理員取得。
+
+| 變數 | 說明 |
+| --- | --- |
+| `ACA_APP_NAME` | EAA 的 Container App 名稱 |
+| `ACA_RESOURCE_GROUP` | 該 app 的資源群組 |
+| `ACA_SUBSCRIPTION_ID` | 該 app 的訂閱 ID |
+
+- 這三個加上 `MCP_ENDPOINT` **四個都填才會啟用**；任一留空就不查詢，其他流程不受影響。
+- **Script 型 skill**（`SKILL.md` 加上一支 `scripts/<name>.py`）需要這個查詢。只有當 ACA 上 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 都是 `true` 時才會產出 script 型；未啟用查詢時一律是 inline。旗標如何影響 PREPARE 與儲存，見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。
+
+### 5.3 多實例部署
+
+預設 session 存本機檔案、登入狀態只存在**行程記憶體**，兩者都不跨實例共享。要跑多個後端實例時，把兩者改存 Blob，否則使用者被路由到不同實例時會看不到自己的 session 或被登出。
+
+只要改這兩行，就會沿用 `AZURE_STORAGE_ACCOUNT_URL` 與 `AZURE_BLOB_CONTAINER`：
+
+```dotenv
+SGV2_SESSION_STORE=blob
+SGV2_AUTH_STORE=blob
+```
+
+要分開存放時才需要下列變數：
+
+| 變數 | 預設值 | 說明 |
+| --- | --- | --- |
+| `SGV2_SESSION_BLOB_CONTAINER` | 沿用 `AZURE_BLOB_CONTAINER` | session 專用容器 |
+| `SGV2_SESSION_BLOB_PREFIX` | `sessions` | session blob 前綴；不像 skill 的 `skills/` 前綴受 SQL 計算欄位限制，可自由改名 |
+| `SGV2_AUTH_STORAGE_ACCOUNT_URL` | 沿用 `AZURE_STORAGE_ACCOUNT_URL` | auth 專用儲存體帳戶 |
+| `SGV2_AUTH_STORAGE_CONNECTION_STRING` | 沿用 `AZURE_STORAGE_CONNECTION_STRING` | 改用連線字串驗證時才設；設了就優先於帳戶 URL |
+| `SGV2_AUTH_BLOB_CONTAINER` | 依序沿用 `SGV2_SESSION_BLOB_CONTAINER`、`AZURE_BLOB_CONTAINER` | auth 專用容器 |
+| `SGV2_AUTH_BLOB_PREFIX` | `auth` | auth blob 前綴 |
+
+寫入位置分別是 `<container>/sessions/<owner_upn>/<session_id>.json` 與 `<container>/auth/<kind>/<key>.json`，與 skill 的 `skills/` 前綴互不重疊。
+
+> session 與 auth 的 Blob 使用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，同樣不採用 `AZURE_*` service principal，權限需求與 [2.5](#25-azure-blob) 相同。
+
+> **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
 
 ---
 
@@ -471,10 +377,51 @@ curl.exe -I https://files.pythonhosted.org/
 
 ---
 
-## 7. 登入流程（使用者操作）
+## 附錄 A：改寫為雲端版本（本 repo 未實測）
 
-1. 進入網站後，造訪 `/api/auth/login`（或前端的登入按鈕）開始 Microsoft 登入。
-2. 完成 Microsoft 授權後，會自動導回並設定登入 cookie，即可開始使用。
-3. 登出：呼叫 `POST /api/auth/logout`。
+> **本 repo 是本機執行版本。** 客戶可依自己的實務需求，將它改寫並部署至 Azure Container Apps、App Service 等雲端環境；但本 repo **未實測任何雲端部署**，也不提供 Dockerfile / IaC / CI。下面列的是審視程式碼後，改寫時需要處理的事項，供參考；清單未必完整。
 
-> 登入後系統如何把登入換成 Token 並傳進後端，請見 [03-architecture.md](03-architecture.md) 的「登入與 Token 流程」章節。
+**架構上本來就可行的部分**：前端是純靜態 HTML/CSS/ES module（無 build step），由 `backend/main.py` 自己掛載後提供：`/` → `frontend/index.html`、`/assets` → `frontend/`、`/vendor` → `node_modules/`。因此**不需要另一個前端主機服務**，一個容器同時 serve 前端與 API 即可。
+
+**雲端上的身分（依程式碼推導）**：Foundry 與 SQL 仍使用 `.env` 的 `AZURE_*` service principal，不會自動改用 Managed Identity；Blob 沒有 `az login` 可用，會落到應用程式的 Managed Identity，需將 **Storage Blob Data Contributor** 指派給它（另見下方第 1 點）。
+
+### 改寫時需處理的事項
+
+**1. Blob 的 Managed Identity 拿不到 token（需改程式，無法用設定繞過）**
+
+容器裡沒有 `az login`，`backend/blob_store.py` 的 `DefaultAzureCredential(exclude_environment_credential=True)` 只能落到 `ManagedIdentityCredential`。但 azure-identity 的 `DefaultAzureCredential` 會把 `AZURE_CLIENT_ID` 當成 **user-assigned MI 的 client id**：
+
+```python
+# azure/identity/_credentials/default.py
+managed_identity_client_id = kwargs.pop(
+    "managed_identity_client_id", os.environ.get(EnvironmentVariables.AZURE_CLIENT_ID)
+)
+```
+
+而本專案的 `AZURE_CLIENT_ID` 是 SQL / Foundry 那支 **App Registration**，不是任何 UAMI，所以 MI 端點會被要求發一個不存在的身分的 token 而失敗，導致所有 `SKILL.md` 讀寫壞掉。這**不能靠調整環境變數解決**（App Registration 與 UAMI 是不同物件，client id 不可能相同），必須改程式明確指定要用哪個 MI。
+
+附帶一個不一致：`backend/session_store.py` 與 `backend/auth_store.py` 用的是明寫的 `ManagedIdentityCredential()`（不帶 client id），走 **system-assigned**，與 skill store 的行為不同。
+
+**2. uvicorn 綁定位址**
+
+[4. 啟動與登入](#4-啟動與登入) 的指令是 `--host 127.0.0.1`。容器內這樣綁，ingress 從外面連不進來，健康檢查直接失敗。需改 `--host 0.0.0.0` 並與 ingress 的 `targetPort` 對齊。
+
+**3. Redirect URI 與反向代理**
+
+App Registration 要加上正式網域的 `https://<fqdn>/api/auth/callback`。另外 `public_url_for()` 直接用 `request.url_for` 組 redirect_uri；TLS 在 ingress 終止，若未處理 `X-Forwarded-Proto` 會組出 `http://…` 而與 Entra 註冊值不符——啟動時需帶 `--proxy-headers --forwarded-allow-ips=…`。
+
+**4. 登入 cookie 的 `secure` 旗標**
+
+`set_cookie` 目前寫死 `secure=False`（本機 http 專用），HTTPS 上應改為 `True`。
+
+**5. 映像檔內容**
+
+必須包含 `frontend/` 與**完整的 `node_modules/`**（`/vendor` 掛的是 node_modules 本身，不是打包產物）。兩個掛載都是條件式的，**缺了不會報錯**：`frontend/` 缺 → `/` 回 404 `Frontend not built`；`node_modules/` 缺 → `/vendor` 靜默不掛載，頁面出得來但 Agent Graph 不畫圖。
+
+**6. session 與登入狀態**
+
+容器檔案系統是 ephemeral，且登入 token 預設只在行程記憶體，需依 [5.3 多實例部署](#53-多實例部署) 改成 Blob——但那一段本身也只在本機跑過。
+
+**7. 確認 `SGV2_E2E_MODE` 沒設**
+
+預設就是關的，但別跟著本機 `.env` 一起帶進正式環境——`POST /api/e2e/reset` 會清資料。

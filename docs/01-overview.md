@@ -152,4 +152,4 @@ flowchart TD
 | **RLS** | Row-Level Security，資料列級隔離；以使用者 email 比對 `dbo.user_skill_grants`。 |
 | **Patch（V4A）** | AI 對 `SKILL.md` 的差異修改格式，可預覽、接受、還原。 |
 | **Skill 形式（inline / script）** | inline：程式碼以 sample code 寫在 `SKILL.md` 裡；script：`SKILL.md` 加上原樣出貨的 `scripts/<name>.py`。一個 skill 的形式進 DRAFT 後就固定，不支援互轉。 |
-| **EAA script 旗標** | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED`；兩者皆為 `true` 才能產出與儲存 script 型 skill。見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)。 |
+| **EAA script 旗標** | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED`；兩者皆為 `true` 才能產出與儲存 script 型 skill。見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。 |

@@ -133,7 +133,7 @@ uv run --no-sync python scripts/sync_reference.py check
 | `_declares_children(content)` | `backend.topology.declared_children()`、`tests/unit/test_topology_differential.py` | Parser fence/YAML 規則、`metadata.children` 所在位置、可接受型別、空值語意、回傳型別、改名或移除。這是目前唯一由本 repo 測試直接執行的 reference function。 |
 | `_declared_child_names(content)`（upstream 1.14 新增） | `backend.topology.declared_children()`、scenario 產生/修改流程 | 若 runtime 不只判斷 parent，而開始消費 children 名單作白名單，需檢查 Generator 是否產出完整、正確、可解析的 child/dependency 名單。 |
 | `_dedupe_private_over_global(metas)` | `backend.skills_repo.list_skills_for_user()`、private/global skill 規則 | 同名 skill precedence、`skill_key`、owner/public/grant 語意改變。Generator 的 SQL 查詢複刻 `v_my_skills` WHERE，不能只更新 snapshot。 |
-| `SkillsProviderFactory._fetch_allowed_skills(sql_token)` | `backend.skills_repo.py`、`db/skill_rbac_schema*.sql` | `v_my_skills` SELECT 欄位、RLS predicate、token principal、`is_internal`、`blob_path/blob_prefix`、cache key 改變。Schema migration 必須先於 runtime code。 |
+| `SkillsProviderFactory._fetch_allowed_skills(sql_token)` | `backend.skills_repo.py`、EAA repo 的 SQL schema | `v_my_skills` SELECT 欄位、RLS predicate、token principal、`is_internal`、`blob_path/blob_prefix`、cache key 改變。Schema migration 必須先於 runtime code。 |
 | `list_allowed_skills_full(sql_token)` | Generator skill catalog、frontmatter contract | 回傳 metadata、`_is_internal`、`_files`、description source of truth 或單筆錯誤降級改變。 |
 | `get_skill_content(sql_token, skill_name)` | Scenario progressive disclosure、ACL | 不存在/無權限行為、internal child 可見性、private-over-global 選擇或完整 SKILL.md 格式改變。 |
 | `_fetch_skill_content(meta)` | `backend.blob_store.py`、cache/version contract | Cache key 不再使用 `(skill_key, updated_at)`、Blob decode/path、ETag/version source 改變。特別檢查 private skill 是否可能撞 cache。 |
@@ -215,7 +215,7 @@ Upstream 1.14 新增 scenario 白名單收斂：指定 scenario 後，只 materi
 | snapshot 來源檔內容或版本改變 | 是，全部以同一 commit 整檔更新並記錄 provenance。 | 視以下契約而定。 | 不手摘單一 function。 |
 | `code_executor.py` / `mi_proxy.py` 的平台常數改變 | 是 | **是** | `check` 的 `restated` 報告點名 `backend/eaa_platform.py` 與對應 prompt；見 2.3。 |
 | `_declares_children`、`_declared_child_names`、scenario whitelist 改變 | 是 | **是** | 檢查 `backend/topology.py`、`backend/state_machine.py`、`backend/main.py`、scenario tests。 |
-| `v_my_skills`、RLS、`skill_key`、owner/public/internal 改變 | 是 | **是** | 檢查 `backend/skills_repo.py`、`backend/skills_index.py`、DB migrations；SQL schema 先部署。 |
+| `v_my_skills`、RLS、`skill_key`、owner/public/internal 改變 | 是 | **是** | 檢查 `backend/skills_repo.py`、`backend/skills_index.py`、EAA repo 的 SQL schema；SQL schema 先部署。 |
 | Blob path/prefix、private folder、skill files 過濾改變 | 是 | **是** | 檢查 `backend/blob_store.py`、save/import 流程與 folder tests。 |
 | `list_skills`、`fetch_skill`、`run_workflow` 對外 contract 改變 | 是 | **是** | 檢查 `backend/testing.py`、Router runtime/MCP payload/response parser 與 API tests。 |
 | Gatekeeper 產出的 SKILL.md/frontmatter schema 改變 | 是 | 可能 | 若 Generator 會 import、modify 或 lint 該產物，就檢查 parser/state machine。 |

@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | **產出形式** | 依素材與 EAA 旗標自動判斷，進 DRAFT 後鎖定，不支援 inline ↔ script 互轉。Generator 不修改 script；要換 script，請更換 `code` 素材。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
 | **檢查** | script 須通過專屬 lint（S 系列：stdout 只輸出 JSON、`[NEEDS_INFO]` 以 exit 0 結束等），並與 `SKILL.md` 一起送 EAA lint。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
-| **儲存** | script 型每次儲存都重新確認 EAA 旗標。**所有 skill** 覆寫時都會比對 Blob 版本，載入後被改過（例如 Gatekeeper Addendum）就回 409，不會覆蓋。 | [02-setup.md](docs/02-setup.md#script-型-skill-的-eaa-旗標)、[03-architecture.md](docs/03-architecture.md) |
+| **儲存** | script 型每次儲存都重新確認 EAA 旗標。**所有 skill** 覆寫時都會比對 Blob 版本，載入後被改過（例如 Gatekeeper Addendum）就回 409，不會覆蓋。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#eaa-script-旗標)、[03-architecture.md](docs/03-architecture.md) |
 | **介面** | Materials、Checklist（Output form）、Files 分頁（`SKILL.md \| scripts/<name>.py`）與 Skill 清單（`[script]`）顯示目前形式與未滿足的條件。 | [01-overview.md](docs/01-overview.md) |
 
 ### 安全性調整
@@ -28,11 +28,11 @@
 
 | 項目 | 變更 | 詳細說明 |
 | --- | --- | --- |
-| **路由測試呼叫方式** | 使用者 token 只放在 `Authorization` header，body `credentials` 不再帶 token。收到 HTTP 401 時整批中止並回 502。 | [02-setup.md](docs/02-setup.md)（路由測試端點） |
+| **路由測試呼叫方式** | 使用者 token 只放在 `Authorization` header，body `credentials` 不再帶 token。收到 HTTP 401 時整批中止並回 502。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#34-testrouter-endpoint-路由盲測)（Runtime `/run` 契約） |
 | **Managed Identity** | 使用 `DefaultAzureCredential()` 的 skill 必須在 frontmatter 宣告 `metadata.mi_scopes`，只列實際用到的資源；Key Vault 一律禁止。不在平台 `MI_SCOPE_ALLOWLIST` 的資源不擋存檔，但 Agent 會附上部署說明。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md)（EAA 平台規則）、[10_format_spec.md](prompts/10_format_spec.md)（The Managed Identity Contract） |
 | **SKILL.md 生成規則** | 禁止讀取 3 個平台 secret；caller 的 `credentials` 鍵名不得使用 EAA 保留名稱；MI token 只能經 azure-identity 取得。對應 lint 規則 D4–D8、A15。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md)（EAA 平台規則） |
 | **執行環境規則** | 範例程式碼只能讀寫工作目錄、不在執行時安裝套件、不依賴使用者帳號資訊、不留背景行程（E1–E5）。E2–E4 **會擋存檔**，E1 只警告。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md)（EAA 執行環境規則） |
-| **儲存前檢查** | 先跑本機 lint，再呼叫 EAA 的 `lint_skill_package`：有 error 就擋下，warnings 由 Agent 轉述、不擋；取不到判定一律 fail-closed（503）。 | [02-setup.md](docs/02-setup.md#eaa-skill-lint儲存必要) |
+| **儲存前檢查** | 先跑本機 lint，再呼叫 EAA 的 `lint_skill_package`：有 error 就擋下，warnings 由 Agent 轉述、不擋；取不到判定一律 fail-closed（503）。 | [03-architecture.md](docs/03-architecture.md#23-eaa-skill-lint) |
 
 > TEST 若要反映 EAA 正式環境，請維運在 `/run` 所打的 EAA 環境設定 `SUBPROCESS_UID_SANDBOX=true`（EAA 端 ACA 環境變數，本專案不需設定）。
 

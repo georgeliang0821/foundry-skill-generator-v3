@@ -61,6 +61,7 @@ flowchart LR
 | **Microsoft Foundry Project** | `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `DefaultAzureCredential()` 優先採用完整的 `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`；需另授予 Foundry project 或 agent data-plane 權限 |
 | **Azure SQL Database** | 與 Foundry 相同，即 `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `ActiveDirectoryServicePrincipal`；沒有 Managed Identity 或 `az login` fallback |
 | **Azure Blob Storage** | 本機為 `az login` 使用者；Azure 上為應用程式 Managed Identity | Blob credential 刻意排除 EnvironmentCredential，因此不使用上述 service principal |
+| **EAA MCP** | `MICROSOFT_*` App Registration 的 app-only token | client credentials 對自己換 `api://<app-id>/.default`；見 [2.4](#24-呼叫-eaa-mcp-的身分) |
 
 瀏覽器經 OAuth2 登入的使用者只負責網頁身分、Skill ACL 與 delegated/OBO token。這個使用者身分不會成為 Foundry、SQL 或 Blob 的連線身分。完整設定與角色需求見 [02-setup.md](02-setup.md)。
 
@@ -97,7 +98,7 @@ sequenceDiagram
 實際寫入時機與流程：【建立 / 修改內容 -> 整理 skill data -> upsert 到 dbo.skills -> 若為既有 skill 修改，更新 updated_at -> 回傳最新資料給系統渲染】。
 
 - **寫入時機**：REFINE 每個被接受的 patch、以及按下「儲存」都會雙寫 Blob + SQL（`save_skill_dual_write`）；DRAFT 被接受也雙寫。
-- **寫入前的關卡**（依序，任一失敗就不寫）：topology 驗證 → `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [02-setup.md](02-setup.md#script-型-skill-的-eaa-旗標)）→ EAA MCP `lint_skill_package`（errors 與 `status == "failed"` 擋；warnings 交給 Agent；取不到判定回 503；script 型要求 ruleset ≥ 1.1）。
+- **寫入前的關卡**（依序，任一失敗就不寫）：topology 驗證 → `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)）→ EAA MCP `lint_skill_package`（見 [2.3](#23-eaa-skill-lint)）。
 - **Script 型的寫入順序**：`SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
 - **new vs modify**：new skill 首次儲存是 INSERT（同時寫 created_at / updated_at）；modify 既有 skill 是覆寫內容的 UPDATE。
 - **upsert 行為**：`upsert_skill` 是 `MERGE dbo.skills`，比對鍵是 `skill_key`：不存在 -> INSERT `(skill_name, owner_upn, is_public, enabled)`；已存在 -> UPDATE `is_public` / `enabled`，並**設 `updated_at = SYSUTCDATETIME()`**。
@@ -121,6 +122,31 @@ flowchart LR
 - **前端兩段式**：draft 卡片上的「Public」勾選框不會隨儲存送出。使用者勾選並在確認對話框按下確定後，前端先以**私有**接受 draft，成功後才另外呼叫 PATCH 公開。順序是 fail-safe 的——PATCH 失敗時 skill 仍是私有，前端會提示可從 Skill access 重試。
 - **降回私有時補 grant**：改成 `is_public = 0` 會同時補一筆呼叫者的 grant，否則作者會失去自己 skill 的存取權。
 - **internal children 跟隨 parent**：PATCH 會讀取 Blob 上該 skill 的 `children`，只對**不在 host catalog 的 internal child** 套用同一個可見性（公開時一起公開、降回私有時一起降並補 grant）。已在 catalog 的 child 屬於所有人，不由這支 parent 重新界定範圍。單一 child 失敗不會中斷其他 child，結果會回在 `children` / `failed_children`。
+
+### 2.3 EAA skill lint
+
+儲存（`save_skill_dual_write()`）在寫入 Blob 前，先跑本專案的 skill lint，再透過 `MCP_ENDPOINT` 呼叫 EAA 的 MCP tool `lint_skill_package`，用 EAA 自己的規則檢核整個 skill package（實作：`backend/eaa_platform.py`、`backend/mcp_jsonrpc.py`）。本機不需要 EAA repo。
+
+- Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。有 script 但 EAA 回報的 `ruleset_version` 低於 `1.1`（還沒有 script 檢核）時回 **HTTP 503** 拒絕儲存，因為無法驗證。
+- **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
+- `status == "failed"`（request 或 package 不合法）回 **HTTP 400**，訊息列出 EAA 的 `error`。
+- 本機 skill lint 或 EAA lint 有 ERROR 時回 **HTTP 400**，`detail` 為 `{kind: "skill_lint_failed" | "eaa_lint_failed", recoverable: true, message, issues}`。前端不顯示原始規則文字，而是告知使用者「未儲存、已請 Agent 修正」，並把 `issues` 送回 Agent：DRAFT 尚未儲存時重送完整 `propose_skill_draft`，之後則用 `propose_patch`。
+- `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。本機的 `MI_SCOPE_ALLOWLIST` 只影響本機 lint 的 D7 INFO；EAA 端用的是 ACA 上的值。
+- `ruleset_version` 記在 session 的 `eaa_ruleset_version` 與 `skill.save.done` / `mcp.lint.done` log。
+- 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
+- pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
+- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
+
+### 2.4 呼叫 EAA MCP 的身分
+
+呼叫 `list_aca_environment_variables` 與 `lint_skill_package` 時帶的都是 **app-only token**，由 `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET`（也就是負責網頁登入的那支 App Registration）以 **client credentials** 對**自己**換取，scope 為 `api://<app-id>/.default`。
+
+- **為什麼不是使用者委派身分**：PREPARE 進入時的查詢跑在背景執行緒，只拿得到 session，沒有 HTTP request 也沒有使用者 token，等同無人值守。手動重新整理（`POST /api/sessions/{id}/aca-env`）雖然有登入者，仍刻意沿用同一個 app-only 身分，避免兩條路徑結果不一致。
+- **audience 從哪來**：預設把 `MICROSOFT_OBO_SCOPE` 去掉 `/user_impersonation` 得到 `api://<app-id>`。MCP 伺服器驗證的正是這個值。若兩者不同支 app，才需要另外設 `MCP_OAUTH_AUDIENCE` 覆寫。
+- **token 內容**：app 對自己做 client credentials，取得的 token **沒有 `scp` 也沒有 `roles`**。MCP 伺服器的 token 驗證不檢查這兩者，因此可以通過。
+- **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
+- **與路由測試無關**：TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；app-only token 沒有使用者身分，不能用在那條路徑上。
+- **平台 secret 不會交給 Agent**：ACA 查詢到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
 
 ---
 
@@ -201,8 +227,9 @@ flowchart LR
 
 - `SKILL.md` **全文存在 Blob**，SQL 只存可查詢的 metadata 與權限。**schema v2 已移除 `description` 與 `version` 欄位**，description 的唯一真實來源是 Blob 上 `SKILL.md` 的 frontmatter。
 - 可見性語意 = `enabled = 1 AND (有未過期的 grant OR is_public = 1)`。
+- **連線身分 ≠ 寫入的使用者**：`backend/db.py` 以 `AZURE_*` service principal（`ActiveDirectoryServicePrincipal`）連線，只決定能不能讀寫資料表。`dbo.user_skill_grants` 的 `user_upn` / `granted_by` 寫的是目前登入者的 email（見 [6](#6-登入與-token-流程)），以 SQL 參數帶入；因此所有人共用同一個連線，每筆 grant 仍記成各自的 email。
 - **為什麼應用程式不直接查 `v_my_skills`**：本應用以**單一 service principal**（`ActiveDirectoryServicePrincipal`）連線 SQL，所有使用者共用同一個 DB 身分，因此 `SUSER_SNAME()` 命中 RLS 的 bypass 分支，RLS 不會替我們做逐人過濾；而 `v_my_skills` 也沒有 `user_upn` 欄位可供外部帶入條件。`skills_repo` 因此在 base table 上**複刻**該 view 的 WHERE 條件，並顯式帶入 `g.user_upn = ?`。改動 view 的語意時，`skills_repo.list_skills_for_user` 必須同步跟著改。
-- **`skills/` 這個前綴被寫死在計算欄位公式裡**。應用程式的 `blob_store.BLOB_ROOT` 必須與其一致，否則 SQL 的 `blob_path` 會指向應用程式從未寫入的位置，而且**不會有任何錯誤**。因此 `AZURE_BLOB_PREFIX` 若設成 `skills` 以外的值，服務會在啟動時直接拋錯。
+- **`skills/` 這個前綴被寫死在計算欄位公式裡**。應用程式的 `blob_store.BLOB_ROOT` 必須與其一致，否則 SQL 的 `blob_path` 會指向應用程式從未寫入的位置，而且**不會有任何錯誤**。因此前綴不提供設定；`AZURE_BLOB_CONTAINER` 若以 `container/prefix` 形式帶入 `skills` 以外的前綴，服務會在啟動時直接拋錯。
 - `is_internal` 是**可發現性**（是否投影給宿主的 `list_skills`），**不是權限**；權限一律看 grant 與 `is_public`。存 scenario skill 時，`save_skill_dual_write()` **只會**把 `PrepareBrief.delegation` 宣告的 child（真正被委派工作的能力層技能）以 `upsert_skill(child, is_internal=True)` 標為內部。`metadata.children` 本身是**依賴白名單**，還包含 `html-ppt` 這類通用技能；把它們標成內部會讓它們從**所有人**的 `list_skills` 消失，因此不在標記範圍內。孤兒提示只在「該 child 離開白名單**且**目前 `is_internal = 1`」時觸發；選 `make_capability` 會改回 `is_internal=False`。`upsert_skill(is_internal=None)` 代表「不動既有值」，新列則取 schema 預設 `0`。
 - 刪除 `dbo.skills` 的一列時，`user_skill_grants` 的相關授權因 FK CASCADE 一併清除。
 
@@ -210,7 +237,7 @@ flowchart LR
 
 ## 6. 登入與 Token 流程
 
-本系統採 **OAuth2 授權碼流程 + PKCE** 登入。本節只說明**流程**；App Registration 與環境變數的**設定**請見 [02-setup.md](02-setup.md) 的「3.3 Entra App Registration 設定」。
+本系統採 **OAuth2 授權碼流程 + PKCE** 登入。本節只說明**流程**；App Registration 與環境變數的**設定**請見 [02-setup.md](02-setup.md#21-登入用-app-registration)。
 
 ### 流程概觀
 

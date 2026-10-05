@@ -120,8 +120,8 @@ UPN resolution order is defined once in [backend/acl.py](backend/acl.py):
 `E2E_DEFAULT_UPN`. UPNs are lowercased everywhere; storing mixed case in
 `dbo.user_skill_grants` produces silent 403s. Every skill read goes through
 `assert_can_access`, which is cached for 60s — invalidate the cache after changing
-grants. Schema changes are additive migration files in [db/](db/); add a new
-`v2.x migration.sql` instead of editing an existing one.
+grants. The SQL schema is owned by the EAA repo; this repo only mirrors it in
+`backend/skills_repo.py` and the `fake_sql` fixture, so keep both in step with it.
 
 ## Naming
 
