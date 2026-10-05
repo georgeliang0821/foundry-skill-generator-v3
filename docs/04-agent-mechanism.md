@@ -39,116 +39,25 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 
 ### 業務輸入來源：credentials / request
 
-> **一句話：** Child skill 需要的每個業務欄位（例如 `operation`、`description`），都要在
-> SKILL.md 裡宣告「值從哪個管道傳進來」——`credentials` 或 `request`。Host 依這份宣告
-> 放資料，Child 依這份宣告取資料，lint 依這份宣告檢查程式。
-
-#### 兩種來源比較
+Skill 執行時需要的業務資料（例如要做哪個操作、哪一筆單號、一段說明文字）有兩種傳入方式。
+PREPARE 階段 Agent 會列出每個欄位與建議的方式請你確認；可以全部用同一種，也可以逐欄位混用。
 
 | | `credentials` | `request` |
 | --- | --- | --- |
-| **是什麼** | 呼叫 Child 時附帶的具名 key/value 資料（例如 key `TASK_JSON`）。 | 當次呼叫 Child 的任務內容：指令＋一段明確標示的業務資料。 |
-| **Python 怎麼拿到值** | 直接從同名環境變數讀取。 | Python **讀不到** request。要由 Child 的 Coding Agent 在執行前，把值從 request 抄進程式裡的 `request_inputs` 樣板，Python 再從樣板讀取。 |
-| **常見誤解** | 名稱叫 credentials，但**不一定是機密**；本專案本來就用它傳業務資料，也不代表內容都經過身分驗證。 | 不是整個 HTTP request，也不是 Python 自動可讀的全域變數；Agent 轉抄時不保證原文一字不差。 |
+| **怎麼傳** | 呼叫方把值放進具名的 key/value，程式直接讀取，值原封不動。 | 呼叫方用自然語言把值寫在任務內容裡，由 Agent 讀出後交給程式；不保證一字不差。 |
+| **適合** | 抄錯一個字就會讀錯或改錯資料的值：操作類型、各種 ID、選項代碼、日期、金額、是／否，以及清單等結構化資料。 | 給人看的自由文字，措辭略有差異仍可接受：說明、事由、摘要、搜尋關鍵字。長文或含引號、換行的文字也比較好傳。 |
+| **例子** | `operation: UPDATE`、`ticket_id: INC0012345`、`amount: 1200` | 「說明：客戶反映登入後畫面空白，已清除快取仍無效」 |
 
-`source` 回答的是「值**從哪裡來**」，**不是**「值是否敏感」。token、部署設定、平台驗證身分
-不屬於業務欄位，照各自既有規則處理，不能改走 request；因此 `aca_env`、`obo_token`、
-`platform_identity` 不能設為 `source: request`。
+**怎麼選：** 問自己「這個值抄錯一個字，後果嚴不嚴重？」嚴重就選 credentials，只是內容措辭就選
+request。拿不準時選 credentials，這也是預設值。
 
-#### 三條基本規則
+- 名稱叫 credentials，但不代表是機密，它只是一種傳值管道。
+- 每個欄位只有一個來源。缺值時不會從另一邊補，而是由 skill 回報缺少哪個欄位。
+- token、部署設定、登入身分不是業務資料，不在這個選擇範圍內。
 
-1. **逐欄位指定，可以混用。** 例如 `operation` 走 credentials、`description` 走 request。
-2. **每個欄位只有一個來源。** 不合併兩邊的值；缺值時也不從另一個來源補（沒有 fallback）。
-3. **沒宣告就是 credentials。** 沒有明確來源契約的舊 child 維持既有 credentials 行為，
-   parent 不能單方面改成 request。
-
-#### 在 SKILL.md 裡怎麼宣告
-
-在既有的 `## Required Inputs` 裡放一個 `input-bindings` 區塊，這是唯一的機器可讀來源清單：
-
-````markdown
-## Required Inputs
-```input-bindings
-- name: operation
-  source: credentials
-  credentials_key: TASK_JSON
-  payload_field: operation
-  required: true
-- name: description
-  source: request
-  required: true
-```
-````
-
-| 欄位 | 意思 |
-| --- | --- |
-| `name` | 業務欄位名稱。request 欄位會用它當 request 資料區的標籤，以及 `request_inputs` 的 key。 |
-| `source` | `credentials` 或 `request`。 |
-| `credentials_key` | 只用於 credentials。值放在哪個 credentials key；未填時等於 `name`。 |
-| `payload_field` | 只用於 credentials。未填＝取該 key 的整個字串；有填＝該 key 是 JSON object，取其中這個**頂層**成員（不支援巢狀路徑）。 |
-| `required` | 是否必填。 |
-
-上例的意思：`operation` 從 credentials key `TASK_JSON`（JSON 字串）裡的 `operation` 成員取得；
-`description` 從 request 取得。
-
-欄位型別、合法值、條件式必填與缺值代碼，仍寫在 child 既有的輸入契約文字中。重複的來源、
-重複的 YAML 鍵或無效宣告都會被拒絕。
-
-#### request 欄位在程式裡長什麼樣
-
-Request 不會自動變成 Python 參數或環境變數。產生的程式是一個**樣板**：
-
-```python
-def main():
-    # Coding Agent 執行前，把 None 換成當次 request 裡的值
-    request_inputs = {"description": None}
-    description = request_inputs.get("description")
-    if not description:
-        print("[NEEDS_INFO] missing=DESCRIPTION")
-        return
-    ...  # 驗證通過後才建立 client、呼叫外部服務
-```
-
-- `main()` 不帶參數；`request_inputs` 只列宣告為 request 的欄位，初始值都是 `None`。
-- 如果樣板沒被填值就執行，必須在任何外部動作**之前**輸出 `[NEEDS_INFO] missing=<欄位代碼>`
-  並結束，不能拿範例資料繼續跑。
-
-#### 端到端：Host 呼叫 Child 時誰做什麼
-
-| Child 宣告 | Host 怎麼準備輸入 | Child 怎麼取值 |
-| --- | --- | --- |
-| `source: request` | 把值（如 `operation: READ`）放進 request 的明確資料區。 | Coding Agent 從 request 取值、填入 `request_inputs` 樣板，Python 再讀取。 |
-| `source: credentials` | 把值放進宣告的 credentials key；有 `payload_field` 時，放進該 key 的 JSON 字串中對應的頂層成員。 | Python 從對應環境變數讀取；有 `payload_field` 才解析 JSON 取成員。 |
-
-- 混用時，每個欄位各自依宣告放置，不能因為 `operation` 走 request 就把其他欄位一起搬過去。
-- 缺值時遵循 child 的 `[NEEDS_INFO]` 契約，不得自行切換來源補值。
-- Scenario（parent）只讀取 child 的契約並記錄在 delegation 的 `input_bindings`，不能覆寫來源，
-  也不在 parent 重建欄位 schema。Host 先收集缺值再依契約送出；child 收到後仍要自己再驗證一次。
-
-> ⚠️ 上表是 scenario 指示 Host 與 Child **應該**遵循的行為，**不是** runtime 看到 `source`
-> 就自動搬移資料。來源宣告、scenario 的呼叫指示、child 的取值／驗證程式三者必須自己保持一致。
-
-#### Agent 在 PREPARE 怎麼問使用者
-
-來源設定在 PREPARE 記錄；之後來源若有變更，原本的確認會被清除，要重新確認。對話規則如下：
-
-1. 業務輸入來源要**單獨問**，不和部署／身分設定綁在一起。使用者接受整套 Managed Identity
-   建議，**不算**確認了來源。
-2. 發問前先列出每個業務欄位及建議來源，再讓使用者選：全部 credentials、全部 request，或逐欄位混合。
-3. 使用者只回「混合」但沒說清楚哪個欄位走哪邊時，必須先補問，不能自行推斷。
-
-這些是寫在 prompt 裡的對話規則（[prompts/12_input_sources.md](../prompts/12_input_sources.md)）；
-靜態 prompt 測試通過，不代表真實模型每次回覆都會遵守。
-
-#### Lint 能檢查什麼、不能檢查什麼
-
-| 規則 | 擋下的情況 |
-| --- | --- |
-| `A13` | `input-bindings` 契約本身無效。 |
-| `A14` | 缺少 `request_inputs` 樣板、宣告與樣板綁定不符、缺少對應的缺值代碼，或樣板裡放了可直接執行的範例值。 |
-
-這些都是**靜態結構檢查**，不能證明完整控制流程正確，也不能證明沒有副作用。既有的 `A12`
-（外部呼叫結果檢查）仍只是 advisory。
+實作細節：SKILL.md 的 `input-bindings` 宣告與 request 欄位的程式樣板見
+[prompts/12_input_sources.md](../prompts/12_input_sources.md)；對應的 lint 規則 `A13` / `A14` 在
+[skill_lint.py](../backend/skill_lint.py)。
 
 #### EAA 平台規則（D4–D8、A15）
 
@@ -179,12 +88,6 @@ EAA 的 `SUBPROCESS_UID_SANDBOX` 開啟後，腳本以一次性、沒有 `/etc/p
 | `E4` | `nohup`、`setsid`、`os.fork`、`start_new_session=True`、`daemon=True`。 |
 
 E5（產出檔必須是 work_dir 第一層的一般檔案）無法靜態判斷，只寫在產生規範。
-
-Request 仍存在於外層 tool-call JSON 中。混合來源可能省去內層文字 JSON envelope，
-但不保證外層序列化、模型抽取或 Python 編碼正確。本機測試只證明受控 literal 綁定
-與缺值樣板行為；尚無真實 Foundry 失敗 trace 或端到端長文保真驗證。L2/L3 路由測試
-不執行 child 業務流程，不可用來宣稱已驗證資料傳遞或寫入。提交後逾時可能已完成寫入，
-不能盲目自動重試。
 
 ---
 
