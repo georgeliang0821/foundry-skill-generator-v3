@@ -44,15 +44,15 @@
 
 這是一個本機執行、但**依賴雲端服務**的應用：
 
-| 服務 | 用途 | Generator 使用的身分 | 必要 |
-| --- | --- | --- | --- |
-| **Microsoft Foundry Project（Agent）** | AI 大腦：對話 orchestrator 與 PREPARE 階段的網路研究 | 後端 service principal（`AZURE_*`） | 是 |
-| **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 後端 service principal（`AZURE_*`），與 Foundry 共用 | 是 |
-| **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 本機 `az login` 帳號 | 是 |
-| **EAA MCP** | 儲存前用 EAA 的規則檢核 skill | 登入用 App Registration（`MICROSOFT_*`）的 app-only token | 是 |
-| **Router runtime endpoint** | TEST 階段的路由測試 | 網頁登入者的委派 token（`MICROSOFT_OBO_SCOPE`） | 選用 |
+| 服務 | 用途 | 必要 |
+| --- | --- | --- |
+| **Microsoft Foundry Project（Agent）** | AI 大腦：對話 orchestrator 與 PREPARE 階段的網路研究 | 是 |
+| **Azure SQL Database** | 儲存 Skill metadata（`dbo.skills`）與使用者授權（`dbo.user_skill_grants`） | 是 |
+| **Azure Blob Storage** | 儲存 `SKILL.md` 全文 | 是 |
+| **EAA MCP** | 儲存前用 EAA 的規則檢核 skill | 是 |
+| **Router runtime endpoint** | TEST 階段的路由測試 | 選用 |
 
-使用者透過 **Microsoft Entra ID** 登入。登入者的 token 只用來識別使用者、套用 Skill ACL，以及在路由測試時交給 runtime 做 OBO；**不會**被轉送給 Foundry、SQL 或 Blob。各身分的設定與權限見 [§2](#2-準備雲端資源)，實際使用的 credential 見 [03-architecture.md](03-architecture.md#雲端存取身分)。
+使用者透過 **Microsoft Entra ID** 登入。各身分要設定什麼、給什麼權限見 [§2](#2-準備雲端資源)；每個服務實際用哪個身分、哪個 credential 見 [03-architecture.md](03-architecture.md#雲端存取身分)。
 
 ---
 
@@ -264,6 +264,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 
 ### 5.3 多實例部署
 
+> **注意：本 Repo 實際以本機（`SGV2_SESSION_STORE=local`、`SGV2_AUTH_STORE=local`）測試為主。** 以下 Blob 模式的程式已開發完成，但**尚未實際部署測試**；啟用前請自行驗證。
+
 預設 session 存本機檔案、登入狀態只存在**行程記憶體**，兩者都不跨實例共享。要跑多個後端實例時，把兩者改存 Blob，否則使用者被路由到不同實例時會看不到自己的 session 或被登出。
 
 只要改這兩行，就會沿用 `AZURE_STORAGE_ACCOUNT_URL` 與 `AZURE_BLOB_CONTAINER`：
@@ -288,7 +290,7 @@ SGV2_AUTH_STORE=blob
 
 > session 與 auth 的 Blob 使用 `ChainedTokenCredential(ManagedIdentity, AzureCli)`，同樣不採用 `AZURE_*` service principal，權限需求與 [2.5](#25-azure-blob) 相同。
 
-> **目前限制**：Blob 模式的自動化測試覆蓋率仍不足（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
+> **目前限制**：Blob 模式沒有自動化測試（`tests/` 只涵蓋本機儲存），且 `POST /api/e2e/reset` 會強制切回本機 session 儲存，因此不能用 E2E reset 驗證 Blob 模式。
 
 ---
 

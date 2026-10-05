@@ -60,10 +60,12 @@ flowchart LR
 | --- | --- | --- |
 | **Microsoft Foundry Project** | `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `DefaultAzureCredential()` 優先採用完整的 `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`；需另授予 Foundry project 或 agent data-plane 權限 |
 | **Azure SQL Database** | 與 Foundry 相同，即 `.env` 中 `AZURE_CLIENT_ID` 對應的 service principal | `ActiveDirectoryServicePrincipal`；沒有 Managed Identity 或 `az login` fallback |
-| **Azure Blob Storage** | 本機為 `az login` 使用者；Azure 上為應用程式 Managed Identity | Blob credential 刻意排除 EnvironmentCredential，因此不使用上述 service principal |
+| **Azure Blob Storage（skill）** | 本機為 `az login` 使用者；雲端未實測，見 [02-setup.md 附錄 A](02-setup.md#附錄-a改寫為雲端版本本-repo-未實測) | `DefaultAzureCredential(exclude_environment_credential=True)`：刻意排除 EnvironmentCredential，因此不使用上述 service principal |
+| **Azure Blob Storage（session / auth，選用）** | 本機為 `az login` 使用者 | `ChainedTokenCredential(ManagedIdentityCredential(), AzureCliCredential())`；只在 `SGV2_SESSION_STORE` / `SGV2_AUTH_STORE=blob` 時使用，尚未實際測試（見 [02-setup.md 5.3](02-setup.md#53-多實例部署)） |
 | **EAA MCP** | `MICROSOFT_*` App Registration 的 app-only token | client credentials 對自己換 `api://<app-id>/.default`；見 [2.4](#24-呼叫-eaa-mcp-的身分) |
+| **Router runtime endpoint** | 網頁登入者的委派 token | 取自 `auth_store`，只放在 `Authorization: Bearer` header |
 
-瀏覽器經 OAuth2 登入的使用者只負責網頁身分、Skill ACL 與 delegated/OBO token。這個使用者身分不會成為 Foundry、SQL 或 Blob 的連線身分。完整設定與角色需求見 [02-setup.md](02-setup.md)。
+瀏覽器經 OAuth2 登入的使用者只負責網頁身分、Skill ACL 與 delegated/OBO token。這個使用者身分不會成為 Foundry、SQL 或 Blob 的連線身分。完整設定與角色需求見 [02-setup.md](02-setup.md#2-準備雲端資源)。
 
 ---
 
@@ -144,7 +146,7 @@ flowchart LR
 - **為什麼不是使用者委派身分**：PREPARE 進入時的查詢跑在背景執行緒，只拿得到 session，沒有 HTTP request 也沒有使用者 token，等同無人值守。手動重新整理（`POST /api/sessions/{id}/aca-env`）雖然有登入者，仍刻意沿用同一個 app-only 身分，避免兩條路徑結果不一致。
 - **audience 從哪來**：預設把 `MICROSOFT_OBO_SCOPE` 去掉 `/user_impersonation` 得到 `api://<app-id>`。MCP 伺服器驗證的正是這個值。若兩者不同支 app，才需要另外設 `MCP_OAUTH_AUDIENCE` 覆寫。
 - **token 內容**：app 對自己做 client credentials，取得的 token **沒有 `scp` 也沒有 `roles`**。MCP 伺服器的 token 驗證不檢查這兩者，因此可以通過。
-- **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。
+- **未設定時**：若 `MICROSOFT_OBO_SCOPE` 與 `MCP_OAUTH_AUDIENCE` 皆為空，就退回匿名呼叫（相容於不要求驗證的 MCP 部署）。這只在 MCP server 設 `MCP_AUTH_ENFORCE=off` 時可用；`challenge` / `validate` 下會收到 HTTP 401。
 - **與路由測試無關**：TEST 階段呼叫 Router runtime endpoint 時送的是**使用者委派 token**，供 runtime 做 OBO 交換；app-only token 沒有使用者身分，不能用在那條路徑上。
 - **平台 secret 不會交給 Agent**：ACA 查詢到的變數清單會先濾掉 `OBO_CLIENT_SECRET`、`TEAMS_NOTIFY_WEBHOOK_URL`、`LOGIC_APP_SKILL_REVIEW_URL` 再放進 prompt。它們存在於 ACA app 上，但 EAA 已從 skill 執行環境移除，列出來只會誘導 Agent 把它們當成可重用的 `aca_env`。`OBO_SCOPE_REGISTRY` 的值是公開的架構設定，其 key 同時用來判斷 caller 的 `credentials` 鍵名是否會被 EAA 丟棄（lint A15）；取不到時退回 `AZURE_SQL_ACCESS_TOKEN`、`GRAPH_ACCESS_TOKEN`。
 
@@ -202,7 +204,7 @@ flowchart LR
 
 ---
 
-## 5. 資料庫細節（Azure SQL — Skill RBAC schema v2.2）
+## 5. 資料庫細節（Azure SQL）
 
 | 資料表 / View | 欄位 | 用途 |
 | --- | --- | --- |
