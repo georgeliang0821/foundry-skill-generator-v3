@@ -125,9 +125,8 @@ def declared_mi_scopes(skill_md: str) -> list[str]:
 
 
 def mi_scope_allowlist() -> frozenset[str]:
-    """The ACA's MI_SCOPE_ALLOWLIST when mirrored into .env, else the platform default."""
-    raw = os.getenv("MI_SCOPE_ALLOWLIST") or DEFAULT_MI_SCOPE_ALLOWLIST
-    resources = {normalize_mi_resource(item) for item in raw.split(",")}
+    """The platform default; EAA's lint reports against the ACA's real MI_SCOPE_ALLOWLIST at save."""
+    resources = {normalize_mi_resource(item) for item in DEFAULT_MI_SCOPE_ALLOWLIST.split(",")}
     return frozenset(resources - {""} - MI_HARD_DENIED_RESOURCES)
 
 

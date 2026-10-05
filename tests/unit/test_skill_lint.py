@@ -1140,8 +1140,7 @@ def test_d7_rejects_key_vault() -> None:
     assert _errors(lint_skill(md, SkillKind.CAPABILITY), "D7") == ["https://vault.azure.net"]
 
 
-def test_d7_reports_a_resource_outside_the_default_allowlist_as_a_deployment_note(monkeypatch) -> None:
-    monkeypatch.delenv("MI_SCOPE_ALLOWLIST", raising=False)
+def test_d7_reports_a_resource_outside_the_default_allowlist_as_a_deployment_note() -> None:
     md = _with_scopes("https://storage.azure.com", "https://search.azure.com")
     issues = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D7"]
     assert [(i.severity, i.detail) for i in issues] == [("info", "https://search.azure.com")]
@@ -1150,14 +1149,7 @@ def test_d7_reports_a_resource_outside_the_default_allowlist_as_a_deployment_not
     assert "Search Index Data Reader" in issues[0].message
 
 
-def test_d7_uses_a_mirrored_allowlist(monkeypatch) -> None:
-    monkeypatch.setenv("MI_SCOPE_ALLOWLIST", "https://storage.azure.com,https://search.azure.com")
-    md = _with_scopes("https://storage.azure.com", "https://search.azure.com")
-    assert lint_skill(md, SkillKind.CAPABILITY) == []
-
-
-def test_d7_warns_that_broad_resources_grant_full_rights(monkeypatch) -> None:
-    monkeypatch.delenv("MI_SCOPE_ALLOWLIST", raising=False)
+def test_d7_warns_that_broad_resources_grant_full_rights() -> None:
     md = _with_scopes("https://storage.azure.com", "https://database.windows.net")
     (issue,) = [i for i in lint_skill(md, SkillKind.CAPABILITY) if i.rule == "D7"]
     assert "全部權限" in issue.message and "OBO" in issue.message

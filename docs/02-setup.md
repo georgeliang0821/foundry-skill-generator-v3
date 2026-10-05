@@ -178,7 +178,7 @@ Copy-Item .env.example .env
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
 | `AZURE_STORAGE_ACCOUNT_URL` | 是 | 例如 `https://youraccount.blob.core.windows.net` |
-| `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `skills`。只填容器名稱；skill 一律寫在容器內的 `skills/` 下，這是 `dbo.skills.blob_path` 計算欄位寫死的前綴，不可設定 |
+| `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `agent-skills`。只填容器名稱 |
 
 ### 3.5 EAA MCP
 
@@ -186,7 +186,6 @@ Copy-Item .env.example .env
 | --- | --- | --- |
 | `MCP_ENDPOINT` | 是 | EAA MCP 根 URL（`/mcp`）；未設定時無法儲存 |
 | `MCP_OAUTH_AUDIENCE` | 否 | 只有 EAA 驗證的 audience 與 `MICROSOFT_OBO_SCOPE` 不同支 app 時才填 |
-| `MI_SCOPE_ALLOWLIST` | 否 | 與 ACA 上同名變數同步時才填（逗號分隔）。未設時採平台預設 `https://storage.azure.com,https://ai.azure.com`；只影響本機 lint 的提示 |
 
 ### 3.6 本機預設值
 
