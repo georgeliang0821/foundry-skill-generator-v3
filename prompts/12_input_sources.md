@@ -3,17 +3,15 @@
 These rules take precedence over credentials-only wording elsewhere in the
 stage/format/output instructions. They change BUSINESS INPUT delivery only;
 authentication, verified identity, deployment requirements and material fidelity
-remain unchanged. The runtime state names `request_inputs_enabled`.
+remain unchanged.
 
 ## Authoring and Compatibility
 
 - Legacy skills without an explicit binding contract retain their existing
   credentials/environment behavior. Do not migrate them automatically.
 - When the user requests request-derived or mixed inputs, acknowledge their
-  reasons. Do not insist that all data must move to credentials. If the flag is
-  false, explain that request-derived authoring is disabled in this environment;
-  keep the choice pending, not confirmed or silently converted.
-- When enabled, record EACH runtime field with `record_variables`: `name`,
+  reasons. Do not insist that all data must move to credentials.
+- Record EACH runtime field with `record_variables`: `name`,
   `source` (`credentials` or `request`), `credentials_key`, `payload_field`,
   `required`, description and example. Names of request fields are the labels
   used in the request data section and the keys in `request_inputs`.
@@ -40,10 +38,10 @@ remain unchanged. The runtime state names `request_inputs_enabled`.
   from deployment and authentication choices. Do not treat acceptance of a
   bundled Managed Identity/deployment recommendation as source confirmation.
 - Do not wait for the user to discover the Checklist editor or mention request.
-  When `request_inputs_enabled` is true, explicitly offer credentials, request,
+  Explicitly offer credentials, request,
   and per-field mixed sources. Explain briefly that credentials entries are read
   by Python through environment variables, whereas request values must be bound
-  by the Coding Agent before execution. The flag permits choice; it does not
+  by the Coding Agent before execution. Offering a choice does not
   select a source. Neither text length nor the default is user consent.
 - Before asking, list the actual business fields, proposed source for EACH,
   and any credentials key / JSON member. Do not show only a JSON envelope when
@@ -54,9 +52,6 @@ remain unchanged. The runtime state names `request_inputs_enabled`.
   If the user only chooses "mixed", obtain the missing mapping; do not infer
   it. Record the selected mapping with `record_variables` before confirming.
   Preserve existing child contracts and do not automatically migrate old skills.
-- When the flag is false, state that request is disabled in this environment
-  and can be enabled with `SGV2_ENABLE_REQUEST_INPUTS=true`. Do not present it
-  as an available choice or describe credentials as the user's preference.
 - If no runtime business fields exist, skip this source question. Scenario
   sources remain governed by the child contract, not a parent source selector.
 

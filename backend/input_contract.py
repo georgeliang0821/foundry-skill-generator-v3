@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 
 import yaml
@@ -19,10 +18,6 @@ class _BindingLoader(yaml.SafeLoader):
                 raise ValueError("input-bindings requires unique string mapping keys.")
             seen.add(key)
         return super().construct_mapping(node, deep=deep)
-
-
-def request_inputs_enabled() -> bool:
-    return os.getenv("SGV2_ENABLE_REQUEST_INPUTS", "true").strip().lower() in {"1", "true", "yes"}
 
 
 def parse_input_bindings(skill_md: str) -> list[InputBinding] | None:
@@ -78,8 +73,6 @@ def input_contract_errors(session: Session, skill_md: str | None = None) -> list
             bindings = declared if declared is not None else bindings
         if len({binding.name for binding in bindings}) != len(bindings):
             errors.append("Each runtime input must have exactly one source.")
-        if any(binding.source == "request" for binding in bindings) and not request_inputs_enabled():
-            errors.append("Request-derived business inputs are disabled in this environment; set SGV2_ENABLE_REQUEST_INPUTS=true to enable them.")
         registry = obo_registry_keys(session.aca_env_result)
         for binding in bindings:
             key = binding.credentials_key or binding.name
@@ -105,6 +98,4 @@ def input_contract_errors(session: Session, skill_md: str | None = None) -> list
                 errors.append(f"{delegation.child_skill}: delegation input sources must match the child's Required Inputs.")
             if delegation.credentials_key:
                 errors.append(f"{delegation.child_skill}: use input_bindings, not an additional legacy credentials_key.")
-            if any(binding.source == "request" for binding in declared) and not request_inputs_enabled():
-                errors.append(f"{delegation.child_skill}: request inputs require SGV2_ENABLE_REQUEST_INPUTS.")
     return errors

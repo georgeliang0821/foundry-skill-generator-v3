@@ -68,7 +68,7 @@ from .eaa_platform import (
     split_eaa_allowlist_warnings,
 )
 from .skill_lint import lint_skill, lint_warning_count
-from .input_contract import input_contract_errors, request_inputs_enabled
+from .input_contract import input_contract_errors
 from .models import (
     ApplyPatchRequest,
     ApplyPatchResponse,
@@ -2700,11 +2700,6 @@ def delete_session_material(session_id: str, material_id: str, upn: str = Depend
         material_count=len(session.materials),
     )
     return session
-
-
-@app.get("/api/features")
-def feature_flags() -> dict[str, bool]:
-    return {"request_inputs_enabled": request_inputs_enabled()}
 
 
 def required_env(name: str) -> str:

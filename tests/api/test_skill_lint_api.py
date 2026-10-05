@@ -74,21 +74,15 @@ def main():
 '''
 
 
-@pytest.mark.parametrize("enabled, expected", [(False, 400), (True, 200)])
-def test_request_skill_save_requires_opt_in(client, monkeypatch, enabled, expected) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", str(enabled))
-    assert client.get("/api/features").json() == {"request_inputs_enabled": enabled}
+def test_request_skill_saves(client) -> None:
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": REQUEST_SKILL})
     response = client.post(f"/api/sessions/{session_id}/save", json={"name": "request-skill"})
-    assert response.status_code == expected
-    if not enabled:
-        assert "SGV2_ENABLE_REQUEST_INPUTS" in response.json()["detail"]
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("code", ['    print("example")', ""])
-def test_request_skill_cannot_save_without_binding_validation(client, monkeypatch, code) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "true")
+def test_request_skill_cannot_save_without_binding_validation(client, code) -> None:
     skill_md = REQUEST_SKILL.split("## API Reference / Sample Code")[0]
     if code:
         skill_md += f"## API Reference / Sample Code\n```python\ndef main():\n{code}\n```\n"
@@ -99,8 +93,7 @@ def test_request_skill_cannot_save_without_binding_validation(client, monkeypatc
     assert "A14" in response.json()["detail"]["message"]
 
 
-def test_source_change_is_pending_and_invalidates_confirmation(client, backend_main, monkeypatch) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "false")
+def test_source_change_is_pending_and_invalidates_confirmation(client, backend_main) -> None:
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     session = backend_main.sessions[session_id]
     session.prepare_brief.verify_checklist["variables_ok"] = True
@@ -116,12 +109,9 @@ def test_source_change_is_pending_and_invalidates_confirmation(client, backend_m
     assert body["prepare_brief"]["variables"][1]["source"] == "credentials"
     assert not body["prepare_brief"]["verify_checklist"]["variables_ok"]
     assert "variables_ok" not in body["prepare_brief"]["verify_evidence"]
-    with pytest.raises(ValueError, match="SGV2_ENABLE_REQUEST_INPUTS"):
-        backend_main.apply_tool_effect(session, "update_prepare_checklist", {"item": "variables_ok", "confirmed": True})
 
 
-def test_save_rejects_draft_that_changes_prepared_source(client, monkeypatch) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "true")
+def test_save_rejects_draft_that_changes_prepared_source(client) -> None:
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     client.post(f"/api/sessions/{session_id}/variables", json={"variables": [{"name": "description"}]})
     client.put(f"/api/sessions/{session_id}/draft", json={"skill_md": REQUEST_SKILL})

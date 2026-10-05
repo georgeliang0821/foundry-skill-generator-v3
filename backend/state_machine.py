@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_mapping, script_flags_off
-from .input_contract import input_contract_errors, request_inputs_enabled
+from .input_contract import input_contract_errors
 
 from .material_fidelity import (
     CONTEXT_ONLY_KINDS,
@@ -1453,7 +1453,6 @@ def build_system_prompt(session: Session) -> str:
     for filename in FORM_STAGE_ADDENDA.get(form_key or "", {}).get(stage, ()):
         parts.append(load_prompt(filename))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
-    runtime_state += f"\nrequest_inputs_enabled: {str(request_inputs_enabled()).lower()}"
     if kind is SkillKind.SCENARIO:
         declared = [str(c).strip() for c in (getattr(session, "children", None) or []) if str(c).strip()]
         runtime_state += "\nchildren: " + (

@@ -63,9 +63,6 @@ test("creates, validates, saves, and tests a scenario skill", async ({ page, req
 });
 
 test("runtime input sources persist without changing authentication fields", async ({ page, request }) => {
-  await page.route("**/api/features", (route) => route.fulfill({
-    json: { request_inputs_enabled: true },
-  }));
   await openApp(page);
   await openTab(page, "checklist");
   const checkpoint = page.locator('[data-checkpoint="variables_ok"]');
@@ -105,17 +102,4 @@ test("runtime input sources persist without changing authentication fields", asy
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
   await page.screenshot({ path: "test-results/input-sources-mobile.png", fullPage: true });
-});
-
-test("disabled request source is labelled and cannot be selected", async ({ page }) => {
-  await page.route("**/api/features", (route) => route.fulfill({
-    json: { request_inputs_enabled: false },
-  }));
-  await openApp(page);
-  await openTab(page, "checklist");
-  const source = page.locator('[data-var-kind="runtime"] .var-source').first();
-  await expect(source).toHaveValue("credentials");
-  await expect(source.locator('option[value="request"]')).toHaveText("Request (disabled)");
-  await expect(source.locator('option[value="request"]')).toHaveJSProperty("disabled", true);
-  await expect(source.locator('option[value="credentials"]')).toHaveJSProperty("disabled", false);
 });

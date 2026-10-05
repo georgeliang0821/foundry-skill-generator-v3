@@ -621,32 +621,19 @@ def test_scenario_prepare_uses_plain_language_for_child_input_fields() -> None:
     assert "or make a missing contract optional" in prompt
 
 
-def test_request_inputs_gate_preserves_pending_state(monkeypatch) -> None:
+def test_request_inputs_pass_quality_gates() -> None:
     from backend.models import SkillVariable
 
     session = _fully_prepared_session()
     session.prepare_brief.variables = [SkillVariable(name="description", source="request")]
-    monkeypatch.delenv("SGV2_ENABLE_REQUEST_INPUTS", raising=False)
-    assert check_quality_gates(session) == []
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "false")
-    assert any("SGV2_ENABLE_REQUEST_INPUTS" in error for error in check_quality_gates(session))
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
     assert check_quality_gates(session) == []
 
 
-@pytest.mark.parametrize("setting, enabled", [(None, True), ("true", True), ("1", True), ("yes", True), ("false", False), ("0", False)])
-def test_request_input_availability_and_source_confirmation(setting, enabled, monkeypatch) -> None:
-    from backend.input_contract import request_inputs_enabled
-
-    if setting is None:
-        monkeypatch.delenv("SGV2_ENABLE_REQUEST_INPUTS", raising=False)
-    else:
-        monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", setting)
-    assert request_inputs_enabled() is enabled
+def test_request_input_availability_and_source_confirmation() -> None:
     prompt = build_system_prompt(Session(current_stage=Stage.PREPARE))
-    assert f"request_inputs_enabled: {str(enabled).lower()}" in prompt
+    assert "request_inputs_enabled" not in prompt
     assert "dedicated `ask_user_input` question" in prompt
-    assert "explicitly offer credentials, request," in prompt
+    assert "Explicitly offer credentials, request," in prompt
     assert "Do not show only a JSON envelope" in prompt
     assert "Record the selected mapping with `record_variables` before confirming" in prompt
     assert "Neither text length nor the default is user consent" in prompt
@@ -654,20 +641,17 @@ def test_request_input_availability_and_source_confirmation(setting, enabled, mo
 
 @pytest.mark.parametrize("kind", [SkillKind.CAPABILITY, SkillKind.SCENARIO])
 @pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT, Stage.REFINE, Stage.TEST])
-def test_all_authoring_stages_receive_input_source_contract(kind, stage, monkeypatch) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
+def test_all_authoring_stages_receive_input_source_contract(kind, stage) -> None:
     prompt = build_system_prompt(Session(skill_kind=kind, current_stage=stage))
-    assert "request_inputs_enabled: true" in prompt
     assert "Every field has exactly one source" in prompt
     assert "all-request child needs no business credentials key" in prompt
     assert "does NOT guarantee valid tool arguments" in prompt
 
 
-def test_scenario_binding_must_match_child(monkeypatch) -> None:
+def test_scenario_binding_must_match_child() -> None:
     from backend.input_contract import input_contract_errors
     from backend.models import InputBinding
 
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "1")
     session = _fully_prepared_scenario()
     child = session.prepare_brief.delegation[0]
     session.child_full_md[child.child_skill] += "\n## Required Inputs\n```input-bindings\n- name: description\n  source: request\n```\n"

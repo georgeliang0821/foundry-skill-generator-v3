@@ -47,7 +47,7 @@ Agent 的執行為事件驅動的單向閉環，每一回合遵循固定的管�
 **`source` 指定的是「欄位從哪裡取得」，不是「欄位是否敏感」。** 業務欄位可以選擇來源，
 但 token、部署設定與平台驗證身分仍遵循各自的既有規則，不能因此改走 request。
 
-`SGV2_ENABLE_REQUEST_INPUTS` 預設開啟，runtime 業務欄位可各自指定 `source`。
+runtime 業務欄位可各自指定 `source`。
 例如 operation 來自 credentials，而原始 description 來自 request；每個欄位只有一個來源，
 不合併衝突副本，也不從另一來源 fallback。設定在 PREPARE 中記錄，來源變更會清除確認。
 `aca_env`、`obo_token` 與 `platform_identity` 不能指定 request 來源。

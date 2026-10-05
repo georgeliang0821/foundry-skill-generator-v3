@@ -6,7 +6,6 @@ import {
   setSkillVisibility,
   createSession,
   fetchAuthStatus,
-  fetchFeatures,
   fetchInspect,
   fetchSessionTopology,
   fetchSkillForm,
@@ -47,7 +46,6 @@ const mdRenderer = createMarkdownRenderer();
 // rejection, mapped onto the checkpoint cards so the user sees exactly what
 // blocks DRAFT (the gate checks more than the four checkboxes).
 let lastGateMissing = [];
-let requestInputsEnabled = false;
 
 function gateCheckpointFor(missingKey) {
   const k = String(missingKey || "");
@@ -2104,7 +2102,7 @@ function variableRowHtml(kind, v = null) {
         <div class="var-source-fields">
           <label>Input source <select class="var-input var-source" aria-label="Input source">
             <option value="credentials"${source === "credentials" ? " selected" : ""}>Credentials (key/value)</option>
-            <option value="request"${source === "request" ? " selected" : ""}${!requestInputsEnabled ? " disabled" : ""}>${requestInputsEnabled ? "Request" : "Request (disabled)"}</option>
+            <option value="request"${source === "request" ? " selected" : ""}>Request</option>
           </select></label>
           <label class="var-binding-field"${source === "request" ? " hidden" : ""}>Input data field <input class="var-input var-credentials-key" aria-label="Input data field" value="${escapeHtml(v?.credentials_key || "")}" placeholder="Same as variable name" /></label>
           <label class="var-binding-field"${source === "request" ? " hidden" : ""}>JSON member <input class="var-input var-payload-field" aria-label="JSON member" value="${escapeHtml(v?.payload_field || "")}" placeholder="Empty for raw text" /></label>
@@ -6560,11 +6558,6 @@ async function refreshAuthStatus() {
 
 async function initializePage() {
   restoreUiState();
-  try {
-    requestInputsEnabled = (await fetchFeatures()).request_inputs_enabled === true;
-  } catch {
-    requestInputsEnabled = false;
-  }
   el("chatStream").innerHTML = `<div class="empty-state chat-empty">Choose a mode, then start a session. For new/import workflows, paste the requirements or attach materials before sending.</div>`;
   el("toolCalls").innerHTML = "";
   setActiveContextTab(activeContextTab);

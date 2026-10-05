@@ -27,11 +27,6 @@ FLAGS_OFF = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_S
 BASELINE = json.loads((Path(__file__).parent / "inline_prompt_baseline.json").read_text(encoding="utf-8"))
 
 
-@pytest.fixture(autouse=True)
-def _pinned_env(monkeypatch) -> None:
-    monkeypatch.setenv("SGV2_ENABLE_REQUEST_INPUTS", "true")
-
-
 def _material(material_id: str, kind: MaterialKind, content: str) -> Material:
     return Material(id=material_id, kind=kind, content=content, created_at="2026-09-29T00:00:00+00:00")
 
