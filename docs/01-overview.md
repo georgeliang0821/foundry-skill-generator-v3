@@ -86,7 +86,7 @@
 | token 從環境變數讀，不能當參數（S7） | 命令列參數會出現在執行紀錄、Gatekeeper log、DEBUG 檔，以及 `route_only` 回給呼叫端的 `requested_scripts`，最後這處會直接傳到 EAA 外部。 | 共用執行環境 |
 | `SKILL.md` 要照 script 的實際行為寫（每個 `--flag`、exit-code 表含 needs_info 列、每個輸出欄位） | host 是依 `SKILL.md` 組出參數、判讀結果；文件寫錯，host 就會傳錯參數或看不懂結果。 | script skill 不能在執行時自我修正 |
 
-**AI 修改素材為什麼有這麼多限制**：script skill 不能在執行時自我修正，邊界問題只能在 Generator 裡一次修好。使用者的程式碼通常已經驗證過業務邏輯，Generator 只調整「邊界」（輸入、stdout / stderr、exit code），不碰外部呼叫與業務邏輯；外部呼叫一個都不能少，邊界以外的改動超過一半就視為改寫而拒絕。patch 必須一次修完所有問題（修一半還是當不成 script），同一份素材最多被拒 3 次，避免無限重試；接受後素材會標示「edited by agent · not run」，使用者要實際跑過一次才能確認涵蓋所有操作，因為上線後沒有 AI 會幫它修。實際的 patch 長什麼樣子，見 [04-agent-mechanism.md 第 7.5 節的範例](04-agent-mechanism.md#75-code-素材與-script-形式)。
+**AI 修改素材為什麼有這麼多限制**：script skill 不能在執行時自我修正，邊界問題只能在 Generator 裡一次修好。使用者的程式碼通常已經驗證過業務邏輯，Generator 只調整「邊界」（輸入、stdout / stderr、exit code），不碰外部呼叫與業務邏輯；外部呼叫一個都不能少，邊界以外的改動超過一半就視為改寫而拒絕。patch 必須一次修完所有問題（修一半還是當不成 script），同一份素材最多被拒 3 次，避免無限重試。唯一的例外是最常見的「程式裡寫了 `print`」：只印進度文字的 `print` 由 Generator 機械式地改成印到 stderr，結果固定、不會寫錯，可以只修一部分也不算被拒；可能是結果或失敗訊息的 `print` 需要判斷語意，仍由 AI 提 patch。兩者都只在使用者同意調整素材後進行；接受後素材會標示「edited by agent · not run」，使用者要實際跑過一次才能確認涵蓋所有操作，因為上線後沒有 AI 會幫它修。實際的 patch 長什麼樣子，見 [04-agent-mechanism.md 第 7.5 節的範例](04-agent-mechanism.md#75-code-素材與-script-形式)。
 
 ---
 

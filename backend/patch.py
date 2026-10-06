@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 from dataclasses import dataclass, field
 
@@ -184,6 +185,22 @@ def apply_v4a_to_content(content: str, patch: str, *, expected_version_hash: str
                 raise
             updated = apply_find_replace(updated, old, new)
     return updated, version_hash(updated)
+
+
+def v4a_from_contents(path: str, before: str, after: str, *, context: int = 2) -> str:
+    """A V4A ``Update File`` patch from two versions of one file."""
+    old, new = before.splitlines(), after.splitlines()
+    lines = ["*** Begin Patch", f"*** Update File: {path}"]
+    for group in difflib.SequenceMatcher(a=old, b=new, autojunk=False).get_grouped_opcodes(context):
+        lines.append("@@")
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                lines += [f" {line}" for line in old[i1:i2]]
+                continue
+            lines += [f"-{line}" for line in old[i1:i2]]
+            lines += [f"+{line}" for line in new[j1:j2]]
+    lines.append("*** End Patch")
+    return "\n".join(lines)
 
 
 def _indent_of(line: str) -> str:

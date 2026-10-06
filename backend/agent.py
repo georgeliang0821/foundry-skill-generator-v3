@@ -112,16 +112,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "bundled script. PREPARE only, and only while `## Skill Form` is not locked. Adapt the "
             "edges only: argparse inputs, stdout JSON / [NEEDS_INFO], stderr, exit codes. Never "
             "change an external call, auth or business logic; a patch that does is rejected as a "
-            "rewrite. The user reviews the diff before it is applied."
+            "rewrite. The user reviews the diff before it is applied. With stdout_fix=true omit "
+            "`patch`: the backend computes the mechanical stdout fix `## Skill Form` offers."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "material_id": {"type": "string"},
                 "patch": {"type": "string"},
+                "stdout_fix": {"type": "boolean"},
                 "reason": {"type": "string"},
             },
-            "required": ["material_id", "patch", "reason"],
+            "required": ["material_id", "reason"],
             "additionalProperties": False,
         },
     },

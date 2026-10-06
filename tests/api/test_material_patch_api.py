@@ -297,3 +297,82 @@ def test_a_user_edit_clears_the_agent_mark(client, backend_main) -> None:
     material = response.json()["materials"][0]
     assert material["origin"] == "user"
     assert material["user_content"] is None
+
+
+# --- mechanical stdout fix ----------------------------------------------------
+
+PROGRESS_CODE = """import json
+import requests
+
+print("querying rooms...")
+response = requests.get("https://graph.example.invalid/rooms", timeout=10)
+print(response.text)
+"""
+
+
+def _fix_session() -> Session:
+    session = _session()
+    session.materials[0] = Material(id="code-1", kind=MaterialKind.CODE, content=PROGRESS_CODE)
+    return session
+
+
+def test_the_skill_form_offers_the_fix_only_for_movable_prints(backend_main) -> None:
+    assert "Mechanical stdout fix available: the plain-text print() calls on lines 4 can move" in (
+        build_system_prompt(_fix_session())
+    )
+    assert "Mechanical stdout fix available" not in build_system_prompt(_session())
+
+
+def test_the_chat_fills_the_computed_diff_into_the_call(backend_main) -> None:
+    session = _fix_session()
+    call = PendingToolCall(call_id="fx1", tool="propose_material_patch", args={"material_id": "code-1", "stdout_fix": True, "reason": "r"})
+    session.pending_tool_calls.append(call)
+    data = call.model_dump()
+
+    backend_main._fill_stdout_fix_patch(session, data)
+
+    assert '+print("querying rooms...", file=sys.stderr)' in data["args"]["patch"]
+    assert session.pending_tool_calls[0].args["patch"] == data["args"]["patch"]
+    backend_main.apply_tool_effect(session, "propose_material_patch", data["args"])
+
+
+def test_a_stdout_fix_with_nothing_to_move_is_not_counted(backend_main) -> None:
+    session = _session()
+    with pytest.raises(ValueError, match="No print\\(\\) in the code material can move"):
+        backend_main.apply_tool_effect(
+            session, "propose_material_patch", {"material_id": "code-1", "stdout_fix": True, "reason": "r"}
+        )
+    assert session.material_patch_rejections == 0
+
+
+def test_accepting_a_partial_stdout_fix_applies_it(client, backend_main) -> None:
+    session = _fix_session()
+    session.material_patch_rejections = 2
+    _, _, patch, _ = backend_main._checked_stdout_fix(session, "code-1")
+    _stage(backend_main, session, patch, call_id="fx1")
+    session.pending_tool_calls[-1].args["stdout_fix"] = True
+
+    response = _answer(client, session, "accept", call_id="fx1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    content = body["materials"][0]["content"]
+    assert content.startswith("import sys\nimport json\n")
+    assert 'print("querying rooms...", file=sys.stderr)' in content
+    assert "print(response.text)\n" in content
+    assert body["materials"][0]["origin"] == "agent_patch"
+    assert body["material_patch_rejections"] == 0
+    assert any("lines 4 now write to stderr" in m["content"] for m in body["conversation"])
+
+
+def test_accepting_a_stale_stdout_fix_is_refused(client, backend_main) -> None:
+    session = _fix_session()
+    _, _, patch, _ = backend_main._checked_stdout_fix(session, "code-1")
+    _stage(backend_main, session, patch, call_id="fx1")
+    session.pending_tool_calls[-1].args["stdout_fix"] = True
+    session.materials[0] = Material(id="code-1", kind=MaterialKind.CODE, content=PROGRESS_CODE.replace("rooms...", "rooms now"))
+
+    response = _answer(client, session, "accept", call_id="fx1")
+
+    assert response.status_code == 409
+    assert "changed after this stdout fix was proposed" in response.json()["detail"]["error"]

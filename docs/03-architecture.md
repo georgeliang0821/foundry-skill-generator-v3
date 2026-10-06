@@ -170,7 +170,7 @@ flowchart LR
 
 - `GET /skill-form` 只在 capability session 有 `code` 素材或已鎖定為 script 時才呼叫，以 `session.updated_at` 快取；回應含 `form` / `locked` / `failures`（未滿足的條件）/ `replacement_problems`（新 code 素材為何沒取代已鎖定的 script）。
 - Materials：code 素材列標出 `script` / `inline` / `not the script`，表格下列出未滿足條件或取代失敗的原因（旗標關閉時只列旗標）。被 Agent 改過（`origin=agent_patch`）的素材另標 `edited by agent · not run`，使用者自己再編輯後消失。
-- 對話中的 `propose_material_patch` 以 `material-patch-card` 呈現 diff，接受 / 拒絕走同一個 `tool-result`。
+- 對話中的 `propose_material_patch` 以 `material-patch-card` 呈現 diff，接受 / 拒絕走同一個 `tool-result`。`stdout_fix=true` 的卡片顯示後端算出的 diff（寫在 `args.patch`），前端不分別處理。
 - Checklist 的 `variables_ok`：「Output form」列顯示形式與是否鎖定，提供 inline / script 選擇（隨 Save variables 送出 `prefer_inline`）與「code 素材涵蓋所有操作」勾選框（送出 `script_covers_operations`）；兩者在 DRAFT 後停用。
 - Files：有 script 時出現 `SKILL.md | scripts/<name>.py` 切換，script 為唯讀。
 - Draft 卡片註記會一併儲存 script；綁定狀態列與 modify 選單（`GET /api/skills` 的 `has_script`）標 `script` / `[script]`。
@@ -198,8 +198,8 @@ flowchart LR
 | `skills_index.py` | 以 DB + Blob 組「既有 Skill 索引」，供 PREPARE 階段做重複偵測 |
 | `testing.py` | 路由測試：把正負範例送到 Router endpoint，評估是否路由到本 Skill。端點可經 APIM 對外提供，也可直接連到相容 runtime；以 `mode=route_only` 送出（不執行腳本），驗證 runtime 的 `mode` 回顯（不符即中止整批），使用者 token 只送在 header、HTTP 401 中止整批（`RunAuthError`），並在持久化前遮蔽機密形狀；帶資產的 skill 另比對資源標示與 runtime 回報的讀取紀錄（`_check_resource_reads`） |
 | `eaa_platform.py` | EAA runtime 對 skill 執行環境的規則：平台 secret denylist、caller `credentials` 保留鍵名、從 MCP 結果解析 `OBO_SCOPE_REGISTRY`；以及呼叫 EAA MCP `lint_skill_package` 並把結果對應成儲存判定的 fail-closed client |
-| `patch.py` | 小型 V4A patch 解析與套用 |
-| `material_patch.py` | `propose_material_patch` 的防線：以 AST 取出素材的外部呼叫（非 stdlib 或 I/O stdlib 的 import 起點 + 屬性鏈，不看變數名），patch 不得刪改任何一個，且邊界語句（import、只呼叫 print / json.dumps / argparse / exit 的語句、輸入綁定）以外的原始行改動（忽略縮排）不得超過 `MAX_CHANGED_RATIO`。patch 後仍有 script-form 問題的檢查在 `main._checked_material_patch()` |
+| `patch.py` | 小型 V4A patch 解析與套用；`v4a_from_contents()` 從前後兩版產生供使用者審閱的 V4A diff |
+| `material_patch.py` | `propose_material_patch` 的防線：以 AST 取出素材的外部呼叫（非 stdlib 或 I/O stdlib 的 import 起點 + 屬性鏈，不看變數名），patch 不得刪改任何一個，且邊界語句（import、只呼叫 print / json.dumps / argparse / exit 的語句、輸入綁定）以外的原始行改動（忽略縮排）不得超過 `MAX_CHANGED_RATIO`。patch 後仍有 script-form 問題的檢查在 `main._checked_material_patch()`；機械式 stdout 修正（`stdout_fix=true`）由 `skill_lint.stdout_to_stderr()` 計算、`main._checked_stdout_fix()` 把關 |
 | `mcp_jsonrpc.py` | MCP JSON-RPC client（讀取 ACA 環境變數等）。以 `MICROSOFT_*` App Registration 對自己做 client credentials 取得 app-only token（audience 預設從 `MICROSOFT_OBO_SCOPE` 推導），並快取至過期前 60 秒；audience 推導不出來則退回匿名呼叫 |
 | `db.py` | Azure SQL 連線輔助（`mssql-python`，AAD 驗證策略） |
 | `diagnostics.py` | 結構化記錄輔助（`log_event` / `log_exception`），會把疑似機密的值遮罩成 `***` |

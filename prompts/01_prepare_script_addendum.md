@@ -32,7 +32,14 @@ condition; it states what failed, never how to fix it.
   attempt one: say so, and offer to keep the inline form or to let the user
   write the script themselves (you may show a draft in the chat only). Never
   write a suggested fix into the brief or the checklist evidence.
-- **One patch fixes every finding.** A patch is refused unless the patched code
+- **Mechanical stdout fix first.** When `## Skill Form` says a mechanical
+  stdout fix is available, propose it before any hand-written patch, with
+  `propose_material_patch(stdout_fix=true)` and no `patch`: the backend
+  computes it and adds `file=sys.stderr` to plain-text progress prints only.
+  It is never refused for being partial and never counts as a refusal. Once
+  it is applied, fix whatever `## Skill Form` still lists in one regular
+  patch against the updated material, without asking the user again.
+- **One patch fixes every finding.** A regular patch is refused unless the patched code
   clears every `script_lint` and `inputs` condition in `## Skill Form`; a
   partial fix changes nothing about the form. Find each finding by the source
   line it quotes, not by counting lines. Four rules the inline conventions do

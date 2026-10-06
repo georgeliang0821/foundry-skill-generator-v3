@@ -2374,13 +2374,13 @@ def _prints_after_marker(s: _ScriptModel) -> set[int]:
     return found
 
 
-def _check_stdout_shape(s: _ScriptModel) -> list[LintIssue]:
-    """S4 -- stdout carries one ``json.dumps`` document, optionally after ``[NEEDS_INFO]``."""
-    issues: list[LintIssue] = []
+def _stdout_violations(s: _ScriptModel) -> list[tuple[ast.Call, bool]]:
+    """(stdout write, follows the ``[NEEDS_INFO]`` line) for every write S4 rejects."""
     after_marker = _prints_after_marker(s)
     prints = sorted(
         (node for node in ast.walk(s.tree) if _is_stdout_print(node)), key=lambda node: node.lineno
     )
+    found: list[tuple[ast.Call, bool]] = []
     for node in prints:
         if _is_needs_info_print(node):
             continue
@@ -2392,8 +2392,16 @@ def _check_stdout_shape(s: _ScriptModel) -> list[LintIssue]:
             )
         ):
             continue
+        found.append((node, id(node) in after_marker))
+    return found
+
+
+def _check_stdout_shape(s: _ScriptModel) -> list[LintIssue]:
+    """S4 -- stdout carries one ``json.dumps`` document, optionally after ``[NEEDS_INFO]``."""
+    issues: list[LintIssue] = []
+    for node, after_marker in _stdout_violations(s):
         where = f"Line {node.lineno}{_source_excerpt(s, node)}"
-        if id(node) in after_marker:
+        if after_marker:
             message = (
                 f"{where} prints plain text after the `[NEEDS_INFO]` line. EAA strips the marker "
                 "line and parses the rest of stdout as one JSON document, so text there leaves the "
@@ -2412,6 +2420,112 @@ def _check_stdout_shape(s: _ScriptModel) -> list[LintIssue]:
             )
         issues.append(LintIssue(rule="S4", severity="error", message=message, detail=f"line {node.lineno}"))
     return issues
+
+
+# Text that reads as a failure report: moving it to stderr would hide the failure on exit 0.
+_FAILURE_TEXT_RE = re.compile(
+    r"error|fail|exception|denied|forbidden|unauthori[sz]ed|invalid|not found|timed? ?out|traceback"
+    r"|失敗|錯誤|無法|拒絕|異常|逾時",
+    re.IGNORECASE,
+)
+
+
+def _plain_text(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return None
+
+
+def _on_failure_path(node: ast.Call, s: _ScriptModel) -> bool:
+    """Inside an ``except``, or followed in its block by a raise / non-zero exit."""
+    if _has_ancestor(node, s.parents, ast.ExceptHandler):
+        return True
+    stmt = _statement_of(node, s)
+    parent = s.parents.get(stmt)
+    located = _locate(stmt, parent) if parent is not None else None
+    if located is None:
+        return False
+    block = located[1]
+    func = s.function_of(stmt)
+    for later in block[_index_of(stmt, block) + 1:]:
+        how = _stmt_exit(later, s, func)
+        if how is not None and (how[0] == "raise" or (how[0] == "exit" and how[1] != 0)):
+            return True
+    return False
+
+
+def _stderr_movable(node: ast.Call, after_marker: bool, s: _ScriptModel) -> bool:
+    """A statement-level ``print`` of plain progress text, which stderr can carry unchanged."""
+    if after_marker or not isinstance(node.func, ast.Name) or node.keywords:
+        return False
+    if not isinstance(s.parents.get(node), ast.Expr):
+        return False
+    texts = [_plain_text(arg) for arg in node.args]
+    if any(text is None for text in texts) or any(_FAILURE_TEXT_RE.search(text) for text in texts):
+        return False
+    return not _on_failure_path(node, s)
+
+
+def _imports_sys(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.Import) and any(a.name == "sys" and a.asname in (None, "sys") for a in node.names)
+        for node in tree.body
+    )
+
+
+def _import_line(tree: ast.Module) -> int:
+    """1-based line ``import sys`` goes on: before the first statement after the docstring and ``__future__``."""
+    for index, node in enumerate(tree.body):
+        if index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        return node.lineno
+    return (tree.body[-1].end_lineno or 0) + 1 if tree.body else 1
+
+
+def stdout_to_stderr(script: str) -> tuple[str, list[int]]:
+    """Move the S4 prints that only carry progress text to stderr; returns (script, changed lines).
+
+    Prints that may be the result, report a failure or follow ``[NEEDS_INFO]`` are left for a
+    hand-written patch. Raises ``SyntaxError`` when the script does not parse.
+    """
+    tree = ast.parse(script)
+    s = _script_model(tree, script)
+    movable = [node for node, after in _stdout_violations(s) if _stderr_movable(node, after, s)]
+    if not movable:
+        return script, []
+    line_starts = [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", script)]
+
+    def offset(lineno: int, col_bytes: int) -> int:
+        start = line_starts[lineno - 1]
+        line = script[start:line_starts[lineno]] if lineno < len(line_starts) else script[start:]
+        return start + len(line.encode("utf-8")[:col_bytes].decode("utf-8"))
+
+    inserts: list[tuple[int, str]] = []
+    for node in movable:
+        if node.args:
+            last = node.args[-1]
+            inserts.append((offset(last.end_lineno, last.end_col_offset), ", file=sys.stderr"))
+        else:
+            inserts.append((offset(node.end_lineno, node.end_col_offset) - 1, "file=sys.stderr"))
+    if not _imports_sys(tree):
+        newline = "\r\n" if "\r\n" in script else "\n"
+        line = _import_line(tree)
+        if line <= len(line_starts):
+            inserts.append((line_starts[line - 1], f"import sys{newline}"))
+        else:
+            lead = "" if script.endswith(("\n", "\r")) else newline
+            inserts.append((len(script), f"{lead}import sys{newline}"))
+    fixed = script
+    for at, text in sorted(inserts, key=lambda item: item[0], reverse=True):
+        fixed = fixed[:at] + text + fixed[at:]
+    ast.parse(fixed)
+    return fixed, sorted(node.lineno for node in movable)
 
 
 def _check_injected_globals(s: _ScriptModel) -> list[LintIssue]:

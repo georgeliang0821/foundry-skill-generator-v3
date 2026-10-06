@@ -67,7 +67,7 @@ from .eaa_platform import (
     script_flags_off,
     split_eaa_allowlist_warnings,
 )
-from .skill_lint import lint_skill, lint_warning_count
+from .skill_lint import lint_skill, lint_warning_count, stdout_to_stderr
 from .skill_assets import MAX_ASSET_BYTES, AssetRejected, assets_blocked_reason, check_asset, check_asset_set
 from .input_contract import input_contract_errors
 from .models import (
@@ -106,7 +106,7 @@ from .models import (
     VariablesUpdateRequest,
     delegation_children,
 )
-from .patch import PatchError, apply_v4a_to_content, version_hash
+from .patch import PatchError, apply_v4a_to_content, v4a_from_contents, version_hash
 from .session_store import LocalSessionStore, make_session_store
 from .topology import (
     Severity,
@@ -1616,6 +1616,15 @@ MATERIAL_PATCHED_MESSAGE = (
     "user confirms the patched code works."
 )
 
+STDOUT_FIX_APPLIED_MESSAGE = (
+    "Code material `{material_id}`: the plain-text print() calls on lines {lines} now write to "
+    "stderr (mechanical stdout fix). If `## Skill Form` still lists script_lint or inputs "
+    "conditions, fix all of them now in ONE propose_material_patch against the updated material; "
+    "the user already agreed to adapt the code, so do not ask again. The user has NOT run the "
+    "patched code yet: ask them to run it once with real inputs before recording "
+    "script_covers_operations=true."
+)
+
 MAX_MATERIAL_PATCH_REJECTIONS = 3
 
 _MATERIAL_PATCH_INCOMPLETE_GUIDANCE = (
@@ -1670,8 +1679,8 @@ def _material_patch_refusal(exc: MaterialPatchRefused, count: int) -> str:
     return f"{exc}{tail} {_MATERIAL_PATCH_RETRY_GUIDANCE}" if exc.retryable else f"{exc}{tail}"
 
 
-def _checked_material_patch(session: Session, material_id: str, patch: str) -> tuple[int, str]:
-    """Validate a propose_material_patch against the session as it is now; returns (index, patched content)."""
+def _material_patch_target(session: Session, material_id: str) -> int:
+    """Index of the code material a propose_material_patch may change now; ValueError otherwise."""
     if session.current_stage != Stage.PREPARE.value:
         raise ValueError(f"propose_material_patch only allowed in PREPARE (current={session.current_stage}).")
     if _form_prompt_key(session) != "script_candidate":
@@ -1690,6 +1699,47 @@ def _checked_material_patch(session: Session, material_id: str, patch: str) -> t
             "The code material is truncated in your prompt, so a patch cannot be checked against "
             "it. Ask the user to shorten the material instead."
         )
+    return index
+
+
+def _checked_stdout_fix(session: Session, material_id: str, patch: str | None = None) -> tuple[int, str, str, list[int]]:
+    """(index, fixed content, review patch, changed lines); ``patch`` = the one the user reviewed.
+
+    Never a refusal: the fix is computed, so a failure here is not the agent's patch to retry.
+    """
+    index = _material_patch_target(session, material_id)
+    before = session.materials[index].content
+    try:
+        updated, lines = stdout_to_stderr(before)
+    except SyntaxError as exc:
+        raise ValueError(f"The code material is not valid Python ({exc.msg}, line {exc.lineno}).") from exc
+    if not lines:
+        raise ValueError(
+            "No print() in the code material can move to stderr mechanically. Fix the remaining "
+            "findings with a regular propose_material_patch."
+        )
+    expected = v4a_from_contents(material_id, before, updated)
+    if patch is not None and patch != expected:
+        raise ValueError(
+            "The code material changed after this stdout fix was proposed. Propose it again with "
+            "stdout_fix=true."
+        )
+    return index, updated, expected, lines
+
+
+def _fill_stdout_fix_patch(session: Session, data: dict[str, Any]) -> None:
+    """Put the computed diff into a stdout_fix call so the card shows what the user accepts."""
+    args = data.setdefault("args", {})
+    _, _, patch, _ = _checked_stdout_fix(session, str(args.get("material_id", "")))
+    args["patch"] = patch
+    for call in session.pending_tool_calls:
+        if call.call_id == data.get("call_id"):
+            call.args["patch"] = patch
+
+
+def _checked_material_patch(session: Session, material_id: str, patch: str) -> tuple[int, str]:
+    """Validate a propose_material_patch against the session as it is now; returns (index, patched content)."""
+    index = _material_patch_target(session, material_id)
     before = session.materials[index].content
     try:
         updated, _ = apply_v4a_to_content(before, patch)
@@ -1718,8 +1768,12 @@ def _checked_material_patch(session: Session, material_id: str, patch: str) -> t
 
 def _accept_material_patch(session: Session, call) -> None:
     material_id = str(call.args.get("material_id", ""))
+    stdout_fix = bool(call.args.get("stdout_fix"))
     try:
-        index, updated = _checked_material_patch(session, material_id, str(call.args.get("patch", "")))
+        if stdout_fix:
+            index, updated, _, fixed_lines = _checked_stdout_fix(session, material_id, str(call.args.get("patch", "")))
+        else:
+            index, updated = _checked_material_patch(session, material_id, str(call.args.get("patch", "")))
     except ValueError as exc:
         session.conversation.append(
             ChatMessage(
@@ -1747,7 +1801,11 @@ def _accept_material_patch(session: Session, call) -> None:
     session.conversation.append(
         ChatMessage(
             role=MessageRole.SYSTEM,
-            content=MATERIAL_PATCHED_MESSAGE.format(material_id=material_id),
+            content=(
+                STDOUT_FIX_APPLIED_MESSAGE.format(material_id=material_id, lines=", ".join(map(str, fixed_lines)))
+                if stdout_fix
+                else MATERIAL_PATCHED_MESSAGE.format(material_id=material_id)
+            ),
             metadata={"material_patched": material_id},
         )
     )
@@ -2095,6 +2153,9 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         return
 
     if tool == "propose_material_patch":
+        if args.get("stdout_fix"):
+            _checked_stdout_fix(session, str(args.get("material_id", "")), args.get("patch"))
+            return
         if session.material_patch_rejections >= MAX_MATERIAL_PATCH_REJECTIONS:
             raise ValueError(_MATERIAL_PATCH_LIMIT_GUIDANCE.format(count=session.material_patch_rejections))
         try:
@@ -3096,6 +3157,8 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
                     stage=session.current_stage,
                 )
                 try:
+                    if data.get("tool") == "propose_material_patch" and (data.get("args") or {}).get("stdout_fix"):
+                        _fill_stdout_fix_patch(session, data)
                     apply_tool_effect(session, data["tool"], data.get("args", {}))
                 except QualityGateError as qge:
                     log_event(

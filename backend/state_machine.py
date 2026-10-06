@@ -31,7 +31,13 @@ from .models import (
     TestResult,
     prepare_checklist_for,
 )
-from .skill_lint import is_needs_info_response, needs_info_line, script_argument_names, script_only_errors
+from .skill_lint import (
+    is_needs_info_response,
+    needs_info_line,
+    script_argument_names,
+    script_only_errors,
+    stdout_to_stderr,
+)
 from .topology import declared_children, parse_frontmatter_block
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -884,6 +890,9 @@ def _format_skill_form(session: Session) -> str | None:
     if verdict.failures:
         lines += ["", "Unmet script-form conditions:"]
         lines += [_form_check_line(failure) for failure in verdict.failures]
+    stdout_fix = _stdout_fix_line(session)
+    if stdout_fix:
+        lines += ["", stdout_fix]
     replacement = script_replacement_problems(session)
     if replacement:
         lines += ["", "The code material did not replace the script; the previous script is kept:"]
@@ -893,6 +902,25 @@ def _format_skill_form(session: Session) -> str | None:
 
 def _form_check_line(failure: FormCheck) -> str:
     return f"- {failure.check}{f' ({failure.rule})' if failure.rule else ''}: {failure.message}"
+
+
+def _stdout_fix_line(session: Session) -> str | None:
+    if _form_prompt_key(session) != "script_candidate":
+        return None
+    codes = [m for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+    if len(codes) != 1:
+        return None
+    try:
+        _, lines = stdout_to_stderr(codes[0].content)
+    except SyntaxError:
+        return None
+    if not lines:
+        return None
+    return (
+        f"Mechanical stdout fix available: the plain-text print() calls on lines "
+        f"{', '.join(map(str, lines))} can move to stderr via "
+        f'`propose_material_patch(material_id="{codes[0].id}", stdout_fix=true)` (no `patch`).'
+    )
 
 
 def _form_prompt_key(session: Session) -> str | None:

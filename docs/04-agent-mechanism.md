@@ -106,7 +106,7 @@ E5（產出檔必須是 work_dir 第一層的一般檔案）無法靜態判斷�
 | `record_variables` | PREPARE | 寫入三類歸口變數（現有 ACA 變數、OBO registry scopes、執行期 Runtime）。 |
 | `update_prepare_checklist` | PREPARE | 更新準備期 Checklist 子項 (definition_clear 等)，附帶實質佐證文字。 |
 | `propose_neighbor_edit` | PREPARE / REFINE | 對鄰近 Peer Skill 提交 V4A 補丁，修剪 description 或補 When NOT to Use。 |
-| `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script。見 7.5 節。 |
+| `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script；`stdout_fix=true` 時由後端計算機械式 stdout 修正。見 7.5 節。 |
 | `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter）。儲存前被 lint 擋下時可再送一次完整修正版；儲存後不可再用。 |
 | `propose_patch` | REFINE / TEST | 提交極小區間 of V4A git-like Patch（依 Anchor 替換代碼或內文）。 |
 | `rename_skill` | REFINE / TEST | 改名。後端直接改寫 frontmatter `name`，並把 Blob 資料夾、SQL 列與所有授權搬到新名稱，舊名刪除。frontmatter `name` 不得用 `propose_patch` 修改。 |
@@ -425,6 +425,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 - 只在 capability session 有 `code` 素材，或形式已鎖定為 script 時出現。
 - `eaa_flags` 未滿足時只列這一條（其他條件此時都無意義），不寫 `locked`。
 - 其餘情況列 `form`、`locked`，未鎖定時列出每一項未滿足的條件（`check (rule): message`，只陳述失敗了什麼、不給修法）。
+- `script_candidate` 且素材有可機械式移到 stderr 的 `print` 時，另加一行 `Mechanical stdout fix available: ...`（列行號與呼叫方式）；這是唯一指出修法的一行，因為修法由後端計算，見 7.5 節。
 - 鎖定為 script 且新的 `code` 素材沒能取代 script 時，加一段「The code material did not replace the script; the previous script is kept:」與原因。
 
 新增 prompt 檔一定要登記在上述某個 map，否則不會被載入。行為隨形式不同時，加 addendum 而不是複製整份 stage prompt。
@@ -539,6 +540,13 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 - 重試上限：提出時被 gate 拒絕（套不上、無改動、無法解析、改寫、殘留問題）會累加 `session.material_patch_rejections`，階段或資格不符不計。每次拒絕訊息都附 `Refusal N of 3`；可重送的拒絕另外說明「素材完全沒有被修改，下一個 patch 要以原素材為基準並包含先前所有修正，且不必再問使用者」。`propose_material_patch` 的恢復指引不附加「詢問使用者」的通用尾句。第 3 次拒絕即宣告達到 `MAX_MATERIAL_PATCH_REJECTIONS`，之後的提案直接被拒，並要求 Agent 停止提案、告訴使用者維持 inline 並列出每條 finding。code 素材內容一變（含接受 patch）計數歸零。
 - 重試不是後端迴圈：每次拒絕以 system 訊息交回 Agent，由 Agent 在下一輪依訊息重送；後端只負責判定、計數與停止。
 
+**機械式 stdout 修正**（`propose_material_patch(stdout_fix=true)`，不帶 `patch`）：使用者最常問「為什麼不能 `print`」。原因是 EAA 把 exit 0 的 stdout 當成結果交給呼叫端 agent，整段能解析成一份 JSON 時只檢查少數硬性錯誤 pattern，否則連 `failed`、`Error:` 等字眼都掃，成功的執行可能被判成 `content_error`；exit 0 時 stderr 不會交給 agent（S4）。`skill_lint.stdout_to_stderr()` 以 AST 找出 S4 中「只印進度文字」的 `print`，加上 `file=sys.stderr`，必要時補 `import sys`：
+
+- 只動語句層級、沒有 keyword 引數、每個引數都是字串或 f-string 的 `print`。
+- 不動：可能就是結果的 `print(result)`、文字含失敗字眼（`error`、`fail`、`失敗`、`無法` 等）、在 `except` 內或同一區塊後面接 `raise` / 非 0 exit、在 `[NEEDS_INFO]` 之後。這些需要判斷語意，留給一般 patch。
+- 有可移動的 `print` 時，`## Skill Form` 多一行 `Mechanical stdout fix available: ... lines N ...`。Agent 取得使用者同意調整素材後先提這個修正；chat 處理 tool call 時 `_fill_stdout_fix_patch()` 把算出的 V4A diff（`patch.v4a_from_contents()`）寫進 `args.patch`，卡片顯示的就是實際會套用的內容。
+- 不走 `_checked_material_patch()` 的殘留判定（允許只修一部分），也不計入重試上限。接受時對當下素材重算，diff 與使用者看到的不同就回 409。套用後計數歸零，system 訊息要求 Agent 把 `## Skill Form` 剩下的問題在**一個**一般 patch 內修完，不必再問使用者。
+
 **範例**：一支 EAA 每日用量報表腳本，單價由 `--price-input` / `--price-output` 等參數傳入。原本的 `parse_pricing()` 有三個問題：`ArgumentParser` 保留 `--help`（S10b）、`parse_args()` 沒有處理 argparse 的 exit 2（S10），以及缺值時呼叫 `p.error(...)`（同樣是 exit 2）。另外，單價格式錯誤時 `_price()` 拋出的 `ValueError` 會讓程式以 traceback 結束。Agent 提出的 patch 只改這幾處：
 
 ```diff
@@ -588,7 +596,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 - **沒改什麼**：單價的欄位、`_price()` 的換算、報表計算與所有外部呼叫都原封不動。重新包成 `try` 的 `return` 區塊只改了縮排，比例計算忽略縮排，不算改動；新增的 `print` / `json.dumps` / `SystemExit` 都是邊界語句。
 - **Gate 會擋下的寫法**：只加 `add_help=False`、漏掉 `try` / `except SystemExit`（殘留 S10）；`[NEEDS_INFO]` 後面再印一行純文字（S4）；把 `p.error(...)` 換成印到 stderr 後 `sys.exit(2)`（S5：exit code 只能是 0 / 1 / 3）。
 
-Agent 端的寫法由 [prompts/01_prepare_script_addendum.md](../prompts/01_prepare_script_addendum.md) 規範：一個 patch 修掉 `## Skill Form` 列出的所有 finding（依 finding 引用的原始碼找行，不數行號）；`[NEEDS_INFO]` 後的說明放進其後的 JSON；回報失敗的診斷要進結果 JSON 並 exit 3，不能只移到 stderr；request 輸入改用 argparse，並用 `ArgumentParser(add_help=False)`、把 `parse_args()` 包在 `try` / `except SystemExit`（S10 / S10b）；被拒的 patch 不會套用，下一個要以原素材為基準；只有工具回報達到上限時才停止，不自行推斷。
+Agent 端的寫法由 [prompts/01_prepare_script_addendum.md](../prompts/01_prepare_script_addendum.md) 規範：`## Skill Form` 提供機械式 stdout 修正時先提它；一般 patch 要一個修掉所有 finding（依 finding 引用的原始碼找行，不數行號）；`[NEEDS_INFO]` 後的說明放進其後的 JSON；回報失敗的診斷要進結果 JSON 並 exit 3，不能只移到 stderr；request 輸入改用 argparse，並用 `ArgumentParser(add_help=False)`、把 `parse_args()` 包在 `try` / `except SystemExit`（S10 / S10b）；被拒的 patch 不會套用，下一個要以原素材為基準；只有工具回報達到上限時才停止，不自行推斷。
 
 提出時被拒走一般的 `tool_effect_rejected`；接受時被拒回 409 `material_patch_rejected`，素材不變。接受成功後素材 `origin="agent_patch"`，`user_content` 保留第一次被改前的使用者原文；覆蓋確認照上表重置，並寫入 system 訊息要求使用者先實際執行一次。`## Materials` 的素材標頭會加上 `origin=agent_patch, not run by the user`。使用者之後自行編輯素材（`PUT`）即回到 `origin="user"`。沒有 undo；是否已執行只靠 prompt 與 UI 標記，後端不擋 `script_covers_operations`。
 
