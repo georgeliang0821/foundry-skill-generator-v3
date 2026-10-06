@@ -431,17 +431,26 @@ class AzureBlobSkillStore:
         # Trailing slash keeps skills/foo/ from matching skills/foo-bar/.
         return f"{self._skill_root(name)}/"
 
+    def _list_entries(self, prefix: str) -> tuple[list[str], list[str]]:
+        """Return (files, directories) under prefix; directories only exist on HNS accounts."""
+        files: list[str] = []
+        dirs: list[str] = []
+        for blob in self._container().list_blobs(name_starts_with=prefix, include=["metadata"]):
+            is_dir = (getattr(blob, "metadata", None) or {}).get("hdi_isfolder") == "true"
+            (dirs if is_dir else files).append(str(blob.name))
+        return files, dirs
+
     def load_assets(self, name: str) -> dict[str, bytes]:
         safe = safe_skill_name(name)
         skill_dir = self._skill_dir(safe)
         managed = managed_relpaths_of(safe)
         container = self._container()
         assets: dict[str, bytes] = {}
-        for blob in container.list_blobs(name_starts_with=skill_dir):
-            relpath = str(blob.name)[len(skill_dir):]
+        for blob_name in self._list_entries(skill_dir)[0]:
+            relpath = blob_name[len(skill_dir):]
             if relpath in managed:
                 continue
-            assets[relpath] = container.get_blob_client(str(blob.name)).download_blob().readall()
+            assets[relpath] = container.get_blob_client(blob_name).download_blob().readall()
         log_event("skill_store.azure.load_assets.done", skill_name=safe, count=len(assets))
         return assets
 
@@ -457,11 +466,7 @@ class AzureBlobSkillStore:
                 content_settings=ContentSettings(content_type=_asset_content_type(relpath)),
             )
         keep = managed_relpaths_of(safe) | set(assets)
-        stale = [
-            str(blob.name)
-            for blob in container.list_blobs(name_starts_with=skill_dir)
-            if str(blob.name)[len(skill_dir):] not in keep
-        ]
+        stale = [blob_name for blob_name in self._list_entries(skill_dir)[0] if blob_name[len(skill_dir):] not in keep]
         for blob_name in stale:
             container.delete_blob(blob_name)
         log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
@@ -529,7 +534,11 @@ class AzureBlobSkillStore:
         started = now_ms()
         safe = safe_skill_name(name)
         container = self._container()
-        paths = [str(blob.name) for blob in container.list_blobs(name_starts_with=self._skill_dir(safe))]
+        files, dirs = self._list_entries(self._skill_dir(safe))
+        # HNS refuses to delete a non-empty directory, so files go first, then dirs deepest-first.
+        if dirs:
+            dirs = sorted(dirs, key=lambda d: d.count("/"), reverse=True) + [self._skill_root(safe)]
+        paths = files + dirs
         for path in paths:
             try:
                 container.delete_blob(path)
@@ -547,7 +556,7 @@ class AzureBlobSkillStore:
                     skill_path=path,
                     error=str(exc),
                 )
-        if not paths:
+        if not files:
             log_event("skill_store.azure.delete.missing", level="warning", skill_name=safe, skill_path=self._skill_dir(safe))
 
 

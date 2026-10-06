@@ -256,8 +256,8 @@ class _FakeBlobContainer:
         self.blobs = dict(blobs)
         self.content_types: dict[str, str] = {}
 
-    def list_blobs(self, name_starts_with: str = ""):
-        return [type("_B", (), {"name": n, "etag": "e"})() for n in sorted(self.blobs) if n.startswith(name_starts_with)]
+    def list_blobs(self, name_starts_with: str = "", include=None):
+        return [type("_B", (), {"name": n, "etag": "e", "metadata": {}})() for n in sorted(self.blobs) if n.startswith(name_starts_with)]
 
     def delete_blob(self, name: str) -> None:
         del self.blobs[name]
@@ -334,3 +334,72 @@ def test_azure_store_delete_removes_the_whole_prefix_only() -> None:
     _azure_store(container).delete_skill("demo")
 
     assert list(container.blobs) == ["skills/demo-bar/SKILL.md"]
+
+
+class _FakeHnsContainer(_FakeBlobContainer):
+    """Hierarchical-namespace account: parent directories are listed and guard deletes."""
+
+    def __init__(self, blobs: dict[str, bytes]) -> None:
+        super().__init__({})
+        self.dirs: set[str] = set()
+        for name, data in blobs.items():
+            self._add(name, data)
+
+    def _add(self, name: str, data) -> None:
+        parts = name.split("/")
+        self.dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+        self.blobs[name] = data
+
+    def list_blobs(self, name_starts_with: str = "", include=None):
+        entries = [(n, {}) for n in self.blobs] + [(d, {"hdi_isfolder": "true"}) for d in self.dirs]
+        return [
+            type("_B", (), {"name": n, "etag": "e", "metadata": meta if include else None})()
+            for n, meta in sorted(entries)
+            if n.startswith(name_starts_with)
+        ]
+
+    def delete_blob(self, name: str) -> None:
+        if name in self.dirs:
+            if any(n.startswith(f"{name}/") for n in [*self.blobs, *self.dirs]):
+                raise RuntimeError("DirectoryIsNotEmpty")
+            self.dirs.remove(name)
+            return
+        del self.blobs[name]
+
+    def get_blob_client(self, name: str):
+        client = super().get_blob_client(name)
+        container = self
+        upload = client.upload_blob
+
+        def upload_blob(data, **kw):
+            upload(data, **kw)
+            container._add(name, data)
+
+        client.upload_blob = upload_blob
+        return client
+
+
+def test_azure_store_on_hns_saves_assets_without_deleting_directories() -> None:
+    container = _FakeHnsContainer({"skills/demo/SKILL.md": b"old", "skills/demo/assets/old.css": b"o"})
+    store = _azure_store(container)
+
+    store.save_skill(SkillFiles(name="demo", skill_md="---\nname: demo\n---\n", assets={"assets/new.css": "n"}))
+
+    assert sorted(container.blobs) == ["skills/demo/SKILL.md", "skills/demo/assets/new.css"]
+    assert store.load_assets("demo") == {"assets/new.css": b"n"}
+
+
+def test_azure_store_on_hns_delete_removes_files_and_directories() -> None:
+    container = _FakeHnsContainer(
+        {
+            "skills/demo/SKILL.md": b"m",
+            "skills/demo/assets/img/a.png": b"a",
+            "skills/demo/scripts/demo.py": b"s",
+            "skills/demo-bar/SKILL.md": b"m",
+        }
+    )
+
+    _azure_store(container).delete_skill("demo")
+
+    assert list(container.blobs) == ["skills/demo-bar/SKILL.md"]
+    assert sorted(container.dirs) == ["skills", "skills/demo-bar"]

@@ -124,6 +124,8 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 
 > Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，刻意忽略 `AZURE_*` service principal，也不支援連線字串。
 
+> 儲存體帳戶可啟用或不啟用階層命名空間（ADLS Gen2）；啟用時列出的目錄項目（`hdi_isfolder`）不會被當成 skill 資產，刪除 skill 時也會一併移除其目錄。
+
 ### 2.6 EAA MCP
 
 儲存 skill 前，後端會透過 EAA 的 MCP 伺服器呼叫 `lint_skill_package`，用 EAA 自己的規則檢核。此檢核為 **fail-closed**：取不到判定就回 HTTP 503，不會儲存。
