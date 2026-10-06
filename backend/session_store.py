@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .diagnostics import elapsed_ms, log_event, log_exception, now_ms
-from .models import MessageRole, Session, SessionSummary, migrate_legacy_session
+from .models import PERSIST_CONTEXT, MessageRole, Session, SessionSummary, migrate_legacy_session
 
 
 class SessionStore(Protocol):
@@ -118,7 +118,7 @@ class LocalSessionStore(_SessionSummaryMixin):
         # path, and whichever lost the race would replace() a file the winner
         # had already moved away (WinError 2).
         tmp = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+        tmp.write_text(session.model_dump_json(indent=2, context=PERSIST_CONTEXT), encoding="utf-8")
         for attempt in range(5):
             try:
                 tmp.replace(path)
@@ -230,7 +230,7 @@ class AzureBlobSessionStore(_SessionSummaryMixin):
     def save(self, session: Session) -> None:
         started = now_ms()
         blob_name = self._blob_name(session)
-        data = session.model_dump_json(indent=2).encode("utf-8")
+        data = session.model_dump_json(indent=2, context=PERSIST_CONTEXT).encode("utf-8")
         self._container().upload_blob(blob_name, data, overwrite=True)
         log_event(
             "session_store.azure.save.done",

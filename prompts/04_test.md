@@ -123,9 +123,9 @@ discards (A15) and code shapes the execution sandbox breaks (E1-E4).
 diff the tool already printed costs a turn and produces a second opinion that can
 only disagree with the first. Copy each printed `[error]` finding into
 `what_to_change` as its own atomic entry, mention `[warning]` / `[info]` ones to
-the user without making them fix items, then spend your reading on the four
-checks below -- the ones that depend on what the code MEANS and that no static
-rule can settle.
+the user without making them fix items, then spend your reading on checks 1-4
+below -- the ones that depend on what the code MEANS and that no static
+rule can settle. Check 5 is already computed; you only present it.
 
 When the same rule fires on both the body lint and the prepared-code findings,
 the body is the root cause and the place to patch. When it fires only on the
@@ -191,6 +191,27 @@ twice.
 
 The fix is almost never a bigger success message. It is to print what the tool
 actually returned, or to check the outcome before saying anything about it.
+
+### 5. Resource reads
+
+When the skill ships files, `### Resource reads` compares each `## Skill
+Resources` label with what the runtime actually read for the positive samples
+that routed here. Every entry is advisory, so none becomes a `what_to_change`
+item on its own:
+
+- **F5** -- a `required` resource was not read. Two causes look identical from
+  here: the body does not tell the runtime to read it clearly enough, or the
+  sample never exercised the part of the skill that needs it (or the label
+  should be `on-demand`). Show the user which, in your reading, is more likely
+  and let them choose with `ask_user_input`: patch the body, change the
+  samples, relabel, or leave it.
+- **F6** -- the runtime tried to read a resource and failed. Usually a wrong
+  `resource_name` in the body; quote the error to the user.
+- **F4** -- the resource has no valid label, so it was not checked. Offer to add
+  one.
+- An `on-demand` resource that was not read is never a finding.
+
+Add an entry to `what_to_change` only for the options the user picks.
 
 ### Classifying what you find
 

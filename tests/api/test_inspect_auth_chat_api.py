@@ -32,6 +32,7 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
         "10_format_spec.md",
         "10_format_spec_scenario.md",
         "11_output_rules.md",
+        "14_skill_assets.md",
     }
     assert all("<!-- Missing:" not in prompt["content"] for prompt in body["prompts"])
     assert {transition["from"] for transition in body["transitions"]} == {

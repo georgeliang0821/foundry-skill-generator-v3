@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import os
 import re
 from dataclasses import dataclass
@@ -66,6 +67,16 @@ def script_relpath_of(skill_name: str) -> str:
 
 def script_blob_path_of(skill_name: str, owner_upn: str | None = None) -> str:
     return f"{blob_prefix_of(skill_name, owner_upn)}{script_relpath_of(skill_name)}"
+
+
+def managed_relpaths_of(skill_name: str) -> set[str]:
+    """Files under a skill prefix that are not user assets."""
+    return {"SKILL.md", script_relpath_of(skill_name)}
+
+
+def _asset_content_type(relpath: str) -> str:
+    guessed = mimetypes.guess_type(relpath)[0] or "text/plain"
+    return f"{guessed}; charset=utf-8"
 
 
 def _frontmatter_field_regex(block: str, key: str) -> str:
@@ -186,6 +197,7 @@ class SkillStore(Protocol):
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles: ...
     def delete_skill(self, name: str) -> None: ...
     def has_script(self, name: str) -> bool: ...
+    def load_assets(self, name: str) -> dict[str, bytes]: ...
 
 
 class LocalSkillStore:
@@ -193,6 +205,8 @@ class LocalSkillStore:
 
     def __init__(self) -> None:
         self._skills: dict[str, SkillFiles] = {}
+        # Raw bytes so a test can plant a file that would fail the asset checks.
+        self._assets: dict[str, dict[str, bytes]] = {}
         self.id = "local"
         log_event("skill_store.local.ready", store_id=self.id)
 
@@ -240,6 +254,8 @@ class LocalSkillStore:
         saved.blob_path = blob_path_of(safe)
         if saved.script is None and current is not None:
             saved.script = current.script
+        if saved.assets is not None:
+            self._assets[safe] = {path: text.encode("utf-8") for path, text in saved.assets.items()}
         self._skills[safe] = saved
         log_event(
             "skill_store.local.save.done",
@@ -252,11 +268,15 @@ class LocalSkillStore:
     def delete_skill(self, name: str) -> None:
         safe = safe_skill_name(name)
         existed = self._skills.pop(safe, None) is not None
+        self._assets.pop(safe, None)
         log_event("skill_store.local.delete.done", skill_name=safe, existed=existed)
 
     def has_script(self, name: str) -> bool:
         current = self._skills.get(safe_skill_name(name))
         return current is not None and current.script is not None
+
+    def load_assets(self, name: str) -> dict[str, bytes]:
+        return dict(self._assets.get(safe_skill_name(name), {}))
 
 
 class AzureBlobSkillStore:
@@ -407,6 +427,45 @@ class AzureBlobSkillStore:
     def has_script(self, name: str) -> bool:
         return bool(self._container().get_blob_client(self._script_path(name)).exists())
 
+    def _skill_dir(self, name: str) -> str:
+        # Trailing slash keeps skills/foo/ from matching skills/foo-bar/.
+        return f"{self._skill_root(name)}/"
+
+    def load_assets(self, name: str) -> dict[str, bytes]:
+        safe = safe_skill_name(name)
+        skill_dir = self._skill_dir(safe)
+        managed = managed_relpaths_of(safe)
+        container = self._container()
+        assets: dict[str, bytes] = {}
+        for blob in container.list_blobs(name_starts_with=skill_dir):
+            relpath = str(blob.name)[len(skill_dir):]
+            if relpath in managed:
+                continue
+            assets[relpath] = container.get_blob_client(str(blob.name)).download_blob().readall()
+        log_event("skill_store.azure.load_assets.done", skill_name=safe, count=len(assets))
+        return assets
+
+    def _write_assets(self, safe: str, assets: dict[str, str]) -> None:
+        from azure.storage.blob import ContentSettings
+
+        container = self._container()
+        skill_dir = self._skill_dir(safe)
+        for relpath, text in assets.items():
+            container.get_blob_client(f"{skill_dir}{relpath}").upload_blob(
+                text.encode("utf-8"),
+                overwrite=True,
+                content_settings=ContentSettings(content_type=_asset_content_type(relpath)),
+            )
+        keep = managed_relpaths_of(safe) | set(assets)
+        stale = [
+            str(blob.name)
+            for blob in container.list_blobs(name_starts_with=skill_dir)
+            if str(blob.name)[len(skill_dir):] not in keep
+        ]
+        for blob_name in stale:
+            container.delete_blob(blob_name)
+        log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
+
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
         from azure.core import MatchConditions
         from azure.core.exceptions import ResourceModifiedError
@@ -432,6 +491,8 @@ class AzureBlobSkillStore:
                 **kwargs,
             )
             props = skill_blob.get_blob_properties()
+            if files.assets is not None:
+                self._write_assets(safe, files.assets)
             # Last write before updated_at bumps: EAA caches SKILL.md but fetches the script every turn.
             if files.script is not None:
                 container.get_blob_client(self._script_path(safe)).upload_blob(
@@ -468,7 +529,8 @@ class AzureBlobSkillStore:
         started = now_ms()
         safe = safe_skill_name(name)
         container = self._container()
-        for path in (self._skill_path(safe), self._script_path(safe)):
+        paths = [str(blob.name) for blob in container.list_blobs(name_starts_with=self._skill_dir(safe))]
+        for path in paths:
             try:
                 container.delete_blob(path)
                 log_event(
@@ -485,6 +547,8 @@ class AzureBlobSkillStore:
                     skill_path=path,
                     error=str(exc),
                 )
+        if not paths:
+            log_event("skill_store.azure.delete.missing", level="warning", skill_name=safe, skill_path=self._skill_dir(safe))
 
 
 @dataclass
@@ -524,6 +588,9 @@ class CachedSkillStore:
 
     def has_script(self, name: str) -> bool:
         return self.store.has_script(name)
+
+    def load_assets(self, name: str) -> dict[str, bytes]:
+        return self.store.load_assets(name)
 
 
 def make_skill_store() -> CachedSkillStore:

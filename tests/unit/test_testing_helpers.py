@@ -14,6 +14,7 @@ from backend.testing import (
     ModeEchoError,
     RunAuthError,
     _evaluate_apim_result,
+    _check_resource_reads,
     _post_apim_run,
     _test_request,
     extract_skill_used,
@@ -353,16 +354,44 @@ def test_evaluate_backfills_loaded_resources_from_the_raw_response() -> None:
     output = {
         "response_text": "script text",
         "skills_referenced": ["demo-skill"],
-        "raw_response": {"loaded_resources": ["SKILL.md", " query.sql ", "none"]},
+        "raw_response": {
+            "loaded_resources": [
+                ["demo-skill", "assets/style.css"],
+                ["demo-skill", " style.css "],
+                ["demo-skill", "Template.html", "assets/template.html"],
+                ["demo-skill", "assets/x.md", "ASSETS/X.md"],
+                ["demo-skill", ""],
+                ["demo-skill", 3],
+                ["demo-skill", "a", "b", "c"],
+            ],
+            "failed_resources": [["demo-skill", "nope.css", "Error: not found"], ["demo-skill", "x"]],
+        },
         "duration_ms": 5,
+    }
+    result = _evaluate_apim_result("q", output, "demo-skill", "demo-skill", run_mode=ROUTE_ONLY)
+    # Both spellings of the same file are kept: they record what the model actually asked for.
+    assert result.loaded_resources == [
+        "demo-skill: assets/style.css",
+        "demo-skill: style.css",
+        "demo-skill: Template.html -> assets/template.html",
+        "demo-skill: assets/x.md",
+    ]
+    assert result.failed_resources == ["demo-skill: nope.css -- Error: not found", "demo-skill: x"]
+
+
+def test_loaded_resources_still_accepts_plain_strings() -> None:
+    output = {
+        "response_text": "x",
+        "skills_referenced": [],
+        "raw_response": {"loaded_resources": ["SKILL.md", " query.sql ", "none"]},
+        "duration_ms": 1,
     }
     result = _evaluate_apim_result("q", output, "demo-skill", "demo-skill", run_mode=ROUTE_ONLY)
     assert result.loaded_resources == ["SKILL.md", "query.sql"]
 
 
 def test_loaded_resources_is_empty_when_the_runtime_omits_it() -> None:
-    # The key name is not yet confirmed against a live runtime, so an absent or
-    # unexpected shape must degrade to "no signal", never to an error.
+    # An absent or unexpected shape must degrade to "no signal", never to an error.
     for raw in ({}, {"loaded_resources": None}, {"loaded_resources": 7}):
         result = _evaluate_apim_result(
             "q",
@@ -372,6 +401,82 @@ def test_loaded_resources_is_empty_when_the_runtime_omits_it() -> None:
             run_mode=ROUTE_ONLY,
         )
         assert result.loaded_resources == []
+
+
+_RESOURCES_MD = (
+    "---\nname: demo-skill\ndescription: d\n---\n\n## Overview\n\nBody.\n\n## Skill Resources\n\n"
+    "- `assets/style.css` (required, embed) -- styles.\n"
+    "- `references/codes.md` (on-demand, reference) -- codes.\n"
+    "- `assets/notes.md` -- unlabelled.\n"
+)
+
+
+def _routed(query: str, raw: dict, *, passed: bool | None = True, response: str = "print(1)"):
+    from backend.models import TestResult
+
+    return TestResult(query=query, passed=passed, apim_response=response, apim_raw_response=raw)
+
+
+def _rules(findings: list[dict]) -> list[tuple[str, str, str]]:
+    return [(f["rule"], f["severity"], f["detail"]) for f in findings]
+
+
+def test_resource_check_reports_a_required_resource_that_was_not_read() -> None:
+    results = [
+        _routed("q1", {"loaded_resources": [["demo-skill", "style.css"]]}),
+        _routed("q2", {"loaded_resources": [["other-skill", "assets/style.css", "assets/style.css"]]}),
+        _routed("q3", {"loaded_resources": []}),
+    ]
+
+    findings = _check_resource_reads(_RESOURCES_MD, results, "demo-skill")
+
+    # On-demand codes.md is never a finding; another skill's read does not count for this one.
+    assert _rules(findings) == [("F4", "warning", "assets/notes.md"), ("F5", "warning", "assets/style.css")]
+    assert "q2; q3" in findings[1]["message"] and "q1" not in findings[1]["message"]
+
+
+def test_resource_check_compares_the_resolved_name_when_the_runtime_sends_it() -> None:
+    read = [_routed("q", {"loaded_resources": [["demo-skill", "STYLE.css", "assets/style.css"]]})]
+    wrong = [_routed("q", {"loaded_resources": [["demo-skill", "style.css", "references/style.css"]]})]
+
+    assert [f["rule"] for f in _check_resource_reads(_RESOURCES_MD, read, "demo-skill")] == ["F4"]
+    assert [f["rule"] for f in _check_resource_reads(_RESOURCES_MD, wrong, "demo-skill")] == ["F4", "F5"]
+
+
+def test_resource_check_never_reads_an_absent_key_as_nothing_read() -> None:
+    untracked = [_routed("q", {})]
+    needs_info = [_routed("q", {"loaded_resources": []}, response="[NEEDS_INFO] missing=X")]
+    elsewhere = [_routed("q", {"loaded_resources": []}, passed=False)]
+
+    assert _rules(_check_resource_reads(_RESOURCES_MD, untracked, "demo-skill"))[1:] == [("F5", "info", "")]
+    assert _rules(_check_resource_reads(_RESOURCES_MD, needs_info, "demo-skill"))[1:] == [("F5", "info", "")]
+    assert _rules(_check_resource_reads(_RESOURCES_MD, elsewhere, "demo-skill"))[1:] == []
+
+
+def test_resource_check_reports_failed_reads_once_per_name() -> None:
+    raw = {
+        "loaded_resources": [["demo-skill", "assets/style.css"]],
+        "failed_resources": [["demo-skill", "style.cs", "Error: not found"], ["other-skill", "x", "Error"]],
+    }
+
+    findings = _check_resource_reads(_RESOURCES_MD, [_routed("q1", raw), _routed("q2", raw)], "demo-skill")
+
+    assert _rules(findings) == [("F4", "warning", "assets/notes.md"), ("F6", "warning", "style.cs")]
+    assert "Error: not found" in findings[1]["message"]
+
+
+def test_resource_check_is_silent_without_a_skill_resources_section() -> None:
+    assert _check_resource_reads("---\nname: demo-skill\n---\n\n## Overview\n", [_routed("q", {})], "demo-skill") == []
+
+
+def test_latest_test_run_prints_resource_reads_only_when_there_are_findings() -> None:
+    from backend.models import Session, TestRun
+    from backend.state_machine import _format_latest_test_run
+
+    session = Session(test_runs=[TestRun()])
+    assert "### Resource reads" not in _format_latest_test_run(session)
+    session.test_runs[0].resource_findings = [{"rule": "F5", "severity": "warning", "message": "m", "detail": "assets/a"}]
+    assert "- [warning] F5 [assets/a]: m" in _format_latest_test_run(session)
 
 
 def _scenario_skill_md() -> str:

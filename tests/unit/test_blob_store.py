@@ -232,3 +232,105 @@ def test_azure_store_list_marks_script_skills_from_the_listing() -> None:
     listed = {entry.name: entry.has_script for entry in store.list_skills()}
 
     assert listed == {"inline": False, "stray": False, "with-script": True}
+
+
+def test_local_store_assets_replace_as_a_set_and_survive_a_save_without_them() -> None:
+    store = LocalSkillStore()
+    md = "---\nname: demo\n---\n"
+    store.save_skill(SkillFiles(name="demo", skill_md=md, assets={"assets/a.css": "a", "references/b.md": "b"}))
+
+    store.save_skill(SkillFiles(name="demo", skill_md=md + "Edited.\n"))
+    assert store.load_assets("demo") == {"assets/a.css": b"a", "references/b.md": b"b"}
+
+    store.save_skill(SkillFiles(name="demo", skill_md=md, assets={"assets/c.css": "c"}))
+    assert store.load_assets("demo") == {"assets/c.css": b"c"}
+
+    store.delete_skill("demo")
+    assert store.load_assets("demo") == {}
+
+
+class _FakeBlobContainer:
+    """Just enough of ContainerClient for save/load_assets/delete_skill."""
+
+    def __init__(self, blobs: dict[str, bytes]) -> None:
+        self.blobs = dict(blobs)
+        self.content_types: dict[str, str] = {}
+
+    def list_blobs(self, name_starts_with: str = ""):
+        return [type("_B", (), {"name": n, "etag": "e"})() for n in sorted(self.blobs) if n.startswith(name_starts_with)]
+
+    def delete_blob(self, name: str) -> None:
+        del self.blobs[name]
+
+    def get_blob_client(self, name: str):
+        container = self
+
+        class _Client:
+            def upload_blob(self, data, overwrite=False, content_settings=None, **_kw):
+                container.blobs[name] = data
+                if content_settings is not None:
+                    container.content_types[name] = content_settings.content_type
+
+            def get_blob_properties(self):
+                return type("_P", (), {"etag": "etag-1"})()
+
+            def download_blob(self):
+                return self
+
+            def readall(self) -> bytes:
+                return container.blobs[name]
+
+        return _Client()
+
+
+def _azure_store(container: _FakeBlobContainer) -> AzureBlobSkillStore:
+    store = object.__new__(AzureBlobSkillStore)
+    store.prefix, store.container, store.id = "skills", "c", "azure:test"
+    store.service = type("_Service", (), {"get_container_client": lambda self, _name: container})()
+    return store
+
+
+def test_azure_store_writes_assets_and_sweeps_only_its_own_prefix() -> None:
+    container = _FakeBlobContainer(
+        {
+            "skills/demo/SKILL.md": b"old",
+            "skills/demo/scripts/demo.py": b"print(1)",
+            "skills/demo/assets/old.css": b"old",
+            "skills/demo-bar/assets/x.css": b"x",
+        }
+    )
+    store = _azure_store(container)
+
+    store.save_skill(SkillFiles(name="demo", skill_md="---\nname: demo\n---\n", assets={"assets/new.css": "n"}))
+
+    assert sorted(container.blobs) == [
+        "skills/demo-bar/assets/x.css",
+        "skills/demo/SKILL.md",
+        "skills/demo/assets/new.css",
+        "skills/demo/scripts/demo.py",
+    ]
+    assert container.content_types["skills/demo/assets/new.css"] == "text/css; charset=utf-8"
+    assert store.load_assets("demo") == {"assets/new.css": b"n"}
+
+
+def test_azure_store_save_without_assets_leaves_them_alone() -> None:
+    container = _FakeBlobContainer({"skills/demo/SKILL.md": b"old", "skills/demo/assets/a.css": b"a"})
+
+    _azure_store(container).save_skill(SkillFiles(name="demo", skill_md="new"))
+
+    assert container.blobs["skills/demo/assets/a.css"] == b"a"
+
+
+def test_azure_store_delete_removes_the_whole_prefix_only() -> None:
+    container = _FakeBlobContainer(
+        {
+            "skills/demo/SKILL.md": b"m",
+            "skills/demo/assets/a.css": b"a",
+            "skills/demo/references/b.md": b"b",
+            "skills/demo-bar/SKILL.md": b"m",
+        }
+    )
+
+    _azure_store(container).delete_skill("demo")
+
+    assert list(container.blobs) == ["skills/demo-bar/SKILL.md"]

@@ -70,7 +70,8 @@ markdown in [prompts/](prompts/). Change wording there, not in Python string lit
 The composition is layered: `00_global_system.md` → stage prompt (overridable per
 `SkillKind` via `KIND_PROMPT_OVERRIDES`) → optional `KIND_STAGE_ADDENDA` → optional
 `FORM_STAGE_ADDENDA` (by skill form: `script_candidate` in PREPARE, `script` from DRAFT
-on; see `_form_prompt_key`) → shared `09`/`10`/`11`/`12` files → runtime session state.
+on; see `_form_prompt_key`) → optional `ASSET_STAGE_ADDENDA` (`14_skill_assets.md` in
+DRAFT/REFINE/TEST, only when the session carries skill assets) → shared `09`/`10`/`11`/`12` files → runtime session state.
 The flags-off note `01_prepare_script_flags_off.md` is not an addendum: it is appended
 to the `eaa_flags` line of the runtime `## Skill Form` block (`SKILL_FORM_FLAGS_OFF_NOTE`);
 when the ACA lookup failed, `01_prepare_script_lookup_failed.md` (`SKILL_FORM_LOOKUP_FAILED_NOTE`)

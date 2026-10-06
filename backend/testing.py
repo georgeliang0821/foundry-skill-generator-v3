@@ -24,7 +24,14 @@ from .models import (
     TestResult,
     TestRun,
 )
-from .skill_lint import is_needs_info_response, lint_skill, script_argument_flags
+from .skill_lint import (
+    RESOURCE_LABEL_FORMAT,
+    LintIssue,
+    is_needs_info_response,
+    lint_skill,
+    parse_resource_labels,
+    script_argument_flags,
+)
 from .topology import has_errors, validate_topology
 
 _TEST_INSTRUCTION = (
@@ -132,9 +139,134 @@ def _extract_loaded_resources(raw_response: Any) -> list[str]:
     Under route_only nothing executes, so this is the only way to tell whether
     the router actually loaded the skill's resources or merely named the skill.
     """
-    # The key name has not yet been confirmed against a live runtime response;
-    # an absent key yields [] rather than an error.
-    return _extract_name_list(raw_response, "loaded_resources")
+    out: list[str] = []
+    for item in _runtime_list(raw_response, "loaded_resources"):
+        # The runtime sends [skill, requested, resolved] (older builds omit resolved);
+        # requested is the model's raw argument, kept so a bare file name stays visible.
+        if isinstance(item, (list, tuple)) and len(item) in (2, 3) and all(isinstance(p, str) for p in item):
+            skill, requested, *rest = (p.strip() for p in item)
+            resolved = rest[0] if rest else ""
+            entry = f"{skill}: {requested}" if skill and requested else ""
+            if entry and resolved and resolved.lower() != requested.lower():
+                entry += f" -> {resolved}"
+        elif isinstance(item, str):
+            entry = item.strip()
+        else:
+            continue
+        if entry and entry.lower() not in {"none", "null", "n/a"} and entry not in out:
+            out.append(entry)
+    return out
+
+
+def _extract_failed_resources(raw_response: Any) -> list[str]:
+    out: list[str] = []
+    for item in _runtime_list(raw_response, "failed_resources"):
+        if isinstance(item, (list, tuple)) and len(item) >= 2 and all(isinstance(p, str) for p in item):
+            skill, requested, *rest = (p.strip() for p in item)
+            entry = f"{skill}: {requested}" + (f" -- {rest[0]}" if rest and rest[0] else "")
+            if skill and requested and entry not in out:
+                out.append(entry)
+    return out
+
+
+def _runtime_list(raw_response: Any, key: str) -> list[Any]:
+    value = raw_response.get(key) if isinstance(raw_response, dict) else None
+    return value if isinstance(value, list) else []
+
+
+def _resource_reads(result: TestResult, key: str, target: str) -> list[tuple[str, ...]] | None:
+    """This skill's [requested, resolved?, ...] tuples; None when the runtime did not track reads.
+
+    The runtime omits the key altogether when it is not tracking, so an absent key
+    must never be read as "nothing was read".
+    """
+    raw = result.apim_raw_response
+    if not isinstance(raw, dict) or key not in raw:
+        return None
+    return [
+        tuple(part.strip() for part in item[1:])
+        for item in _runtime_list(raw, key)
+        if isinstance(item, (list, tuple))
+        and len(item) >= 2
+        and all(isinstance(part, str) for part in item)
+        and safe_skill_name(item[0]) == target
+    ]
+
+
+def _was_read(path: str, reads: list[tuple[str, ...]]) -> bool:
+    wanted = path.lower()
+    basename = wanted.rsplit("/", 1)[-1]
+    for read in reads:
+        requested, resolved = read[0].lower(), (read[1].lower() if len(read) > 1 else "")
+        if resolved:
+            if resolved == wanted:
+                return True
+        elif requested in (wanted, basename):
+            return True
+    return False
+
+
+def _check_resource_reads(
+    skill_content: str, positive_results: list[TestResult], skill_name: str
+) -> list[dict[str, Any]]:
+    """F4-F6 against the runtime's reads. All advisory: a miss can be the body's
+    wording or a sample that never exercised the resource, and only the user can tell.
+    """
+    labels = parse_resource_labels(skill_content)
+    if not labels:
+        return []
+    issues = [
+        LintIssue(
+            rule="F4",
+            message=f"`{path}` has no valid {RESOURCE_LABEL_FORMAT} label, so whether it should be read was not checked.",
+            detail=path,
+        )
+        for path, label in labels.items()
+        if label is None
+    ]
+    target = safe_skill_name(skill_name)
+    routed_any = [r for r in positive_results if r.passed is True]
+    routed = [r for r in routed_any if not is_needs_info_response(r.apim_response)]
+    tracked = [(r, reads) for r in routed if (reads := _resource_reads(r, "loaded_resources", target)) is not None]
+    required = [path for path, label in labels.items() if label and label[0] == "required"]
+    if required and routed_any and not tracked:
+        issues.append(
+            LintIssue(
+                rule="F5",
+                severity="info",
+                message=(
+                    "No sample that routed here has resource reads to check (the runtime did not "
+                    "track them, or every answer was [NEEDS_INFO]), so required resources were not checked."
+                ),
+            )
+        )
+    for path in required:
+        missed = [r.query for r, reads in tracked if not _was_read(path, reads)]
+        if missed:
+            issues.append(
+                LintIssue(
+                    rule="F5",
+                    message=(
+                        f"`{path}` is labelled required but was not read for: {'; '.join(missed)}. "
+                        "Either the body does not tell the runtime to read it clearly enough, or "
+                        "those samples do not exercise the part of the skill that needs it."
+                    ),
+                    detail=path,
+                )
+            )
+    failed: dict[str, str] = {}
+    for result in routed:
+        for read in _resource_reads(result, "failed_resources", target) or []:
+            failed.setdefault(read[0], read[1] if len(read) > 1 else "")
+    issues += [
+        LintIssue(
+            rule="F6",
+            message=f"Reading `{requested}` failed" + (f": {error}" if error else "."),
+            detail=requested,
+        )
+        for requested, error in failed.items()
+    ]
+    return [issue.to_dict() for issue in issues]
 
 
 def _check_requested_scripts(
@@ -434,6 +566,7 @@ def _evaluate_apim_result(
         actual_skill=actual,
         skills_referenced=[str(r) for r in referenced],
         loaded_resources=loaded_resources,
+        failed_resources=_extract_failed_resources(output.get("raw_response")),
         passed=passed,
         reasoning=reasoning,
         apim_response=response_text,
@@ -796,6 +929,7 @@ def run_selection_tests(
         positive_hit_rate=(len(pos_passed) / len(positive_results)) if positive_results else 0.0,
         negative_correct_reject_rate=(len(neg_passed) / len(negative_results)) if negative_results else 0.0,
         notes=[_SIGNAL_LOSS_NOTE] if signal_lost else [],
+        resource_findings=_check_resource_reads(skill_content, positive_results, skill_name),
     )
     log_event(
         "selection_test.run.done",

@@ -3227,6 +3227,51 @@ def _check_operation_coverage(skill_md: str, child: str, child_md: str) -> list[
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+# Not preceded by a path character, so `src/assets/x` and URLs are not mentions.
+_ASSET_MENTION_RE = re.compile(r"(?<![\w/.\-])((?:assets|references)/[^\s`'\"()<>\[\]{},;|*]+)")
+
+
+def _check_asset_references(skill_md: str, asset_paths: Collection[str]) -> list[LintIssue]:
+    """F2: every asset is named by full path in backticks. F3: every asset path named exists."""
+    if not asset_paths:
+        return []
+    text = _without_gatekeeper_addendum(skill_md)
+    issues = [
+        LintIssue(
+            rule="F2",
+            severity="error",
+            message=(
+                f"The asset `{path}` is never named in SKILL.md. List it by its full path in "
+                "`## Skill Resources` and read it with "
+                f'read_skill_resource(skill_name="<name>", resource_name="{path}").'
+            ),
+            detail=path,
+        )
+        for path in asset_paths
+        if f"`{path}`" not in text
+    ]
+    known = set(asset_paths)
+    # Blank out known paths first so a file name with a space is not read as a shorter mention.
+    unknown_text = text
+    for path in sorted(known, key=len, reverse=True):
+        unknown_text = unknown_text.replace(path, " ")
+    mentioned = _unique(m.rstrip(".:") for m in _ASSET_MENTION_RE.findall(unknown_text))
+    issues += [
+        LintIssue(
+            rule="F3",
+            severity="error",
+            message=(
+                f"SKILL.md names `{path}`, but no such asset is attached. Fix the path, or ask "
+                "the user to upload the file."
+            ),
+            detail=path,
+        )
+        for path in mentioned
+        if path not in known
+    ]
+    return issues
+
+
 def lint_skill(
     skill_md: str,
     kind: SkillKind,
@@ -3236,6 +3281,7 @@ def lint_skill(
     code_override: str | None = None,
     obo_registry_keys: Collection[str] | None = None,
     script: str | None = None,
+    asset_paths: Collection[str] = (),
 ) -> list[LintIssue]:
     """Return every content issue in the artifact. Only A1 is an error.
 
@@ -3258,6 +3304,7 @@ def lint_skill(
         _check_platform_secrets(skill_md, platform_code, script)
         + _check_credential_placeholder(skill_md, platform_code)
         + _check_execution_environment(skill_md, platform_code)
+        + _check_asset_references(skill_md, asset_paths)
     )
     if kind is SkillKind.SCENARIO:
         return _lint_scenario(

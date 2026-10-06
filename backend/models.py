@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    computed_field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 def utc_now_iso() -> str:
@@ -98,6 +108,39 @@ class ChatMessage(BaseModel):
     content: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=utc_now_iso)
+
+
+class SkillAsset(BaseModel):
+    """A user-supplied file shipped verbatim under the skill's Blob prefix."""
+
+    path: str
+    content: str
+
+    @computed_field
+    @property
+    def size(self) -> int:
+        return len(self.content)
+
+    @computed_field
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
+    @model_serializer(mode="wrap")
+    def _content_only_when_persisting(self, handler, info: SerializationInfo) -> dict[str, Any]:
+        data = handler(self)
+        if not (info.context or {}).get("persist"):
+            data.pop("content", None)
+        return data
+
+
+PERSIST_CONTEXT: dict[str, Any] = {"persist": True}
+
+
+class AssetUploadRequest(BaseModel):
+    # e.g. "assets/style.css"; base64 so non-UTF-8 bytes reach the checks instead of being replaced.
+    path: str
+    content_base64: str
 
 
 class SkillDraft(BaseModel):
@@ -629,6 +672,11 @@ class Session(BaseModel):
     skill_form: Literal["inline", "script"] | None = None
     # Refused propose_material_patch calls since the code material last changed.
     material_patch_rejections: int = 0
+    # Full text lives only in the persisted JSON; API responses carry path/size/sha256.
+    assets: list[SkillAsset] = Field(default_factory=list)
+    # False until `assets` is known to be the remote skill's full set; saving an unsynced
+    # session with a remote skill first merges in the stored assets so none are swept away.
+    assets_synced: bool = False
     verify_checklist: VerifyChecklist = Field(default_factory=VerifyChecklist)
     prepare_brief: PrepareBrief = Field(default_factory=PrepareBrief)
     iteration_reflections: list[IterationReflection] = Field(default_factory=list)
@@ -840,6 +888,8 @@ class SkillFiles(BaseModel):
     blob_path: str = ""
     # None on save leaves any stored script untouched.
     script: str | None = None
+    # Relative path -> text. None on save leaves stored assets untouched; a dict is the full set.
+    assets: dict[str, str] | None = None
 
 
 class ApplyPatchRequest(BaseModel):

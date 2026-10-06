@@ -26,6 +26,11 @@ Pytest covers:
   `lint_skill_package` report (`tests/unit/test_eaa_platform.py`,
   `tests/unit/test_mcp_jsonrpc.py`).
 - EAA execution-environment rules (E1 warning, E2-E4 error) for the uid sandbox.
+- Skill assets: upload checks, session vs. API serialization, store
+  write/sweep/prefix delete, MODIFY load, save/rename, prompt block, resource
+  label parsing and the F2-F4 lint (`tests/unit/test_skill_assets.py`,
+  `tests/api/test_skill_assets_api.py`); the TEST-time resource-read check
+  F4-F6 (`tests/unit/test_testing_helpers.py`).
 - FastAPI session routes.
 - Draft update and checklist update routes.
 - Save/list/load skill routes.

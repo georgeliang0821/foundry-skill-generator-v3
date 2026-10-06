@@ -299,7 +299,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 > - runtime 回傳的腳本是**從 body 散文重新生成的另一份產物**，與 SKILL.md 內嵌的 sample code 並不相同；過去只有 sample code 被 lint 看過，那份真正代表 runtime 理解的腳本從來沒有被檢查。
 > - `run_selection_tests()`（[testing.py](../backend/testing.py)）在組裝 `TestRun` 前，以 `lint_skill(..., code_override=result.apim_response)` 對每一份 prepared code 跑同一套規則，結果存在 `TestResult.prepared_code_lint`。`apim_response` 是沿用至今的資料欄位名稱，不代表端點必須部署在 APIM。檢核會**在測試當下算完並存起來**：之後若已套用 Patch，重算會拿新的 SKILL.md 去對舊腳本，結論會失真。以 `[NEEDS_INFO]` 開頭的回應，以及只在最外層印出 `[NEEDS_INFO]` 就結束的腳本，都不是要審查的程式碼，判定函式為 `is_needs_info_response()`（[skill_lint.py](../backend/skill_lint.py)），會略過 lint。
 > - `_format_prepared_code()`（[state_machine.py](../backend/state_machine.py)）把每份腳本底下附上它自己的 findings；`[NEEDS_INFO]` 回應則由 `_format_needs_info_responses()` 另列於 `### Needs-info responses`，只顯示 `[NEEDS_INFO]` 那一行（`needs_info_line()`），不列入審查。每項 finding 標出嚴重度，`[error]` 排在前面。對於已印出的結論，[prompts/04_test.md](../prompts/04_test.md) 明令大腦**不得重新推導**：`[error]` 照抄成 `what_to_change` 項目，`[warning]` / `[info]` 只轉述給使用者，不列入修正清單。
-> - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）、未檢查回傳碼（A12）與 EAA 平台規則（D4–D6、A15，見下方）全數下放給 lint。
+> - 因此 TEST 的使用軸只剩四項真正需要語意判斷的檢核：外部識別名是否回溯得到 body、body 已宣告的安全形狀（僅在 body 提及 RLS／OBO／使用者身分連線時才觸發）、身分規範的 R3 與 R4 推理面，以及「程式碼宣稱發生的事它是否真的知道」。變數名比對、進入點形狀、`[NEEDS_INFO]` 代碼、部署設定（D1–D3）、身分讀取形狀（I1–I4）、未檢查回傳碼（A12）與 EAA 平台規則（D4–D6、A15，見下方）全數下放給 lint。帶資產的 skill 另有資源讀取檢查（F4–F6，見 [7.6 節](#76-skill-資產assetsreferences)），同樣在測試當下算完、只轉述不重新推導。
 > - 實測成本（2026-09-01）：每個樣本 input 約 22K tokens、output 約 3.7K，耗時 30–40 秒。樣本是**循序**送的，所以 10 個樣本約 6 分鐘、約 220K input tokens。
 
 > ⚖️ **雙軸診斷學：**
@@ -381,6 +381,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Form Stage Addenda** | **B** | △ | △ | △ | △ | △ | `FORM_STAGE_ADDENDA`，接在 stage prompt（與 `KIND_STAGE_ADDENDA`）之後。依 `_form_prompt_key()` 選用，見 [6.2 節](#62-prompt-分層與-skill-形式) |
 | **Skill Form** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | `_format_skill_form()`。只在 capability session 有 `code` 素材或形式已鎖定為 script 時出現；列出 form / locked / 未滿足條件 / 取代失敗原因 |
 | **Bundled Script** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | `_format_bundled_script()`，只在 form = script。與某份 code 素材完全相同時只指向該素材 id，否則附上全文（例如 MODIFY）；標明唯讀 |
+| **Skill Assets** | **D** | ✓ | ✓ | ✓ | ✓ | ✓ | `_format_skill_assets()`，只在 session 有資產時出現。每個資產以 `<<<BEGIN ASSET path (N chars)>>>` / `<<<END ASSET path>>>` 包夾**全文**，不截斷；標明唯讀。見 [7.6 節](#76-skill-資產assetsreferences) |
+| **Asset Stage Addenda** | **B** | | △ | △ | △ | | `ASSET_STAGE_ADDENDA`（`14_skill_assets.md`），只在 session 有資產時附加 |
 
 ### 6.1 送出前的 Handlebars 跳脫
 
@@ -403,7 +405,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 2. stage prompt（`STAGE_PROMPT_MAP`，可依 `SkillKind` 由 `KIND_PROMPT_OVERRIDES` 整份替換）
 3. `KIND_STAGE_ADDENDA`（依 `SkillKind` 附加，例如 scenario 的 PREPARE / TEST）
 4. `FORM_STAGE_ADDENDA`（依 skill 形式附加，與 `SkillKind` 正交）
-5. 共用的 `09_best_practices.md`、`10_format_spec*.md`，之後才是 runtime state 與上表的 D 類區塊；`11_output_rules.md` 由 `agent.py` 載入，`12_input_sources.md` 放在最後、allowed exits 之前
+5. `ASSET_STAGE_ADDENDA`（session 有資產時，於 DRAFT / REFINE / TEST 附加 `14_skill_assets.md`）
+6. 共用的 `09_best_practices.md`、`10_format_spec*.md`，之後才是 runtime state 與上表的 D 類區塊；`11_output_rules.md` 由 `agent.py` 載入，`12_input_sources.md` 放在最後、allowed exits 之前
 
 第 4 層的 key 由 `_form_prompt_key()` 決定：
 
@@ -502,6 +505,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | `user_choice` | 使用者沒有選擇 inline（`prepare_brief.prefer_inline` 為 `false`）。使用者在 Checklist 的 Output form 選「Inline sample code」，或在對話中明確表示要 inline、由 Agent 呼叫 `record_variables(prefer_inline=true)` 時，即使其他條件全部成立也是 inline；此時 `## Skill Form` 只列這一項，也不附加 script addendum |
 | `skill_kind` | capability（scenario 沒有自己的 script） |
 | `mode` | NEW（MODIFY 沿用 Blob 上的形式；IMPORT 不適用） |
+| `assets` | session 沒有附加任何 skill 資產（script 型 skill 只出貨 `SKILL.md` 與 script） |
 | `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [EAA script 旗標](#eaa-script-旗標)） |
 | `code_material` | 恰好一份 `code` 素材 |
 | `parses` | 該素材可被 `ast` 解析 |
@@ -604,6 +608,55 @@ Script 型 skill 只有在 EAA 會執行 script 時才有意義。判斷依據�
 - **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），旗標若已關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags` 列出關閉的旗標，**什麼都不寫入**。處理方式是請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。script 與 `SKILL.md` 一起送 EAA `lint_skill_package`（見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)）。
 - 其他 script 相關的 409：`script_form_mismatch`（inline session 想覆寫 Blob 上已有 script 的 skill，不可恢復）、`version_conflict`（Blob 上的 `SKILL.md` 在載入後被改過，例如 Gatekeeper Addendum）。
 - Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，只有 scenario `script_flags_on` 會把旗標打開。
+
+### 7.6 Skill 資產（assets/、references/）
+
+使用者可以在 Materials 分頁的 Skill assets 區塊上傳檔案，存檔時**原封不動**隨 skill 寫到 Blob 的 `skills/<name>/assets/<檔名>` 或 `skills/<name>/references/<檔名>`。EAA runtime 的模型用 `read_skill_resource(skill_name="<name>", resource_name="assets/<檔名>")` 讀取，讀不讀、怎麼用依 `SKILL.md` 的資源標示決定。Generator 不產生、不改寫資產，只負責接收、檢查與發佈；Agent 只在 `SKILL.md` 列出資產並標示用途，無法修改資產本身，要改就請使用者重新上傳。
+
+- 實作：[backend/skill_assets.py](../backend/skill_assets.py)（檢查）、`POST` / `DELETE /api/sessions/{id}/assets`（[main.py](../backend/main.py)）、[blob_store.py](../backend/blob_store.py)（寫入與清掃）、[skill_lint.py](../backend/skill_lint.py)（`parse_resource_labels` 與 F 規則）、[testing.py](../backend/testing.py)（`_check_resource_reads`）
+- 提示詞：[14_skill_assets.md](../prompts/14_skill_assets.md)
+
+**檢查規則**（上傳與存檔都會跑；任一不過即拒收並說明原因，不做任何轉換）：
+
+| 項目 | 規則 |
+| --- | --- |
+| 內容 | 嚴格 UTF-8、不含 NUL。`xlsx`、`docx`、`pdf`、`pptx`、`png`、`jpg`、`gif`、`ico`、`woff`、`woff2`、`ttf`、`otf`、`zip` 直接以「二進位格式」拒收 |
+| 路徑 | 只能是 `assets/<檔名>` 或 `references/<檔名>`；不支援子目錄，不可含 `\`、控制字元，檔名不可以 `.` 開頭，不可為 `SKILL.md`；檔名照原樣保留 |
+| 數量與大小 | 最多 9 個；單檔 ≤ 20,000 字元，合計 ≤ 40,000 字元（以解碼後字元數計） |
+| 唯一性 | 兩個目錄之間檔名不可重複（不分大小寫）。EAA 在完整路徑查不到時會退回用檔名比對，重名會讀錯檔 |
+| 適用範圍 | scenario skill、script 型 skill、frontmatter 宣告 `metadata.children` 的 skill 不可附資產（上傳回 409） |
+
+**資料流**：
+
+- 上傳以 JSON 送 base64（`{path, content_base64}`），讓非 UTF-8 的位元組能被檢查到，而不是在瀏覽器端被悄悄換成 `U+FFFD`。同一路徑再上傳即覆蓋。
+- 全文只存在 Session JSON（`model_dump_json(context=PERSIST_CONTEXT)`）。API 回應、`state_update` 事件與 user prompt 的 session snapshot 只帶 `path` / `size` / `sha256`。
+- MODIFY session 建立時從 Blob 載入該 skill 的全部資產；有任何檔案不合規就拒絕建立（409 `asset_rejected`，`problems` 逐條列出）。
+- 存檔把 session 的資產視為**完整集合**：寫入每個檔案，再刪掉 prefix 底下不在集合裡的檔案（`SKILL.md` 與 `scripts/<name>.py` 除外）。prefix 一律帶結尾 `/`，`skills/foo/` 不會碰到 `skills/foo-bar/`。
+- `Session.assets_synced` 表示 `session.assets` 已是遠端 skill 的完整集合。綁定遠端 skill 但尚未同步的 session 存檔時，會先合併 Blob 上既有的資產（同路徑以 session 為準），避免被清掃掉。
+- 改名時新 prefix 寫入完整集合，舊 prefix 整個刪除；刪除 skill 也是刪整個 prefix。
+- 鄰居 / 子 skill 的存檔不帶資產（`SkillFiles.assets = None`），不會動到它們的資產。
+- EAA `lint_skill_package` 只送 `SKILL.md`（與 script），不送資產。
+
+**`SKILL.md` 的 `## Skill Resources`**：每個資產一個 bullet，寫成 `` - `assets/style.css` (required, embed) -- 說明 ``。段名刻意不叫 `References`：段名比對是子字串，`references` 會被 `## API Reference / Sample Code` 正規化後的 `apireferencesamplecode` 包含。
+
+括號內是資源標示，解析規則與 EAA runtime 相同：取路徑 code span 之後的第一個括號，恰好兩個值且順序固定，不分大小寫、忽略前後空白。標示由 Agent 依資產內容與 skill 用途填寫，理由寫在 patch 的 reason 供使用者審核；沒有標示時，EAA 由模型自行決定是否讀取。
+
+| 值 | 意義 |
+| --- | --- |
+| `required` / `on-demand` | 每個任務都要讀／只有部分任務要讀 |
+| `embed` / `reference` | 逐字放進產出的素材（範本、樣式表）／讀了照做的參考文件（API 規格、業務規則），不貼進程式碼 |
+
+**F 規則**（只在有資產時跑，略過 `## Gatekeeper Addendum`）：
+
+| 規則 | 何時檢查 | 嚴重度 | 內容 |
+| --- | --- | --- | --- |
+| `F2` | 存檔、每次修改 | error（擋下儲存） | 每個資產的完整路徑都以反引號出現在 `SKILL.md`；只寫檔名不算 |
+| `F3` | 存檔、每次修改 | error（擋下儲存） | `SKILL.md` 提到的每個 `assets/...`、`references/...` 路徑都必須是已附加的資產 |
+| `F4` | 存檔、每次修改、TEST | warning | 資產在 `## Skill Resources` 沒有自己的 bullet，或標示不合法；TEST 時該資產不檢查 |
+| `F5` | TEST | warning | `required` 資源沒被讀；沒有任何樣本帶讀取紀錄時改為一筆 info「未檢查」。`on-demand` 沒讀永遠不報 |
+| `F6` | TEST | warning | 讀取失敗，附 EAA 回傳的錯誤 |
+
+**TEST 的資源讀取檢查**：只看路由到本 skill、且不是 `[NEEDS_INFO]` 的正向樣本，比對 EAA 回傳的 `loaded_resources`（`[skill, requested, resolved]`）與 `failed_resources`（`[skill, requested, error]`），優先比對 resolved。EAA 沒追蹤資源讀取時（例如 Mode A）回應不帶 `loaded_resources` 這個 key，一律視為「未追蹤」而非「沒讀」。結果在測試當下算完，存在 `TestRun.resource_findings`，以 `### Resource reads` 出現在 TEST 提示詞，也顯示在 Tests 面板。F5 可能是正文指示不清，也可能是樣本沒用到該資源，只有使用者判斷得了，所以 F4–F6 都不會自動成為修正項目；Agent 讓使用者選擇修正文、改樣本、改標示或不處理。
 
 ---
 

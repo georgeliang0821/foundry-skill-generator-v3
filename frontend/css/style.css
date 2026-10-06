@@ -59,6 +59,7 @@
   --fs-lg:   18px;
   --fs-xl:   22px;
   --fs-2xl:  28px;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 
   /* Radius / shadow / motion */
   --r-sm: 6px;
@@ -3364,6 +3365,17 @@ textarea:focus, input:focus, select:focus {
 .skill-form-note { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--warning); border-radius: var(--r-sm); background: var(--warning-soft); font-size: var(--fs-xs); color: var(--text-1); }
 .skill-form-note.skill-form-info { border-left-color: var(--brand-400); background: var(--surface-2); }
 .skill-form-note ul { margin: 4px 0 0; padding-left: 18px; }
+
+.asset-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.asset-section.asset-disabled .asset-toolbar { opacity: .55; }
+.asset-meta { margin-left: auto; font-weight: 400; font-size: var(--fs-xs); color: var(--text-3); }
+.asset-toolbar { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.asset-toolbar select { font-size: var(--fs-sm); padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--text-1); }
+.asset-path { font-family: var(--font-mono); font-size: var(--fs-sm); word-break: break-all; }
+.asset-hash { font-family: var(--font-mono); color: var(--text-3); }
+.asset-rejection { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; padding: 6px 10px; border-left: 3px solid var(--danger); border-radius: var(--r-sm); background: var(--danger-soft); font-size: var(--fs-xs); color: var(--text-1); }
+.asset-rejection span { flex: 1; white-space: pre-wrap; }
+.asset-note { margin: 8px 0 0; font-size: var(--fs-xs); color: var(--text-2); }
 .skill-form-covers { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
 .skill-form-covers input[type="checkbox"] { width: auto; margin: 0; }
 .skill-form-choice { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; font-size: var(--fs-sm); }

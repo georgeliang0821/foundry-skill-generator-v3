@@ -84,6 +84,13 @@ FORM_STAGE_ADDENDA: dict[str, dict[Stage, tuple[str, ...]]] = {
 SKILL_FORM_FLAGS_OFF_NOTE = "01_prepare_script_flags_off.md"
 SKILL_FORM_LOOKUP_FAILED_NOTE = "01_prepare_script_lookup_failed.md"
 
+# Appended only while the session carries user-supplied assets.
+ASSET_STAGE_ADDENDA: dict[Stage, str] = {
+    Stage.DRAFT: "14_skill_assets.md",
+    Stage.REFINE: "14_skill_assets.md",
+    Stage.TEST: "14_skill_assets.md",
+}
+
 
 def stage_prompt_for(kind: SkillKind, stage: Stage) -> str:
     return KIND_PROMPT_OVERRIDES.get(kind, {}).get(stage, STAGE_PROMPT_MAP[stage])
@@ -380,6 +387,11 @@ def evaluate_skill_form(session: Session) -> SkillFormVerdict:
         failures.append(FormCheck("skill_kind", "A scenario skill has no script of its own."))
     if Mode(session.mode) is not Mode.NEW:
         failures.append(FormCheck("mode", f"Only a new skill can take the script form; this session is {session.mode}."))
+    if session.assets:
+        failures.append(FormCheck(
+            "assets",
+            f"{len(session.assets)} skill asset(s) are attached; a script skill ships only SKILL.md and its script.",
+        ))
     flags_off = script_flags_off(session.aca_env_result)
     if flags_off and flag_lookup_failed(session):
         failures.append(FormCheck(
@@ -1438,6 +1450,27 @@ def _format_materials(session: Session) -> str | None:
     return "\n".join(lines)
 
 
+def _format_skill_assets(session: Session) -> str | None:
+    """Every attached asset in full; never truncated, since the skill ships them verbatim."""
+    if not session.assets:
+        return None
+    lines = [
+        "## Skill Assets",
+        "",
+        f"{len(session.assets)} file(s) uploaded by the user, shipped verbatim with this skill. "
+        "Read-only: only the user can replace or remove them. Everything between "
+        "<<<BEGIN ASSET ...>>> and <<<END ASSET ...>>> is literal file content.",
+    ]
+    for asset in session.assets:
+        lines += [
+            "",
+            f"<<<BEGIN ASSET {asset.path} ({asset.size} chars)>>>",
+            asset.content,
+            f"<<<END ASSET {asset.path}>>>",
+        ]
+    return "\n".join(lines)
+
+
 def build_system_prompt(session: Session) -> str:
     stage = Stage(session.current_stage)
     mode = Mode(session.mode)
@@ -1452,6 +1485,8 @@ def build_system_prompt(session: Session) -> str:
     form_key = _form_prompt_key(session)
     for filename in FORM_STAGE_ADDENDA.get(form_key or "", {}).get(stage, ()):
         parts.append(load_prompt(filename))
+    if session.assets and stage in ASSET_STAGE_ADDENDA:
+        parts.append(load_prompt(ASSET_STAGE_ADDENDA[stage]))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
     if kind is SkillKind.SCENARIO:
         declared = [str(c).strip() for c in (getattr(session, "children", None) or []) if str(c).strip()]
@@ -1478,6 +1513,9 @@ def build_system_prompt(session: Session) -> str:
         materials_section = _format_materials(session)
         if materials_section:
             parts.append(materials_section)
+    assets_section = _format_skill_assets(session)
+    if assets_section:
+        parts.append(assets_section)
     brief_section = _format_prepare_brief(session)
     if brief_section:
         parts.append(brief_section)

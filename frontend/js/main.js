@@ -20,6 +20,8 @@ import {
   saveSessionSkill,
   addSessionMaterial,
   deleteSessionMaterial,
+  uploadSessionAsset,
+  deleteSessionAsset,
   sendToolResult,
   skipOpenFixes,
   StaleToolCallError,
@@ -1521,7 +1523,134 @@ function materialAddBarHtml() {
   return `<button type="button" class="icon-button material-add-btn" data-action="new-material" data-testid="add-material-row-button">${svgIcon("i-paper-clip")}<span>+ Add material</span></button>`;
 }
 
+// Mirrors backend/skill_assets.py; the server re-checks everything.
+const ASSET_MAX_FILES = 9;
+const ASSET_MAX_TOTAL_CHARS = 40000;
+const ASSET_MAX_BYTES = 80000;
+let assetRejections = [];
+let assetUploading = false;
+let assetReplacePath = null;
+let assetDir = "assets";
+
+function sessionAssets() {
+  return Array.isArray(session?.assets) ? session.assets : [];
+}
+
+function assetsBlockedReason() {
+  if (!session?.id) return "Start a session to attach skill assets.";
+  if (session.skill_kind === "scenario") return "A scenario skill cannot carry assets.";
+  if (session.skill_form === "script") return "A script skill ships only SKILL.md and its script, so it cannot carry assets.";
+  return "";
+}
+
+function renderSkillAssets() {
+  const host = el("skillAssets");
+  if (!host) return;
+  const assets = sessionAssets();
+  const blocked = assetsBlockedReason();
+  const total = assets.reduce((sum, a) => sum + (Number(a.size) || 0), 0);
+  const disabled = blocked || assetUploading ? "disabled" : "";
+  const rows = assets.map((a) => `<tr class="material-item" data-testid="asset-row" data-asset-path="${escapeHtml(a.path)}">
+      <td class="asset-path">${escapeHtml(a.path)}</td>
+      <td>${Number(a.size || 0).toLocaleString()}</td>
+      <td class="asset-hash" title="sha256 ${escapeHtml(a.sha256 || "")}">${escapeHtml(String(a.sha256 || "").slice(0, 8))}</td>
+      <td class="material-cell-actions">
+        <button type="button" class="icon-button" data-asset-action="replace" data-asset-path="${escapeHtml(a.path)}" ${disabled}>Replace</button>
+        <button type="button" class="icon-only-button danger" title="Delete asset" data-asset-action="delete" data-asset-path="${escapeHtml(a.path)}" ${assetUploading ? "disabled" : ""}>${svgIcon("i-x")}</button>
+      </td>
+    </tr>`).join("");
+  const table = assets.length
+    ? `<table class="material-table"><thead><tr><th>Path</th><th>Characters</th><th>sha256</th><th class="material-cell-actions">Actions</th></tr></thead><tbody>${rows}</tbody></table>`
+    : "";
+  const rejections = assetRejections
+    .filter((r) => r.sessionId === session?.id)
+    .map((r, i) => `<div class="asset-rejection" data-testid="asset-rejection"><span><strong>${escapeHtml(r.name)}</strong> was not attached: ${escapeHtml(r.reason)}</span><button type="button" class="icon-only-button" title="Dismiss" data-asset-action="dismiss" data-index="${i}">${svgIcon("i-x")}</button></div>`)
+    .join("");
+  const formHint = !blocked && skillFormRelevant() && !session.skill_form
+    ? `<p class="asset-note">Attaching an asset keeps this skill inline: a script skill cannot carry assets.</p>`
+    : "";
+  host.classList.toggle("asset-disabled", Boolean(blocked));
+  host.innerHTML = `<h3 class="material-section-title">${svgIcon("i-paper-clip")} Skill assets &mdash; published with the skill when you save
+      <span class="asset-meta" data-testid="asset-meta">${assets.length}/${ASSET_MAX_FILES} files &middot; ${total.toLocaleString()}/${ASSET_MAX_TOTAL_CHARS.toLocaleString()} characters</span></h3>
+    ${blocked ? `<p class="asset-note">${escapeHtml(blocked)}</p>` : ""}
+    <div class="asset-toolbar">
+      <select data-testid="asset-dir" aria-label="Asset folder" ${disabled}>${["assets", "references"].map((d) => `<option value="${d}"${d === assetDir ? " selected" : ""}>${d}/</option>`).join("")}</select>
+      <button type="button" class="icon-button" data-asset-action="upload" data-testid="asset-upload-button" ${disabled}>${svgIcon("i-paper-clip")}<span>Upload files&hellip;</span></button>
+    </div>
+    ${rejections}${table}${formHint}
+    <p class="asset-note">UTF-8 text files only. They are written to Blob only when you save the skill. After adding, replacing or removing one, ask the agent to update <code>## Skill Resources</code>.</p>`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return window.btoa(binary);
+}
+
+async function uploadAssetFiles(files, { dir, replacePath }) {
+  if (!session?.id || !files.length) return;
+  const sessionId = session.id;
+  assetUploading = true;
+  renderSkillAssets();
+  try {
+    for (const file of files) {
+      const path = replacePath || `${dir}/${file.name}`;
+      if (file.size > ASSET_MAX_BYTES) {
+        assetRejections.push({ sessionId, name: file.name, reason: "The file exceeds 20,000 characters." });
+        continue;
+      }
+      try {
+        session = await uploadSessionAsset(sessionId, path, arrayBufferToBase64(await file.arrayBuffer()));
+        persistSessionState();
+      } catch (err) {
+        assetRejections.push({ sessionId, name: file.name, reason: err.message });
+      }
+      if (replacePath) break;
+    }
+  } finally {
+    assetUploading = false;
+    renderSession();
+  }
+}
+
+async function handleSkillAssetAction(event) {
+  const button = event.target.closest("button[data-asset-action]");
+  if (!button || button.disabled) return;
+  const action = button.dataset.assetAction;
+  const input = el("assetFileInput");
+  if (action === "upload" || action === "replace") {
+    if (!input) return;
+    assetReplacePath = action === "replace" ? button.dataset.assetPath : null;
+    input.multiple = action === "upload";
+    input.value = "";
+    input.click();
+    return;
+  }
+  if (action === "dismiss") {
+    const mine = assetRejections.filter((r) => r.sessionId === session?.id);
+    const target = mine[Number(button.dataset.index)];
+    assetRejections = assetRejections.filter((r) => r !== target);
+    renderSkillAssets();
+    return;
+  }
+  if (action === "delete") {
+    const path = button.dataset.assetPath;
+    if (!session?.id || !path || !window.confirm(`Delete ${path} from this session? Saving the skill removes it from Blob.`)) return;
+    try {
+      session = await deleteSessionAsset(session.id, path);
+      persistSessionState();
+      renderSession();
+    } catch (err) {
+      appendConversationStatus(`Could not delete asset: ${err.message}`, { failed: true });
+    }
+  }
+}
+
 function renderMaterials() {
+  renderSkillAssets();
   const saved = (session && Array.isArray(session.materials)) ? session.materials : [];
   const pending = Array.isArray(attachedMaterials) ? attachedMaterials : [];
   const list = el("materialList");
@@ -6052,6 +6181,16 @@ bind("materialList", "input", (event) => {
   } else if (t.matches("[data-edit-kind]")) syncMaterialKindHint(t);
 });
 bind("materialList", "click", handleSavedMaterialAction);
+bind("skillAssets", "click", handleSkillAssetAction);
+bind("skillAssets", "change", (event) => {
+  if (event.target.matches?.('[data-testid="asset-dir"]')) assetDir = event.target.value;
+});
+bind("assetFileInput", "change", (event) => {
+  const files = Array.from(event.target.files || []);
+  const replacePath = assetReplacePath;
+  assetReplacePath = null;
+  uploadAssetFiles(files, { dir: assetDir, replacePath });
+});
 // Revise a confirmed PREPARE checkpoint: flips it to pending and cascades the
 // downstream checkpoints to pending too (backend dependency map).
 document.addEventListener("click", async (event) => {

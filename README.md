@@ -2,10 +2,16 @@
 
 # Foundry Skill Generator Using Chat
 
-對話式 Skill 產生器（FastAPI + 原生 JavaScript），最終產出物為一份 `SKILL.md`（script 型另附一支 `scripts/<name>.py`）。
+對話式 Skill 產生器（FastAPI + 原生 JavaScript），最終產出物為一份 `SKILL.md`（script 型另附一支 `scripts/<name>.py`；也可附帶使用者上傳的 `assets/`、`references/` 檔案）。
 本專案為**本機執行**的解決方案，串接 Microsoft Foundry、Microsoft Entra、Azure SQL 與 Azure Blob。
 
 ## 重大變更 (What's New) 2026-10
+
+### Skill 資產
+
+在 Materials 分頁的 Skill assets 區塊上傳 UTF-8 文字檔，存檔時原封不動寫到 `skills/<name>/assets/` 或 `references/`；scenario 與 script 型 skill 不可附資產。檢查規則與資料流見 [04-agent-mechanism.md 第 7.6 節](docs/04-agent-mechanism.md#76-skill-資產assetsreferences)。
+
+> ⚠️ **存檔條件**：附有資產的 skill，`SKILL.md` 必須以完整路徑（例如 `` `assets/style.css` ``）列出每個檔案，且不得提到未附加的路徑；否則無法儲存。MODIFY 時若 Blob 上有不合規的檔案（二進位檔、子目錄、超過上限），會拒絕建立 session 並列出原因。
 
 ### Script 型 skill
 

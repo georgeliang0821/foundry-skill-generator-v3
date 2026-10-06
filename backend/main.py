@@ -68,10 +68,12 @@ from .eaa_platform import (
     split_eaa_allowlist_warnings,
 )
 from .skill_lint import lint_skill, lint_warning_count
+from .skill_assets import MAX_ASSET_BYTES, AssetRejected, assets_blocked_reason, check_asset, check_asset_set
 from .input_contract import input_contract_errors
 from .models import (
     ApplyPatchRequest,
     ApplyPatchResponse,
+    AssetUploadRequest,
     ChecklistUpdateRequest,
     ChatMessage,
     ChatRequest,
@@ -95,6 +97,7 @@ from .models import (
     Session,
     SessionSummary,
     SkillDraft,
+    SkillAsset,
     SkillFiles,
     SkillKind,
     SkillTestRequest,
@@ -1030,6 +1033,22 @@ def _finalize_skill_rename(
         _warn_rename_cleanup(session, old_name, new_name, f"cleanup failed: {exc}")
 
 
+def _load_stored_assets(session: Session, skill_name: str) -> list[SkillAsset]:
+    raw = store.load_assets(skill_name)
+    problems = check_asset_set(session, raw)
+    if problems:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "kind": "asset_rejected",
+                "recoverable": False,
+                "problems": problems,
+                "message": f"`{skill_name}` has files this generator cannot carry:\n" + "\n".join(problems),
+            },
+        )
+    return [SkillAsset(path=path, content=check_asset(path, data)) for path, data in sorted(raw.items())]
+
+
 def save_skill_dual_write(
     session: Session,
     user_upn: str,
@@ -1056,6 +1075,18 @@ def save_skill_dual_write(
 
     if kind is SkillKind.SCENARIO:
         _load_child_full_md(session)
+    # Before the content lint, whose F2/F3 rules read the merged asset set.
+    old_name = safe_skill_name(session.remote_skill_id) if (session.remote_skill_id or "").strip() else ""
+    if old_name and not session.assets_synced:
+        merged = {asset.path: asset for asset in _load_stored_assets(session, old_name)}
+        merged.update({asset.path: asset for asset in session.assets})
+        session.assets = list(merged.values())
+        session.assets_synced = True
+    assets = {asset.path: asset.content for asset in session.assets}
+    asset_problems = check_asset_set(session, assets)
+    if asset_problems:
+        raise HTTPException(status_code=400, detail="Skill assets rejected:\n" + "\n".join(asset_problems))
+
     contract_errors = input_contract_errors(session, session.current_skill.skill_md)
     if contract_errors:
         raise HTTPException(status_code=400, detail="\n".join(contract_errors))
@@ -1105,7 +1136,6 @@ def save_skill_dual_write(
             },
         )
 
-    old_name = safe_skill_name(session.remote_skill_id) if (session.remote_skill_id or "").strip() else ""
     is_rename = bool(old_name) and old_name != skill_name
     existing = skills_repo.get_skill(skill_name)
     if is_rename and _skill_name_taken(skill_name, existing):
@@ -1152,6 +1182,7 @@ def save_skill_dual_write(
         skill_md=session.current_skill.skill_md,
         version_hash=session.current_skill.version_hash,
         script=script,
+        assets=assets,
     )
     log_event(
         "skill.save.start",
@@ -1162,6 +1193,7 @@ def save_skill_dual_write(
         is_public=is_public,
         skill_md_bytes=len(files.skill_md.encode("utf-8")),
         script_bytes=len(script.encode("utf-8")) if script is not None else 0,
+        asset_count=len(assets),
         if_match=bool(expected_version),
     )
     try:
@@ -1228,6 +1260,7 @@ def save_skill_dual_write(
     session.remote_skill_id = saved.name
     session.remote_version_hash = saved.version_hash
     session.current_skill.version_hash = saved.version_hash
+    session.assets_synced = True
     session.children = declared_children
     session.blob_store_id = _active_store_id()
     session.eaa_ruleset_version = eaa_lint.ruleset_version
@@ -1868,6 +1901,7 @@ def _session_lint(session: Session, skill_md: str) -> list:
         ],
         obo_registry_keys=obo_registry_keys(session.aca_env_result),
         script=session.current_skill.script,
+        asset_paths=[asset.path for asset in session.assets],
     )
 
 
@@ -2405,12 +2439,16 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
         session.skill_kind = inferred_kind
         session.children = children
         session = Session.model_validate(session.model_dump(mode="json"))
+        # After the round-trip above, which drops asset content.
+        session.assets = _load_stored_assets(session, files.name)
+        session.assets_synced = True
         log_event(
             "session.create.load_target.done",
             session_id=session.id,
             target_skill_id=req.target_skill_id,
             blob_store_id=session.blob_store_id,
             version_hash=files.version_hash,
+            asset_count=len(session.assets),
         )
     sessions[session.id] = session
     persist_session(session)
@@ -2699,6 +2737,58 @@ def delete_session_material(session_id: str, material_id: str, upn: str = Depend
         material_id=material_id,
         material_count=len(session.materials),
     )
+    return session
+
+
+@app.post("/api/sessions/{session_id}/assets")
+def upload_session_asset(session_id: str, req: AssetUploadRequest, upn: str = Depends(require_upn)) -> Session:
+    session = get_session_for_user(session_id, upn)
+    blocked = assets_blocked_reason(session)
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked)
+    path = req.path.strip()
+    # base64 is 4/3 of the payload; refuse before decoding anything oversized.
+    if len(req.content_base64) > (MAX_ASSET_BYTES * 4) // 3 + 4:
+        raise HTTPException(status_code=422, detail=str(AssetRejected(path, "The file is too large.")))
+    try:
+        data = base64.b64decode(req.content_base64, validate=True)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{path}: The upload is not valid base64.") from None
+    try:
+        text = check_asset(path, data)
+    except AssetRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    assets = {a.path: a.content for a in session.assets if a.path != path}
+    assets[path] = text
+    problems = check_asset_set(session, assets)
+    if problems:
+        raise HTTPException(status_code=422, detail=" ".join(problems))
+    replaced = any(a.path == path for a in session.assets)
+    asset = SkillAsset(path=path, content=text)
+    session.assets = [asset if a.path == path else a for a in session.assets] if replaced else [*session.assets, asset]
+    session.touch()
+    persist_session(session)
+    log_event(
+        "session.asset.upload",
+        session_id=session.id,
+        path=path,
+        chars=asset.size,
+        replaced=replaced,
+        asset_count=len(session.assets),
+    )
+    return session
+
+
+@app.delete("/api/sessions/{session_id}/assets/{path:path}")
+def delete_session_asset(session_id: str, path: str, upn: str = Depends(require_upn)) -> Session:
+    session = get_session_for_user(session_id, upn)
+    remaining = [a for a in session.assets if a.path != path]
+    if len(remaining) == len(session.assets):
+        raise HTTPException(status_code=404, detail="Asset not found")
+    session.assets = remaining
+    session.touch()
+    persist_session(session)
+    log_event("session.asset.delete", session_id=session.id, path=path, asset_count=len(remaining))
     return session
 
 
@@ -4315,6 +4405,7 @@ PROMPT_INDEX: list[dict[str, str]] = [
     {"filename": "10_format_spec.md", "title": "Skill Format Spec", "scope": "Embedded inside Global System (capability skills)"},
     {"filename": "10_format_spec_scenario.md", "title": "Scenario Skill Format Spec", "scope": "Replaces the format spec for scenario skills"},
     {"filename": "11_output_rules.md", "title": "Output Rules", "scope": "Parsed into the per-turn user prompt (output shape + rules)"},
+    {"filename": "14_skill_assets.md", "title": "Skill Assets", "scope": "Appended during Draft, Refine and Test when the session carries skill assets"},
 ]
 
 STAGE_GROUPS_DESCRIPTION: list[dict[str, Any]] = [

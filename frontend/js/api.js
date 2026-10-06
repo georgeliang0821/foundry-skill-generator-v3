@@ -334,6 +334,34 @@ export async function deleteSessionMaterial(sessionId, materialId) {
   return res.json();
 }
 
+export async function uploadSessionAsset(sessionId, path, contentBase64) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/assets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content_base64: contentBase64 }),
+  });
+  if (!res.ok) throw new Error(await detailOrFetchError(res));
+  return res.json();
+}
+
+export async function deleteSessionAsset(sessionId, path) {
+  const encoded = String(path).split("/").map(encodeURIComponent).join("/");
+  const res = await apiFetch(`/api/sessions/${sessionId}/assets/${encoded}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detailOrFetchError(res));
+  return res.json();
+}
+
+// The asset endpoints put a user-facing reason in a string `detail`.
+async function detailOrFetchError(res) {
+  try {
+    const body = await res.clone().json();
+    if (typeof body?.detail === "string" && body.detail) return body.detail;
+  } catch {
+    // fall through to the generic message
+  }
+  return formatFetchError(res);
+}
+
 async function formatFetchError(res) {
   let body = "";
   try {
