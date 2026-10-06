@@ -459,7 +459,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 ### 7.2 注入時的預算與截斷
 
-`materials_for_prompt()` 在注入前套用預算：單份上限 `MATERIAL_PROMPT_MAX_CHARS = 40,000` 字元，全部素材合計上限 `MATERIALS_PROMPT_TOTAL_MAX_CHARS = 120,000` 字元。超出的部分會被截斷並附上明確標記，要求模型**不要補完**缺少的部分，而是回報並請使用者拆分素材。素材全文以 `<<<BEGIN MATERIAL ...>>>` / `<<<END MATERIAL ...>>>` 包夾且**不加程式碼圍欄**（素材本身可能含程式碼區塊）。
+`materials_for_prompt()` 在注入前套用預算：單份上限 `MATERIAL_PROMPT_MAX_CHARS = 40,000` 字元，全部素材合計上限 `MATERIALS_PROMPT_TOTAL_MAX_CHARS = 120,000` 字元。例外是可能或已經成為 bundled script 的那份 `code` 素材（`script_material_id()`：`script_candidate` 時唯一的 code 素材，或內容等於已鎖定 script 的 code 素材）：它先取得預算，最多可完整顯示 120,000 字元，其餘素材再依原順序分配剩下的額度；inline 與 scenario session 不套用此例外。prompt 組裝、`propose_material_patch` 的截斷檢查與送給模型的字數記錄都經由 `session_materials_for_prompt()`，判定一致。超出的部分會被截斷並附上明確標記，說明使用者的素材完整保存、只是模型看不到全部，要求模型**不要補完**缺少的部分，也不得對使用者說檔案不完整，只能說內容太長、無法完整閱讀。Materials 面板以 `GET /api/sessions/{id}/material-views` 取得被截斷的素材，標示 `agent sees N / M chars`。素材全文以 `<<<BEGIN MATERIAL ...>>>` / `<<<END MATERIAL ...>>>` 包夾且**不加程式碼圍欄**（素材本身可能含程式碼區塊）。
 
 注意 `## Materials` 明確覆寫了另一條規則：「不得逐字複製」只適用於**路由測試樣本**，絕不適用於素材。
 
@@ -530,7 +530,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 內容完全相同的 PUT 不算變動。五個入口（`POST` / `PUT` / `DELETE /materials`、chat 附上素材、接受 `propose_material_patch`）都走 `apply_code_material_change()`。
 
-**Agent 調整 code 素材**（`propose_material_patch`）：只在 PREPARE、`_form_prompt_key() == "script_candidate"`、恰好一份 `code` 素材且該素材在 prompt 中未被截斷時可用；scenario skill 由 `KIND_ONLY_TOOLS` 擋下。提出時（`apply_tool_effect`）與接受時（`tool-result`，對**當下**的素材內容）都跑 `_checked_material_patch()`：
+**Agent 調整 code 素材**（`propose_material_patch`）：只在 PREPARE、`_form_prompt_key() == "script_candidate"`、恰好一份 `code` 素材且該素材在 prompt 中未被截斷時可用（依 [7.2](#72-注入時的預算與截斷)，即不超過 120,000 字元）；scenario skill 由 `KIND_ONLY_TOOLS` 擋下。提出時（`apply_tool_effect`）與接受時（`tool-result`，對**當下**的素材內容）都跑 `_checked_material_patch()`：
 
 - patch 套不上、沒有改動、改完無法解析 → 可重送的錯誤。
 - 改寫判定（[backend/material_patch.py](../backend/material_patch.py) `rewrite_reasons()`）：原素材無法解析、刪改了任何外部呼叫、或邊界以外的原始行改動超過 `MAX_CHANGED_RATIO`（0.5，忽略縮排，搬進 `main()` 不算）→ 拒絕，並要求 Agent 不要再送 patch，改請使用者選擇維持 inline 或自行撰寫 script（草稿只能出現在對話中）。

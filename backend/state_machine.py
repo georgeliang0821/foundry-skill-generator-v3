@@ -21,6 +21,7 @@ from .material_fidelity import (
 )
 from .models import (
     ChatMessage,
+    Material,
     MaterialKind,
     MessageRole,
     Mode,
@@ -494,6 +495,25 @@ def lock_skill_form(session: Session) -> None:
 
 def code_material_contents(session: Session) -> list[str]:
     return [m.content for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+
+
+def script_material_id(session: Session) -> str | None:
+    """The code material that is, or may become, the bundled script; it gets the prompt budget first."""
+    codes = [m for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+    key = _form_prompt_key(session)
+    if key == "script_candidate" and len(codes) == 1:
+        return codes[0].id
+    if key == "script":
+        return next((m.id for m in codes if m.content == session.current_skill.script), None)
+    return None
+
+
+def session_materials_for_prompt(session: Session) -> list[tuple[Material, str, bool]]:
+    return materials_for_prompt(getattr(session, "materials", None), priority_id=script_material_id(session))
+
+
+def session_materials_prompt_chars(session: Session) -> int:
+    return sum(len(text) for _, text, _ in session_materials_for_prompt(session))
 
 
 def script_replacement_problems(session: Session) -> list[FormCheck]:
@@ -1456,7 +1476,7 @@ def _format_materials(session: Session) -> str | None:
     Neighbour and child skills already get this treatment; materials used to get
     only a count, which is why pasted reference code was routinely rewritten.
     """
-    prepared = materials_for_prompt(getattr(session, "materials", None))
+    prepared = session_materials_for_prompt(session)
     if not prepared:
         return None
     lines = [

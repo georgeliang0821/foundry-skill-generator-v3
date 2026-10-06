@@ -11,9 +11,8 @@ from collections.abc import Iterable
 from typing import Any
 
 from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
-from .material_fidelity import materials_prompt_chars
 from .models import InputBinding, PendingToolCall, Session
-from .state_machine import build_system_prompt, load_prompt
+from .state_machine import build_system_prompt, load_prompt, session_materials_prompt_chars
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -854,7 +853,7 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
         query_chars=len(query),
         materials_count=len(session.materials or []),
         materials_total_chars=sum(len(m.content or "") for m in (session.materials or [])),
-        materials_prompt_chars=materials_prompt_chars(session.materials),
+        materials_prompt_chars=session_materials_prompt_chars(session),
         user_message_preview=(user_message or "")[:800],
     )
 

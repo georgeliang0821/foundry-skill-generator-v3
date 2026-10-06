@@ -138,6 +138,12 @@ export async function fetchSkillForm(sessionId) {
   return res.json();
 }
 
+export async function fetchMaterialViews(sessionId) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/material-views`);
+  if (!res.ok) throw await responseError(res);
+  return res.json();
+}
+
 export async function updateSessionDraft(sessionId, draft) {
   const res = await apiFetch(`/api/sessions/${sessionId}/draft`, {
     method: "PUT",

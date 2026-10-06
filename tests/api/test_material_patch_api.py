@@ -129,6 +129,45 @@ def test_the_gate_needs_exactly_one_code_material(backend_main) -> None:
         _propose(backend_main, session)
 
 
+def _padded(chars: int) -> str:
+    return CODE + "# padding\n" * (chars // 10)
+
+
+def test_a_script_candidate_over_the_per_material_limit_is_shown_whole_and_patchable(backend_main) -> None:
+    session = _session(materials=[Material(id="code-1", kind=MaterialKind.CODE, content=_padded(60_000))])
+
+    assert "<<<TRUNCATED:" not in build_system_prompt(session)
+    _propose(backend_main, session)
+
+
+def test_an_inline_session_still_truncates_a_long_code_material() -> None:
+    session = _session(
+        skill_form="inline", materials=[Material(id="code-1", kind=MaterialKind.CODE, content=_padded(60_000))]
+    )
+
+    assert "<<<TRUNCATED: 40000 of" in build_system_prompt(session)
+
+
+def test_a_script_candidate_over_the_total_budget_cannot_be_patched(backend_main) -> None:
+    session = _session(materials=[Material(id="code-1", kind=MaterialKind.CODE, content=_padded(130_000))])
+
+    with pytest.raises(ValueError, match="too long for you to read in full"):
+        _propose(backend_main, session)
+
+
+def test_material_views_report_only_what_the_agent_does_not_see(client, backend_main) -> None:
+    note = Material(id="note-1", kind=MaterialKind.TEXT, content="n" * 50_000)
+    session = _session(
+        materials=[Material(id="code-1", kind=MaterialKind.CODE, content=_padded(60_000)), note]
+    )
+    backend_main.sessions[session.id] = session
+
+    r = client.get(f"/api/sessions/{session.id}/material-views")
+
+    assert r.status_code == 200
+    assert r.json() == [{"material_id": "note-1", "shown": 40_000, "total": 50_000}]
+
+
 def test_the_gate_refuses_a_text_material(backend_main) -> None:
     session = _session()
     session.materials.append(Material(id="text-1", kind=MaterialKind.TEXT, content='ROOM_ID = "room-1"'))

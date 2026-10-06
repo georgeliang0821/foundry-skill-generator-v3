@@ -74,36 +74,47 @@ class FidelityIssue:
 
 def _truncation_marker(shown: int, total: int) -> str:
     return (
-        f"\n<<<TRUNCATED: {shown} of {total} chars shown. The rest is NOT available. "
-        "Do NOT invent the missing part -- say so and ask the user to split the material.>>>"
+        f"\n<<<TRUNCATED: {shown} of {total} chars shown. The rest is NOT available to you, "
+        "but the user's material is stored intact. Do NOT invent the missing part, and never tell "
+        "the user their file is incomplete: say it is too long for you to read in full.>>>"
     )
+
+
+def _fit(material: Material, allowance: int) -> tuple[Material, str, bool]:
+    content = material.content or ""
+    if len(content) <= allowance:
+        return material, content, False
+    shown = content[:allowance]
+    return material, shown + _truncation_marker(len(shown), len(content)), True
 
 
 def materials_for_prompt(
     materials: Sequence[Material] | None,
+    *,
+    priority_id: str | None = None,
 ) -> list[tuple[Material, str, bool]]:
     """Return ``(material, visible_text, truncated)`` under the prompt budget.
 
+    ``priority_id`` names a material (the bundled-script code) that may use the whole
+    budget before the others share what is left; output keeps the input order.
     The scan reuses this so a passage the model never received is never reported
     as something the model invented.
     """
-    prepared: list[tuple[Material, str, bool]] = []
+    materials = list(materials or [])
     budget = MATERIALS_PROMPT_TOTAL_MAX_CHARS
-    for material in materials or []:
-        content = material.content or ""
-        allowance = min(MATERIAL_PROMPT_MAX_CHARS, max(budget, 0))
-        if len(content) <= allowance:
-            prepared.append((material, content, False))
-            budget -= len(content)
+    fitted: dict[int, tuple[Material, str, bool]] = {}
+    for index, material in enumerate(materials):
+        if priority_id is not None and material.id == priority_id:
+            fitted[index] = _fit(material, budget)
+            budget -= min(len(material.content or ""), budget)
+            break
+    for index, material in enumerate(materials):
+        if index in fitted:
             continue
-        shown = content[:allowance]
-        prepared.append((material, shown + _truncation_marker(len(shown), len(content)), True))
-        budget -= allowance
-    return prepared
-
-
-def materials_prompt_chars(materials: Sequence[Material] | None) -> int:
-    return sum(len(text) for _, text, _ in materials_for_prompt(materials))
+        allowance = min(MATERIAL_PROMPT_MAX_CHARS, max(budget, 0))
+        fitted[index] = _fit(material, allowance)
+        budget -= min(len(material.content or ""), allowance)
+    return [fitted[index] for index in range(len(materials))]
 
 
 def _unique(values: Iterable[str]) -> list[str]:

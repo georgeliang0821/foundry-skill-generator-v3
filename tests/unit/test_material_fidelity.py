@@ -155,6 +155,29 @@ def test_the_total_budget_bounds_the_whole_set() -> None:
     assert visible < MATERIALS_PROMPT_TOTAL_MAX_CHARS + 5 * 300
 
 
+def test_the_priority_material_takes_the_budget_first_and_order_is_kept() -> None:
+    note = _material("n" * MATERIAL_PROMPT_MAX_CHARS, MaterialKind.TEXT)
+    script = _material("s" * (MATERIALS_PROMPT_TOTAL_MAX_CHARS - 10_000))
+
+    (first, note_text, note_cut), (second, script_text, script_cut) = materials_for_prompt(
+        [note, script], priority_id=script.id
+    )
+
+    assert (first, second) == (note, script)
+    assert (script_cut, script_text) == (False, script.content)
+    assert note_cut is True and note_text.startswith("n" * 10_000 + "\n<<<TRUNCATED: 10000 of")
+
+
+def test_a_priority_material_over_the_total_budget_is_still_cut() -> None:
+    script = _material("s" * (MATERIALS_PROMPT_TOTAL_MAX_CHARS + 1))
+
+    (_m, text, truncated), = materials_for_prompt([script], priority_id=script.id)
+
+    assert truncated is True
+    assert f"{MATERIALS_PROMPT_TOTAL_MAX_CHARS} of {MATERIALS_PROMPT_TOTAL_MAX_CHARS + 1}" in text
+    assert "never tell the user their file is incomplete" in text
+
+
 def test_truncation_is_reported_so_findings_can_be_read_correctly() -> None:
     material = _material(MATERIAL_CODE + "z" * MATERIAL_PROMPT_MAX_CHARS)
 

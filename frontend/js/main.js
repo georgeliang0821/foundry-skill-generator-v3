@@ -8,6 +8,7 @@ import {
   fetchAuthStatus,
   fetchInspect,
   fetchSessionTopology,
+  fetchMaterialViews,
   fetchSkillForm,
   getSession,
   listSessions,
@@ -838,6 +839,7 @@ function renderSession() {
   updateActionButtons();
   applyContextTabDefault();
   void refreshSkillForm();
+  void refreshMaterialViews();
 }
 
 function skillBindingState() {
@@ -1488,6 +1490,38 @@ function materialOriginBadge(m) {
   return `<span class="material-form-tag form-agent-edited" data-testid="material-origin-badge" title="The agent adapted this code and you accepted the diff. Run it once with real inputs; editing the material yourself clears this mark.">edited by agent &middot; not run</span>`;
 }
 
+// GET /material-views: truncated materials only, refetched whenever updated_at moves.
+let materialViews = null;
+let materialViewsRequestKey = null;
+
+async function refreshMaterialViews() {
+  if (!session || !(session.materials || []).length) {
+    materialViews = null;
+    return;
+  }
+  const key = skillFormKey();
+  if (materialViews?.key === key || materialViewsRequestKey === key) return;
+  materialViewsRequestKey = key;
+  try {
+    const data = await fetchMaterialViews(session.id);
+    if (skillFormKey() !== key) return;
+    materialViews = { key, data: Array.isArray(data) ? data : [] };
+    renderMaterials();
+  } catch (err) {
+    appLog(`Material view lookup failed: ${err.message}`);
+  } finally {
+    if (materialViewsRequestKey === key) materialViewsRequestKey = null;
+  }
+}
+
+function materialViewBadge(m) {
+  if (materialViews?.key !== skillFormKey()) return "";
+  const view = materialViews.data.find((v) => v.material_id === m.id);
+  if (!view) return "";
+  const fmt = (n) => Number(n).toLocaleString("en-US");
+  return `<span class="material-form-tag form-truncated" data-testid="material-truncated-badge" title="Too long for the agent to read in full: it receives only the first ${fmt(view.shown)} characters. Your material is stored intact.">agent sees ${fmt(view.shown)} / ${fmt(view.total)} chars</span>`;
+}
+
 function skillFormMaterialsNote() {
   if (!skillFormRelevant()) return "";
   const verdict = currentSkillFormVerdict();
@@ -1687,7 +1721,7 @@ function renderMaterials() {
     const expandAttrs = id ? `data-action="expand" data-material-id="${escapeHtml(id)}"` : "data-action=\"expand\" disabled";
     return `<tr class="material-item" data-source="saved" data-material-id="${escapeHtml(id)}" data-testid="saved-material-item">
       <td class="material-cell-index">${i + 1}</td>
-      <td class="material-cell-kind"><span class="material-kind-tag">${escapeHtml(m.kind || "text")}</span>${codeMaterialFormBadge(m)}${materialOriginBadge(m)}</td>
+      <td class="material-cell-kind"><span class="material-kind-tag">${escapeHtml(m.kind || "text")}</span>${codeMaterialFormBadge(m)}${materialOriginBadge(m)}${materialViewBadge(m)}</td>
       <td class="material-cell-content"><span class="material-preview">${escapeHtml(previewText(m.content))}</span></td>
       <td class="material-cell-actions">
         <button type="button" class="icon-only-button" title="Enlarge / view full content" ${expandAttrs}>${svgIcon("i-expand")}</button>

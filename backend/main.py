@@ -54,7 +54,7 @@ from .e2e import (
     get_scenario,
     set_scenario,
 )
-from .material_fidelity import fidelity_warning_count, materials_for_prompt, scan_material_fidelity
+from .material_fidelity import fidelity_warning_count, scan_material_fidelity
 from .material_patch import patch_defects, rewrite_reasons
 from .eaa_platform import (
     EaaLintRejected,
@@ -130,6 +130,7 @@ from .state_machine import (
     register_post_transition_hook,
     script_readiness_problems,
     script_replacement_problems,
+    session_materials_for_prompt,
     transition,
 )
 # ---------------------------------------------------------------------------
@@ -1694,10 +1695,12 @@ def _material_patch_target(session: Session, material_id: str) -> int:
     index = next((i for i, m in enumerate(session.materials) if m.id == material_id), None)
     if index is None or MaterialKind(session.materials[index].kind) is not MaterialKind.CODE:
         raise ValueError(f"`{material_id}` is not this session's code material.")
-    if any(truncated for m, _, truncated in materials_for_prompt(session.materials) if m.id == material_id):
+    if any(truncated for m, _, truncated in session_materials_for_prompt(session) if m.id == material_id):
         raise ValueError(
-            "The code material is truncated in your prompt, so a patch cannot be checked against "
-            "it. Ask the user to shorten the material instead."
+            "The code material is too long for you to read in full, so a patch cannot be checked "
+            "against it. Tell the user it is too long for you to adapt (their file is not "
+            "incomplete): it stays inline sample code unless they edit the material themselves "
+            "until `## Skill Form` lists no unmet condition."
         )
     return index
 
@@ -2591,6 +2594,17 @@ def inspect_session_skill_form(session_id: str, upn: str = Depends(require_upn))
         **evaluate_skill_form(session).to_dict(),
         "replacement_problems": [problem.to_dict() for problem in script_replacement_problems(session)],
     }
+
+
+@app.get("/api/sessions/{session_id}/material-views")
+def inspect_session_material_views(session_id: str, upn: str = Depends(require_upn)) -> list[dict[str, Any]]:
+    """How much of each truncated material the agent actually receives."""
+    session = get_session_for_user(session_id, upn)
+    return [
+        {"material_id": m.id, "shown": text.rfind("\n<<<TRUNCATED:"), "total": len(m.content or "")}
+        for m, text, truncated in session_materials_for_prompt(session)
+        if truncated
+    ]
 
 
 @app.get("/api/sessions/{session_id}/topology")
