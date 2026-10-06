@@ -67,7 +67,10 @@ def input_contract_errors(session: Session, skill_md: str | None = None) -> list
                 declared = parse_input_bindings(skill_md)
             except ValueError as exc:
                 return [str(exc)]
-            explicit = any(binding.source == "request" or binding.credentials_key or binding.payload_field for binding in bindings)
+            # A bundled script takes request inputs as argparse flags (S3), never an input-bindings block.
+            explicit = session.current_skill.script is None and any(
+                binding.source == "request" or binding.credentials_key or binding.payload_field for binding in bindings
+            )
             if (explicit and declared is None) or (bindings and declared is not None and binding_signature(declared) != binding_signature(bindings)):
                 errors.append("Required Inputs bindings do not match the confirmed runtime inputs.")
             bindings = declared if declared is not None else bindings

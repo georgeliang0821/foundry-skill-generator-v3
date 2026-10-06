@@ -661,6 +661,19 @@ def test_scenario_binding_must_match_child() -> None:
     assert input_contract_errors(session) == []
 
 
+def test_script_form_needs_no_input_bindings_block() -> None:
+    from backend.input_contract import input_contract_errors
+    from backend.models import SkillVariable
+
+    session = Session(skill_kind=SkillKind.CAPABILITY)
+    session.prepare_brief.variables = [SkillVariable(name="ROOM", kind="runtime", source="request")]
+    md = "## Required Inputs\n| Argument | Value |\n| --- | --- |\n| `--room` | x |\n"
+
+    assert input_contract_errors(session, md)
+    session.current_skill.script = "import argparse\n"
+    assert input_contract_errors(session, md) == []
+
+
 def test_runtime_state_says_children_are_still_undeclared() -> None:
     prompt = build_system_prompt(Session(skill_kind=SkillKind.SCENARIO))
 
