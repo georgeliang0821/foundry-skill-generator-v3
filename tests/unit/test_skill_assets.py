@@ -8,7 +8,7 @@ import pytest
 from backend.models import PERSIST_CONTEXT, Material, MaterialKind, Session, SkillAsset, SkillKind, Stage
 from backend.session_store import LocalSessionStore
 from backend.skill_assets import MAX_ASSET_CHARS, AssetRejected, check_asset, check_asset_set
-from backend.skill_lint import lint_skill
+from backend.skill_lint import lint_skill, parse_resource_labels
 from backend.state_machine import build_system_prompt, evaluate_skill_form
 
 
@@ -158,3 +158,34 @@ def test_f2_f3_ignore_the_gatekeeper_addendum_and_skip_without_assets() -> None:
 
     assert _asset_issues(md, ["assets/style.css"]) == [("F2", "assets/style.css")]
     assert _asset_issues(md, []) == []
+
+
+def test_parse_resource_labels_takes_the_first_parenthesis_after_the_path() -> None:
+    md = _MD + (
+        "\n## Skill Resources\n\n"
+        "- `assets/a.css` ( Required , EMBED ) -- styles (see notes).\n"
+        "- `assets/b.md` (reference, on-demand) -- wrong order.\n"
+        "- `assets/c.md` -- codes (on-demand, reference).\n"
+        "- `assets/d.md` (on-demand, reference, extra) -- three values.\n"
+        "  - `assets/e.md` (required, embed) -- nested, not a resource bullet.\n"
+    )
+
+    assert parse_resource_labels(md) == {
+        "assets/a.css": ("required", "embed"),
+        "assets/b.md": None,
+        "assets/c.md": ("on-demand", "reference"),
+        "assets/d.md": None,
+    }
+
+
+def test_f4_warns_on_unlabelled_assets_but_not_on_ones_f2_reports() -> None:
+    md = _MD + (
+        "\nUses `assets/body.css`.\n\n## Skill Resources\n\n"
+        "- `assets/ok.css` (required, embed) -- ok.\n- `assets/bad.css` -- unlabelled.\n"
+    )
+    paths = ["assets/ok.css", "assets/bad.css", "assets/body.css", "assets/gone.css"]
+
+    f4 = [i for i in lint_skill(md, SkillKind.CAPABILITY, asset_paths=paths) if i.rule == "F4"]
+
+    assert [(i.detail, i.severity) for i in f4] == [("assets/bad.css", "warning"), ("assets/body.css", "warning")]
+    assert "no bullet of its own" in f4[1].message

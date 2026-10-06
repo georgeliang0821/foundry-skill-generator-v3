@@ -1101,6 +1101,12 @@ def _format_latest_test_run(session: Session) -> str | None:
                 routed_here.append(result)
     lines.extend(_format_prepared_code([r for r in routed_here if not is_needs_info_response(r.apim_response)]))
     lines.extend(_format_needs_info_responses([r for r in routed_here if is_needs_info_response(r.apim_response)]))
+    if run.resource_findings:
+        lines += ["", "### Resource reads", ""]
+        lines += [
+            f"- [{f.get('severity')}] {f.get('rule')}" + (f" [{f['detail']}]" if f.get("detail") else "") + f": {f.get('message')}"
+            for f in run.resource_findings
+        ]
     return "\n".join(lines)
 
 

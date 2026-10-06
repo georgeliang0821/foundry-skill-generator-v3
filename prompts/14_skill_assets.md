@@ -16,15 +16,27 @@ content in SKILL.md -- point to the file.
 ### `## Skill Resources`
 
 SKILL.md must contain a `## Skill Resources` section, placed as the last body
-section, with one bullet per asset: the full path in backticks, what the file
-is, and when to read it.
+section, with one bullet per asset: the full path in backticks, a label in
+parentheses right after it, what the file is, and when to read it.
 
 ```markdown
 ## Skill Resources
 
-- `assets/style.css` -- the page stylesheet; embed it verbatim in `<style>`.
-- `references/field-codes.md` -- wire codes for `leave_type`; read before building a request.
+- `assets/style.css` (required, embed) -- the page stylesheet; embed it verbatim in `<style>`.
+- `references/field-codes.md` (on-demand, reference) -- wire codes for `leave_type`; read before building a request.
 ```
+
+The label is exactly two values in this order:
+
+- `required` -- every task needs the file; `on-demand` -- only some tasks do.
+- `embed` -- copied verbatim into the output (template, stylesheet);
+  `reference` -- read and followed (API spec, business rules), never pasted
+  into code.
+
+Choose the label from the file's content and the skill's purpose, and state
+why in the patch `reason` so the user can review it. Without a valid label the
+runtime decides on its own whether to read the file, and TEST cannot check the
+reads.
 
 Use exactly that heading. Do not call it `## References`: section names are
 matched by substring, and "references" is contained in

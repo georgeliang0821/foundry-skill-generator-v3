@@ -587,10 +587,9 @@ class TestResult(BaseModel):
     # ``skills_referenced``). The authoritative routing signal -- the response
     # prose "Skill used:" line can disagree with it.
     skills_referenced: list[str] = Field(default_factory=list)
-    # UI only -- this never enters the agent prompt. Always [] for skills
-    # authored here (single file, schema and sample code inline); non-empty only
-    # for an imported skill that ships real resource files next to SKILL.md.
+    # UI only -- the agent sees the reads through ``TestRun.resource_findings``.
     loaded_resources: list[str] = Field(default_factory=list)
+    failed_resources: list[str] = Field(default_factory=list)
     passed: bool | None = None
     reasoning: str = ""
     apim_response: str = ""
@@ -640,6 +639,8 @@ class TestRun(BaseModel):
     # Things the run could NOT establish. Shown verbatim next to the results so
     # a green run is never mistaken for a stronger claim than it is.
     notes: list[str] = Field(default_factory=list)
+    # F4-F6 against the runtime's resource reads, computed at run time.
+    resource_findings: list[dict[str, Any]] = Field(default_factory=list)
     ran_at: str = Field(default_factory=utc_now_iso)
 
 

@@ -61,6 +61,12 @@ PREREQUISITES_SECTION = "Prerequisites"
 RESULT_SECTION = "Reading the Result"
 # Written by EAA's gatekeeper, not by the generator.
 GATEKEEPER_ADDENDUM_SECTION = "Gatekeeper Addendum"
+RESOURCES_SECTION = "Skill Resources"
+RESOURCE_LABEL_FORMAT = "`(required|on-demand, embed|reference)`"
+_RESOURCE_READS = frozenset({"required", "on-demand"})
+_RESOURCE_USES = frozenset({"embed", "reference"})
+_RESOURCE_BULLET_RE = re.compile(r"^[-*+][ \t]+`([^`]+)`(.*)$")
+_RESOURCE_LABEL_RE = re.compile(r"\(([^)]*)\)")
 SCRIPT_EXIT_CODES = frozenset({0, 1, 3})
 # The platform injects this after a successful OBO exchange; a skill never
 # declares it as an ACA variable and never accepts it from the caller.
@@ -3231,8 +3237,28 @@ def _check_operation_coverage(skill_md: str, child: str, child_md: str) -> list[
 _ASSET_MENTION_RE = re.compile(r"(?<![\w/.\-])((?:assets|references)/[^\s`'\"()<>\[\]{},;|*]+)")
 
 
+def parse_resource_labels(skill_md: str) -> dict[str, tuple[str, str] | None]:
+    """Path -> (read, use) per top-level `## Skill Resources` bullet; None when unlabelled or invalid.
+
+    Same rule as the EAA runtime: the first parenthesis after the path code span,
+    exactly two values in fixed order, case-insensitive, surrounding blanks ignored.
+    """
+    labels: dict[str, tuple[str, str] | None] = {}
+    for line in _h2_body(_without_gatekeeper_addendum(skill_md), RESOURCES_SECTION).splitlines():
+        match = _RESOURCE_BULLET_RE.match(line)
+        if not match:
+            continue
+        path = match.group(1).strip()
+        paren = _RESOURCE_LABEL_RE.search(match.group(2))
+        values = [v.strip().lower() for v in paren.group(1).split(",")] if paren else []
+        valid = len(values) == 2 and values[0] in _RESOURCE_READS and values[1] in _RESOURCE_USES
+        labels.setdefault(path, (values[0], values[1]) if valid else None)
+    return labels
+
+
 def _check_asset_references(skill_md: str, asset_paths: Collection[str]) -> list[LintIssue]:
-    """F2: every asset is named by full path in backticks. F3: every asset path named exists."""
+    """F2: every asset is named by full path in backticks. F3: every asset path named exists.
+    F4: every asset has its own labelled `## Skill Resources` bullet."""
     if not asset_paths:
         return []
     text = _without_gatekeeper_addendum(skill_md)
@@ -3268,6 +3294,22 @@ def _check_asset_references(skill_md: str, asset_paths: Collection[str]) -> list
         )
         for path in mentioned
         if path not in known
+    ]
+    labels = parse_resource_labels(skill_md)
+    issues += [
+        LintIssue(
+            rule="F4",
+            message=(
+                f"`{path}` has no bullet of its own in `## Skill Resources`."
+                if path not in labels
+                else f"`{path}` has no valid {RESOURCE_LABEL_FORMAT} label in `## Skill Resources`."
+            )
+            + " The runtime then decides by itself whether to read it, and TEST cannot check the reads.",
+            detail=path,
+        )
+        for path in asset_paths
+        # A path F2 already reports is not listed at all; one finding is enough.
+        if f"`{path}`" in text and labels.get(path) is None
     ]
     return issues
 

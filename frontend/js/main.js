@@ -3048,6 +3048,7 @@ function renderTests() {
         ${testRunScoreHtml(run)}
       </summary>
       ${renderTestRunNotes(run)}
+      ${renderResourceFindings(run)}
       ${isScenario ? renderScenarioLayers(run) : `${renderResultList("Positive", run.positive_results)}${renderResultList("Negative", run.negative_results)}`}
     </details>`;
     })
@@ -4123,6 +4124,15 @@ function renderTestRunNotes(run) {
     .join("")}</div>`;
 }
 
+function renderResourceFindings(run) {
+  const findings = Array.isArray(run?.resource_findings) ? run.resource_findings : [];
+  if (!findings.length) return "";
+  const rows = findings
+    .map((f) => `<li><code>${escapeHtml(f.rule)}</code> [${escapeHtml(f.severity)}]${f.detail ? ` <code>${escapeHtml(f.detail)}</code>` : ""}: ${escapeHtml(f.message)}</li>`)
+    .join("");
+  return `<div class="test-result-group" data-testid="resource-findings"><strong>Resource reads</strong><ul>${rows}</ul></div>`;
+}
+
 function testRunScoreHtml(run) {
   const layers = Array.isArray(run?.scenario_layers) ? run.scenario_layers : [];
   if (layers.length) {
@@ -4194,6 +4204,7 @@ function renderSampleResult(result, index, kind = "") {
   const actual = result.actual_skill || "none";
   const referencedList = Array.isArray(result.skills_referenced) ? result.skills_referenced.filter(Boolean) : [];
   const loadedResources = Array.isArray(result.loaded_resources) ? result.loaded_resources.filter(Boolean) : [];
+  const failedResources = Array.isArray(result.failed_resources) ? result.failed_resources.filter(Boolean) : [];
   const isNegative = kind === "negative" || (!expectedSkill && kind !== "positive");
   const routedTo = referencedList.length ? referencedList.join(", ") : (actual && actual !== "none" ? actual : "no skill");
   const expectationText = isNegative ? "should NOT select this skill" : `should select ${expectedSkill || "this skill"}`;
@@ -4212,6 +4223,7 @@ function renderSampleResult(result, index, kind = "") {
       <span>Routed to: <code>${escapeHtml(routedTo)}</code></span>
       ${modeBadgeHtml(result)}
       ${loadedResources.length ? `<span>Loaded resources: <code>${escapeHtml(loadedResources.join(", "))}</code></span>` : ""}
+      ${failedResources.length ? `<span>Failed resources: <code>${escapeHtml(failedResources.join("; "))}</code></span>` : ""}
       ${result.apim_status ? `<span>Status: <code>${escapeHtml(result.apim_status)}</code></span>` : ""}
       ${result.apim_session_id ? `<span>APIM session: <code>${escapeHtml(result.apim_session_id)}</code></span>` : ""}
       ${result.duration_ms ? `<span>${escapeHtml(result.duration_ms)}ms</span>` : ""}
