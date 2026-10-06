@@ -346,6 +346,11 @@ def test_c2_rejects_a_pointable_section_below_h2() -> None:
     assert "C2" in rules(validate(md, SkillKind.CAPABILITY))
 
 
+def test_c2_ignores_a_subheading_when_the_h2_exists() -> None:
+    md = capability("\n## Required Inputs\n- `FOO`\n\n## Usage\n### Required inputs example\nx\n")
+    assert "C2" not in rules(validate(md, SkillKind.CAPABILITY))
+
+
 def test_c2_requires_a_dedicated_needs_info_section() -> None:
     md = capability(
         '\n## Required Inputs\n- `FOO`\n\n## Sample\n```python\nprint("[NEEDS_INFO] missing=FOO")\n```\n'

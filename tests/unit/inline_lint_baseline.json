@@ -85,7 +85,7 @@
    {
     "rule": "C2",
     "severity": "error",
-    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill points at that section by name, so it must exist on its own."
+    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill that uses this capability points at that section by name, so it must exist on its own."
    }
   ]
  },
@@ -139,7 +139,7 @@
    {
     "rule": "C2",
     "severity": "error",
-    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill points at that section by name, so it must exist on its own."
+    "message": "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the needs-info contract. A scenario skill that uses this capability points at that section by name, so it must exist on its own."
    }
   ]
  },

@@ -476,13 +476,17 @@ def _check_section_contract(skill_md: str, kind: SkillKind, add, script: str | N
 
 def _check_pointable_sections(skill_md: str, add, script: str | None = None) -> None:
     """C2 -- what a parent points at must be its own ``##`` section."""
+    h2 = [normalize_section(title) for title in h2_titles(skill_md)]
+    # Script form keeps the needs-info contract as an exit row, not a section.
+    markers = ("requiredinputs",) if script is not None else _POINTABLE_MARKERS
     for hashes, title in _DEEP_HEADING_RE.findall(skill_md or ""):
         folded = normalize_section(title)
-        if any(marker in folded for marker in _POINTABLE_MARKERS):
+        if any(m in folded and not any(m in t for t in h2) for m in markers):
             add(
                 "C2",
-                f"`{title}` is a `{hashes}` heading. A scenario skill can only name `##` "
-                "sections; deeper headings are folded into the `##` above them and cannot be "
+                f"`{title}` is a `{hashes}` heading and no `##` section carries that name. A "
+                "scenario skill that uses this capability can only request `##` sections by "
+                "name; deeper headings are folded into the `##` above them and cannot be "
                 "requested on their own.",
             )
 
@@ -520,8 +524,8 @@ def _check_pointable_sections(skill_md: str, add, script: str | None = None) -> 
         add(
             "C2",
             "The sample code prints `[NEEDS_INFO]`, but no `##` section is dedicated to the "
-            "needs-info contract. A scenario skill points at that section by name, so it must "
-            "exist on its own.",
+            "needs-info contract. A scenario skill that uses this capability points at that "
+            "section by name, so it must exist on its own.",
         )
         return
     undocumented = [item for item in codes if item not in contract]

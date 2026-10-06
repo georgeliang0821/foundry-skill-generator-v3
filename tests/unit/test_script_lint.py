@@ -124,6 +124,19 @@ def test_an_exit_0_row_that_names_needs_info_also_counts() -> None:
     assert _hits(_lint(md=other_code), "A4") == [("error", "Reading the Result")]
 
 
+def test_c2_allows_a_needs_info_subheading_in_script_form() -> None:
+    md = _swap(MD, "## Composability", "### `needs_info` output\n\nSee the table above.\n\n## Composability")
+
+    assert validate_topology(md, SkillKind.CAPABILITY, mode=Mode.NEW, script=PY) == []
+
+
+def test_c2_still_rejects_required_inputs_below_h2_in_script_form() -> None:
+    md = _swap(MD, "## Required Inputs", "### Required Inputs")
+
+    issues = validate_topology(md, SkillKind.CAPABILITY, mode=Mode.NEW, script=PY)
+    assert "C2" in [i.rule for i in issues]
+
+
 def test_d1_allows_a_literal_default_only_for_an_optional_variable() -> None:
     md = _swap(MD, "- `DEFAULT_BUILDING` — optional ACA variable;", "- `DEFAULT_BUILDING` — ACA variable;")
     issues = _lint(md=md)

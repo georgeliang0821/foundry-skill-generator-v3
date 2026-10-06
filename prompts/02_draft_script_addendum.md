@@ -29,7 +29,9 @@ Write the body with these sections, in this order:
    exit 0. That `status` is the key in the script's own stdout JSON, never
    the tool's: `run_skill_script` reports this run as `success`, so never
    write that the tool returns `needs_info`. Then one output-field table per
-   `status`, naming every key the script prints.
+   `status`, naming every key the script prints. Introduce each table with a
+   plain line such as ``Output fields (`status` = `ok`):``, not a `###`
+   heading.
 5. `## Composability` -- which skills depend on this one's result, and which
    are independent of it.
 6. `## Prerequisites` -- one top-level bullet per environment variable the
