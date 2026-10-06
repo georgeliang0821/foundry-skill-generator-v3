@@ -619,7 +619,7 @@ Script 型 skill 只有在 EAA 會執行 script 時才有意義。判斷依據�
 
 ### 7.6 Skill 資產（assets/、references/）
 
-使用者可以在 Materials 分頁的 Skill assets 區塊上傳檔案，存檔時**原封不動**隨 skill 寫到 Blob 的 `skills/<name>/assets/<檔名>` 或 `skills/<name>/references/<檔名>`。EAA runtime 的模型用 `read_skill_resource(skill_name="<name>", resource_name="assets/<檔名>")` 讀取，讀不讀、怎麼用依 `SKILL.md` 的資源標示決定。Generator 不產生、不改寫資產，只負責接收、檢查與發佈；Agent 只在 `SKILL.md` 列出資產並標示用途，無法修改資產本身，要改就請使用者重新上傳。
+使用者可以在 Materials 分頁的 Skill assets 區塊上傳檔案，存檔時**原封不動**隨 skill 寫到 Blob 的 `skills/<name>/assets/<檔名>` 或 `skills/<name>/references/<檔名>`。EAA runtime 的模型用 `read_skill_resource(skill_name="<name>", resource_name="assets/<檔名>")` 讀取，讀不讀、怎麼用依 `SKILL.md` 的資源標示決定。兩個目錄在檢查、發佈與讀取上完全相同，行為只由資源標示決定、不看目錄；慣例上要逐字放進產出的範本或樣式表放 `assets/`，讀了照做的規格或規則文件放 `references/`，與 `embed` / `reference` 標示對應。Generator 不產生、不改寫資產，只負責接收、檢查與發佈；Agent 只在 `SKILL.md` 列出資產並標示用途，無法修改資產本身，要改就請使用者重新上傳。
 
 - 實作：[backend/skill_assets.py](../backend/skill_assets.py)（檢查）、`POST` / `DELETE /api/sessions/{id}/assets`（[main.py](../backend/main.py)）、[blob_store.py](../backend/blob_store.py)（寫入與清掃）、[skill_lint.py](../backend/skill_lint.py)（`parse_resource_labels` 與 F 規則）、[testing.py](../backend/testing.py)（`_check_resource_reads`）
 - 提示詞：[14_skill_assets.md](../prompts/14_skill_assets.md)
