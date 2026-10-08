@@ -2756,6 +2756,7 @@ textarea:focus, input:focus, select:focus {
   font-size: var(--fs-sm);
   line-height: 1.5;
 }
+.material-view-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 
 /* Materials CRUD additions */
 .material-actions {
@@ -3361,6 +3362,7 @@ textarea:focus, input:focus, select:focus {
 .form-state.form-inline { background: var(--surface-2); color: var(--text-2); }
 .material-form-tag.form-unused { background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }
 .material-form-tag.form-agent-edited { margin-left: 4px; background: var(--warning-soft); border-color: var(--warning); color: var(--warning); }
+button.material-form-tag.form-agent-edited { cursor: pointer; font-family: inherit; line-height: inherit; }
 .material-form-tag.form-truncated { margin-left: 4px; background: var(--warning-soft); border-color: var(--warning); color: var(--warning); text-transform: none; }
 .binding-script { margin-left: 6px; }
 .skill-form-note { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--warning); border-radius: var(--r-sm); background: var(--warning-soft); font-size: var(--fs-xs); color: var(--text-1); }

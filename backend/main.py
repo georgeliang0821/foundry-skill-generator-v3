@@ -1611,10 +1611,17 @@ _MATERIAL_PATCH_REWRITE_GUIDANCE = (
     "the chat, but never put it into a material."
 )
 
+_PATCHED_CODE_LOCATION = (
+    "Tell them where the updated code is: the Materials tab, the row marked \"edited by agent\"; "
+    "clicking that mark opens the code with Copy and Download buttons. Ask for what the run "
+    "printed and its exit code, not only a yes. "
+)
+
 MATERIAL_PATCHED_MESSAGE = (
     "Code material `{material_id}` was patched by propose_material_patch and the user has NOT run "
     "the patched code yet. Ask the user to run it once with real inputs and report the result. "
-    "The coverage confirmation was reset; do not record script_covers_operations=true until the "
+    + _PATCHED_CODE_LOCATION
+    + "The coverage confirmation was reset; do not record script_covers_operations=true until the "
     "user confirms the patched code works."
 )
 
@@ -1624,7 +1631,8 @@ STDOUT_FIX_APPLIED_MESSAGE = (
     "conditions, fix all of them now in ONE propose_material_patch against the updated material; "
     "the user already agreed to adapt the code, so do not ask again. The user has NOT run the "
     "patched code yet: ask them to run it once with real inputs before recording "
-    "script_covers_operations=true."
+    "script_covers_operations=true. "
+    + _PATCHED_CODE_LOCATION.rstrip()
 )
 
 MAX_MATERIAL_PATCH_REJECTIONS = 3
@@ -2285,6 +2293,12 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             brief.script_covers_operations = bool(covers)
             brief.verify_checklist["variables_ok"] = False
             brief.verify_evidence.pop("variables_ok", None)
+            if brief.script_covers_operations:
+                # Coverage is only confirmed after the user ran the code, so the patch has been run.
+                session.materials = [
+                    m.model_copy(update={"origin": "user"}) if m.origin == "agent_patch" else m
+                    for m in session.materials
+                ]
         prefer_inline = args.get("prefer_inline")
         if prefer_inline is not None and bool(prefer_inline) != brief.prefer_inline:
             if session.skill_form is not None:

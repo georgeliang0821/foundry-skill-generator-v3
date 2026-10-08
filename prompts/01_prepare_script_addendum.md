@@ -70,7 +70,10 @@ condition; it states what failed, never how to fix it.
   names.
 - **A patched material has not been run.** A material marked
   `origin=agent_patch, not run by the user` must be run once by the user with
-  real inputs before you record `script_covers_operations=true`.
+  real inputs before you record `script_covers_operations=true`. Tell the user
+  where the updated code is: the Materials tab, on the row marked "edited by
+  agent", whose mark opens the code with Copy and Download buttons. Ask what
+  the run printed and its exit code, not only whether it worked.
 - **A code material change resets the confirmation.** Adding, editing or
   removing a code material, or switching a material between code and text,
   sets `script_covers_operations` and `variables_ok` back to false. When that

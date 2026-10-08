@@ -207,4 +207,13 @@ test("an accepted material patch replaces the code material and marks it as not 
   expect(material.user_content).toContain('ROOM_ID = "room-1"');
   await openTab(page, "materials");
   await expect(page.getByTestId("material-origin-badge")).toHaveText(/edited by agent/i);
+
+  await page.getByTestId("material-origin-badge").click();
+  await expect(page.getByTestId("material-view-content")).toContainText('parser.add_argument("--room-id", default="")');
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByTestId("material-view-download").click(),
+  ]);
+  expect(download.suggestedFilename()).toMatch(/\.py$/);
+  await expect(page.getByTestId("material-view-copy")).toBeVisible();
 });

@@ -1487,7 +1487,7 @@ function codeMaterialFormBadge(m) {
 
 function materialOriginBadge(m) {
   if (m.origin !== "agent_patch") return "";
-  return `<span class="material-form-tag form-agent-edited" data-testid="material-origin-badge" title="The agent adapted this code and you accepted the diff. Run it once with real inputs; editing the material yourself clears this mark.">edited by agent &middot; not run</span>`;
+  return `<button type="button" class="material-form-tag form-agent-edited" data-action="expand" data-material-id="${escapeHtml(m.id || "")}" data-testid="material-origin-badge" title="The agent adapted this code and you accepted the diff. Click to view, copy or download it, then run it once with real inputs; editing the material yourself clears this mark.">edited by agent &middot; not run</button>`;
 }
 
 // GET /material-views: truncated materials only, refetched whenever updated_at moves.
@@ -5975,7 +5975,41 @@ function openMaterialView(id, pendingIndex) {
   if (!modal || !contentEl) return;
   if (kindEl) kindEl.textContent = material.kind || "text";
   contentEl.textContent = String(material.content || "");
+  viewedMaterial = material;
   modal.classList.remove("hidden");
+}
+
+let viewedMaterial = null;
+
+function viewedMaterialFileName() {
+  const m = viewedMaterial;
+  if (m?.kind !== "code") return `material-${m?.id || "pending"}.txt`;
+  const name = normalizeSkillName(session?.remote_skill_id || inferCurrentName());
+  return name ? `${name}.py` : `material-${m.id || "pending"}.py`;
+}
+
+async function copyViewedMaterial(btn) {
+  if (!viewedMaterial) return;
+  try {
+    await navigator.clipboard.writeText(String(viewedMaterial.content || ""));
+    btn.textContent = "Copied";
+  } catch (err) {
+    appLog(`Copy failed: ${err.message}`);
+    btn.textContent = "Copy failed";
+  }
+  setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+}
+
+function downloadViewedMaterial() {
+  if (!viewedMaterial) return;
+  const url = URL.createObjectURL(new Blob([String(viewedMaterial.content || "")], { type: "text/plain;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = viewedMaterialFileName();
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function closeMaterialView() {
@@ -6963,6 +6997,8 @@ function wireV7Ui() {
   document.querySelectorAll('[data-action="close-material-view"]').forEach((el) => {
     el.addEventListener("click", closeMaterialView);
   });
+  document.querySelector('[data-action="copy-material-view"]')?.addEventListener("click", (ev) => copyViewedMaterial(ev.currentTarget));
+  document.querySelector('[data-action="download-material-view"]')?.addEventListener("click", downloadViewedMaterial);
   document.getElementById("materialViewModal")?.addEventListener("click", (ev) => {
     if (ev.target.id === "materialViewModal") closeMaterialView();
   });

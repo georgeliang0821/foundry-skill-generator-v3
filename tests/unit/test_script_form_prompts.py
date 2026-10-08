@@ -169,7 +169,7 @@ def test_the_script_section_set_is_the_golden_fixture() -> None:
             "only the edges", "Never change an external call", "offer to keep the inline form",
             "moves output from stdout to stderr, explain why", "in the tool's `reason`",
             "successful run count as a failure",
-            "`origin=agent_patch, not run by the user`",
+            "`origin=agent_patch, not run by the user`", "the Materials tab", "Copy and Download",
             "ask about the coverage again", "locked", "needs a new session",
             "copied from the `form:` line of `## Skill Form`", "never infer it from the conversation",
             "list every unmet condition",

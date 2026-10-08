@@ -278,6 +278,21 @@ def test_accepting_replaces_the_material_and_resets_the_coverage(client, backend
 
     prompt = build_system_prompt(backend_main.sessions[session.id])
     assert "<<<BEGIN MATERIAL code-1 (kind=code, origin=agent_patch, not run by the user)>>>" in prompt
+    patched = next(m for m in body["conversation"] if m["metadata"].get("material_patched") == "code-1")
+    assert "Materials tab" in patched["content"] and "Download" in patched["content"]
+
+
+def test_confirmed_coverage_clears_the_not_run_mark(client, backend_main) -> None:
+    session = _session()
+    _stage(backend_main, session)
+    assert _answer(client, session, "accept").status_code == 200
+    stored = backend_main.sessions[session.id]
+
+    backend_main.apply_tool_effect(stored, "record_variables", {"script_covers_operations": True})
+
+    assert stored.materials[0].origin == "user"
+    assert stored.materials[0].user_content == CODE
+    assert "<<<BEGIN MATERIAL code-1 (kind=code)>>>" in build_system_prompt(stored)
 
 
 def test_a_second_patch_keeps_the_users_original_text(client, backend_main) -> None:
