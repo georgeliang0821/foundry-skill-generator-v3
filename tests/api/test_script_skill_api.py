@@ -4,7 +4,7 @@ import pytest
 
 from backend import state_machine
 from backend.models import Material, MaterialKind, PendingToolCall, SkillFiles
-from backend.state_machine import SCRIPT_REPLACED_MESSAGE, build_system_prompt
+from backend.state_machine import CODE_MATERIAL_EDITED_MESSAGE, SCRIPT_REPLACED_MESSAGE, build_system_prompt
 
 SCRIPT = 'import json\nprint(json.dumps({"status": "ok"}))\n'
 FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
@@ -426,6 +426,7 @@ def test_a_code_material_change_before_the_lock_reopens_the_coverage_confirmatio
 
     assert change(client, session.id).status_code == 200
     assert _confirmation(backend_main.sessions[session.id]) == (False, False, False)
+    assert _system_messages(backend_main.sessions[session.id]) == [CODE_MATERIAL_EDITED_MESSAGE]
 
 
 @pytest.mark.parametrize(
@@ -444,6 +445,7 @@ def test_a_non_code_change_keeps_the_coverage_confirmation(client, backend_main,
 
     assert change(client, session.id).status_code == 200
     assert _confirmation(backend_main.sessions[session.id]) == (True, True, True)
+    assert _system_messages(backend_main.sessions[session.id]) == []
 
 
 def test_a_code_change_after_an_inline_lock_changes_nothing(client, backend_main, monkeypatch) -> None:

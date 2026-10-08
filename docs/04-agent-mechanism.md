@@ -523,7 +523,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 | 何時 | code 素材的內容有變（新增 / 修改 / 刪除 / kind 在 code 與其他之間切換 / 對話附上） | 結果 |
 | --- | --- | --- |
-| 未鎖定 | 任何變動 | 重置 `script_covers_operations`、`variables_ok` 與其 evidence，需要重新確認 |
+| 未鎖定 | 任何變動 | 重置 `script_covers_operations`、`variables_ok` 與其 evidence，需要重新確認；並寫入一則 system 訊息告訴 Agent 素材已改、先前針對舊內容的判斷（解析錯誤、行號、被拒的 patch）不再適用（接受 `propose_material_patch` 時改寫入它自己的訊息） |
 | 鎖定為 inline | 任何變動 | 不影響形式 |
 | 鎖定為 script | 剛好一份 `code` 素材、內容與現有 script 不同，且 `script_readiness_problems()`（可解析、`script_only_errors()` 乾淨、`entry_point`、`inputs`）為空 | **取代** `current_skill.script`，並寫入一則 system 訊息要 Agent 請使用者確認新程式碼仍涵蓋所有操作（**不**重置 `variables_ok`） |
 | 鎖定為 script | 其他情況（兩份以上、無法解析、有 lint error、request 輸入沒有 flag） | 保留原本的 script；原因出現在 `## Skill Form` 與 `GET /skill-form` 的 `replacement_problems`，UI 的 Materials 分頁也會列出 |

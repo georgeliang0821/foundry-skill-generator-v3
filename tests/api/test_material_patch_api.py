@@ -273,6 +273,7 @@ def test_accepting_replaces_the_material_and_resets_the_coverage(client, backend
     assert body["prepare_brief"]["script_covers_operations"] is False
     assert body["prepare_brief"]["verify_checklist"]["variables_ok"] is False
     assert any(m["metadata"].get("material_patched") == "code-1" for m in body["conversation"])
+    assert not any("The user changed the code material" in m["content"] for m in body["conversation"])
     assert body["pending_tool_calls"] == []
 
     prompt = build_system_prompt(backend_main.sessions[session.id])

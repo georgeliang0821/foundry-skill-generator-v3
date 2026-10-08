@@ -1801,7 +1801,7 @@ def _accept_material_patch(session: Session, call) -> None:
         "origin": "agent_patch",
         "user_content": material.content if material.user_content is None else material.user_content,
     })
-    apply_code_material_change(session, codes_before)
+    apply_code_material_change(session, codes_before, notify=False)
     session.conversation.append(
         ChatMessage(
             role=MessageRole.SYSTEM,

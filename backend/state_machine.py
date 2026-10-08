@@ -534,8 +534,15 @@ SCRIPT_REPLACED_MESSAGE = (
     "code still covers every operation this skill documents."
 )
 
+CODE_MATERIAL_EDITED_MESSAGE = (
+    "The user changed the code material. The Materials section now holds its current content; "
+    "anything said earlier about the previous content (parse errors, line numbers, refused patches) "
+    "no longer applies. Re-check it against the Skill Form section before answering. Whether the "
+    "code covers every operation was reset, so confirm variables_ok with the user again."
+)
 
-def apply_code_material_change(session: Session, before: list[str]) -> None:
+
+def apply_code_material_change(session: Session, before: list[str], *, notify: bool = True) -> None:
     """Run after any entry point changed ``session.materials``; ``before`` = code_material_contents beforehand."""
     if code_material_contents(session) == before:
         return
@@ -545,6 +552,8 @@ def apply_code_material_change(session: Session, before: list[str]) -> None:
         brief.script_covers_operations = False
         brief.verify_checklist["variables_ok"] = False
         brief.verify_evidence.pop("variables_ok", None)
+        if notify:
+            session.conversation.append(ChatMessage(role=MessageRole.SYSTEM, content=CODE_MATERIAL_EDITED_MESSAGE))
         return
     codes = code_material_contents(session)
     if (
