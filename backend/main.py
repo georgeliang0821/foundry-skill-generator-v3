@@ -709,7 +709,8 @@ def _hydrate_current_skill_from_remote(session: Session) -> bool:
         return False
     if session.current_stage == Stage.PREPARE.value:
         return False
-    remote_name = (session.remote_skill_id or session.target_skill_id or "").strip()
+    # Only an actually loaded/saved binding may hydrate; target_skill_id alone is not one.
+    remote_name = (session.remote_skill_id or "").strip()
     if not remote_name:
         return False
     try:
@@ -2444,10 +2445,12 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
         skill_kind=req.skill_kind or SkillKind.CAPABILITY,
         material_count=len(req.materials),
     )
+    if req.mode != "modify" and req.target_skill_id:
+        log_event("session.create.target_ignored", level="warning", mode=req.mode, target_skill_id=req.target_skill_id)
     session = Session(
         mode=req.mode,
         skill_kind=req.skill_kind or SkillKind.CAPABILITY,
-        target_skill_id=req.target_skill_id,
+        target_skill_id=req.target_skill_id if req.mode == "modify" else None,
         materials=req.materials,
         owner_upn=upn,
     )

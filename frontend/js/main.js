@@ -5622,7 +5622,8 @@ async function startSession() {
       // modify infers the kind from the target SKILL.md; sending the disabled
       // select's stale value would trip the backend's mismatch check.
       skill_kind: el("modeSelect").value === "modify" ? null : el("skillKindSelect").value,
-      target_skill_id: el("targetSkill").value || null,
+      // The hidden selector keeps its last value in new mode; binding it would load that skill.
+      target_skill_id: el("modeSelect").value === "modify" ? el("targetSkill").value || null : null,
       materials: [],
     });
     localEditorDirty = false;

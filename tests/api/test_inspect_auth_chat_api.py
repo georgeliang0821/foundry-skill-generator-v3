@@ -112,6 +112,36 @@ def test_read_session_hydrates_empty_current_skill_from_remote(client, backend_m
     assert body["current_skill"]["skill_md"].startswith("---\nname: remote-skill")
     assert backend_main.sessions[session.id].current_skill.skill_md
 
+
+def test_new_session_ignores_target_skill_id(client, backend_main) -> None:
+    response = client.post(
+        "/api/sessions",
+        json={"mode": "new", "skill_kind": "scenario", "target_skill_id": "some-child", "materials": []},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["target_skill_id"] is None
+    assert backend_main.sessions[response.json()["id"]].target_skill_id is None
+
+
+def test_read_session_does_not_hydrate_from_unsaved_target(client, backend_main) -> None:
+    session = Session(current_stage="draft", owner_upn="test@example.com")
+    session.target_skill_id = "some-child"
+    backend_main.store.save_skill(
+        backend_main.SkillFiles(
+            name="some-child",
+            skill_md="---\nname: some-child\ndescription: Child\n---\nbody",
+        )
+    )
+    backend_main.sessions[session.id] = session
+
+    response = client.get(f"/api/sessions/{session.id}")
+
+    assert response.status_code == 200
+    assert response.json()["current_skill"]["skill_md"] == ""
+    assert response.json()["remote_skill_id"] is None
+
+
 def test_chat_tolerates_non_dict_agent_events(client, backend_main) -> None:
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
 
