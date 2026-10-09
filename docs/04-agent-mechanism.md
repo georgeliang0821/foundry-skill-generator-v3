@@ -515,7 +515,9 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | `inputs` | `variables` 中每個 `kind=runtime`、`source=request` 的變數都有對應的 `add_argument`（`dest`，或 `--target-tables` → `TARGET_TABLES`）。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
 | `covers_operations` | 使用者在 `variables_ok` 確認「code 素材涵蓋本 skill 的所有操作」（`script_covers_operations`），**且** `variables_ok` 已確認 |
 
-**鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文，並寫入一則 system 訊息要 Agent 告訴使用者這是 bundled script、更正先前任何「會是 inline」的說法。之後不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 或 `prefer_inline` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式。
+**鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文，並寫入一則 system 訊息要 Agent 告訴使用者這是 bundled script、更正先前任何「會是 inline」的說法。之後不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 或 `prefer_inline` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式，因此 `record_variables` 的這兩個旗標在 MODIFY 會被忽略而不是被拒。
+
+MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，預設）直接在已載入的 skill 上從 REFINE 開始，不經 PREPARE 關卡；`prepare`（re-plan）從 PREPARE 開始。MODIFY 回到 PREPARE 時保留已載入的 `SKILL.md`。要換 script，在 Materials 加入新版 code 素材即可（MODIFY 沒有舊素材需要移除）；檢查與 NEW 相同，通過後才替換。
 
 `record_variables` 的 `variables` 可省略：省略時變數不變；帶入的清單會整份取代現有變數。只記錄 `script_covers_operations` 或 `prefer_inline` 時應省略它。
 

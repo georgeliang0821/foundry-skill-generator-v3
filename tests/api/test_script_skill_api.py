@@ -95,6 +95,44 @@ def test_modify_session_loads_the_script(client, backend_main, grant_skill) -> N
     assert response.json()["skill_form"] == "script"
 
 
+def test_modify_quick_edit_starts_in_refine_with_the_stored_skill(client, backend_main, grant_skill) -> None:
+    _seed(backend_main, grant_skill, "room-finder")
+
+    body = client.post(
+        "/api/sessions",
+        json={"mode": "modify", "target_skill_id": "room-finder", "start_stage": "refine", "materials": []},
+    ).json()
+
+    assert body["current_stage"] == "refine"
+    assert body["current_skill"]["script"] == SCRIPT
+    assert body["current_skill"]["skill_md"].strip()
+
+
+def test_modify_defaults_to_prepare_and_new_ignores_start_stage(client, backend_main, grant_skill) -> None:
+    _seed(backend_main, grant_skill, "room-finder")
+
+    modify = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()
+    new = client.post("/api/sessions", json={"mode": "new", "start_stage": "refine"}).json()
+
+    assert (modify["current_stage"], new["current_stage"]) == ("prepare", "prepare")
+
+
+def test_modify_ignores_script_coverage_flags_instead_of_refusing(client, backend_main, grant_skill) -> None:
+    _seed(backend_main, grant_skill, "room-finder")
+    session = client.post(
+        "/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder", "materials": []}
+    ).json()
+
+    backend_main.apply_tool_effect(
+        backend_main.sessions[session["id"]],
+        "record_variables",
+        {"script_covers_operations": True, "prefer_inline": True},
+    )
+
+    brief = backend_main.sessions[session["id"]].prepare_brief
+    assert (brief.script_covers_operations, brief.prefer_inline) == (False, False)
+
+
 def test_modify_session_of_an_inline_skill_stays_inline(client, backend_main, grant_skill) -> None:
     _seed(backend_main, grant_skill, "room-finder", script=None)
     materials = [{"kind": "code", "content": SCRIPT}]

@@ -2284,7 +2284,9 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         from backend.models import SkillVariable
         brief = session.prepare_brief
         covers = args.get("script_covers_operations")
-        if covers is not None and bool(covers) != brief.script_covers_operations:
+        # Modify takes its form from Blob, so these two flags are ignored there rather than refused.
+        form_from_blob = session.skill_form is not None and Mode(session.mode) is Mode.MODIFY
+        if covers is not None and not form_from_blob and bool(covers) != brief.script_covers_operations:
             if session.skill_form is not None:
                 raise ValueError(
                     f"This skill's form is locked as {session.skill_form}; switching between inline "
@@ -2300,7 +2302,7 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
                     for m in session.materials
                 ]
         prefer_inline = args.get("prefer_inline")
-        if prefer_inline is not None and bool(prefer_inline) != brief.prefer_inline:
+        if prefer_inline is not None and not form_from_blob and bool(prefer_inline) != brief.prefer_inline:
             if session.skill_form is not None:
                 raise ValueError(
                     f"This skill's form is locked as {session.skill_form}; switching between inline "
@@ -2468,6 +2470,8 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
         materials=req.materials,
         owner_upn=upn,
     )
+    if req.mode == "modify" and req.target_skill_id and req.start_stage == "refine":
+        session.current_stage = Stage.REFINE
     if req.mode == "modify" and req.target_skill_id:
         # ACL: cannot create a session targeting a skill the user has no grant on.
         # Convert 403 -> 404 so we do not leak the existence of skills the user

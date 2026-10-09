@@ -609,8 +609,10 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         lock_skill_form(session)
     if target == Stage.PREPARE and current in {Stage.DRAFT, Stage.REFINE, Stage.TEST, Stage.DONE}:
         # Coming back to PREPARE: clear the draft but keep the brief & materials.
-        session.current_skill.skill_md = ""
-        session.current_skill.version_hash = ""
+        # A modify session's SKILL.md is the stored skill, not a discardable draft.
+        if Mode(session.mode) is not Mode.MODIFY:
+            session.current_skill.skill_md = ""
+            session.current_skill.version_hash = ""
         session.prepare_brief.revisit = True
     if target == Stage.DONE and session.iteration_reflections:
         # Finalizing accepts the skill as-is, so whatever is still open was declined.

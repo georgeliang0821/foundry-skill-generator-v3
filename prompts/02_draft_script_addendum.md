@@ -64,7 +64,9 @@ What they would say is covered by Reading the Result and Prerequisites.
 - **Replacing the script:** ask the user to add the new version as a new code
   material and to remove the old code material. The bundled script is replaced
   once exactly one code material remains that differs from it, parses and
-  passes the script checks.
+  passes the script checks. In a modify session the stored script is not a
+  code material, so the user only adds the new version; there is no old code
+  material to remove unless they added more than one.
 - **After a system message says the bundled script was replaced:** confirm
   with the user in the chat that the new code still covers every operation this
   skill documents, then patch `## Required Inputs` so its first column matches

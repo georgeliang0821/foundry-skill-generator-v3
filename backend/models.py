@@ -784,6 +784,8 @@ class CreateSessionRequest(BaseModel):
     mode: Mode = Mode.NEW
     skill_kind: SkillKind | None = None
     target_skill_id: str | None = None
+    # Modify only: "refine" skips PREPARE and opens straight on the stored skill.
+    start_stage: Literal["prepare", "refine"] | None = None
     materials: list[Material] = Field(default_factory=list)
 
 class ChatRequest(BaseModel):

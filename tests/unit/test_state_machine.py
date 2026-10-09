@@ -120,6 +120,19 @@ def test_any_to_prepare_sets_revisit_and_clears_draft() -> None:
     assert session.current_skill.skill_md == ""
 
 
+def test_modify_session_keeps_the_stored_skill_when_it_returns_to_prepare() -> None:
+    session = _fully_prepared_session()
+    session.mode = Mode.MODIFY
+    session.current_stage = Stage.REFINE
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+    session.current_skill.version_hash = "abc"
+    transition(session, Stage.PREPARE, "re-plan")
+    assert session.current_stage == Stage.PREPARE.value
+    assert session.prepare_brief.revisit is True
+    assert session.current_skill.skill_md == "---\nname: demo\n---\nbody"
+    assert session.current_skill.version_hash == "abc"
+
+
 def test_prompt_assembly_includes_stage_and_runtime_state() -> None:
     session = Session(current_stage=Stage.PREPARE)
     prompt = build_system_prompt(session)

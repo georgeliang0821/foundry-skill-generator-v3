@@ -981,6 +981,8 @@ function renderSkillSelector() {
   // Toggle the whole group, not just the <select>, so the refresh button hides too.
   const group = selector?.closest(".target-skill-group");
   if (group) group.style.display = isModify ? "" : "none";
+  const scopeGroup = el("editScopeSelect")?.closest(".edit-scope-group");
+  if (scopeGroup) scopeGroup.style.display = isModify ? "" : "none";
   selector.disabled = !isModify || isSending;
   selector.classList.toggle("hidden", !isModify);
   if (!isModify) return;
@@ -3002,10 +3004,10 @@ function renderEditor() {
   renderFileSwitch(script);
   const editor = el("editor");
   if (activeTab === "script") {
-    // The generator never edits the script; replacing it means adding a new code material.
+    // The generator never edits the script; replacing it means adding the new version as a code material.
     editor.readOnly = true;
     editor.value = script;
-    el("editorLabel").textContent = "Source (read-only)";
+    el("editorLabel").textContent = "Source (read-only) - to replace it, add the new version in Materials";
     renderScriptPreview(script);
     return;
   }
@@ -5624,6 +5626,7 @@ async function startSession() {
       skill_kind: el("modeSelect").value === "modify" ? null : el("skillKindSelect").value,
       // The hidden selector keeps its last value in new mode; binding it would load that skill.
       target_skill_id: el("modeSelect").value === "modify" ? el("targetSkill").value || null : null,
+      start_stage: el("modeSelect").value === "modify" ? el("editScopeSelect").value : null,
       materials: [],
     });
     localEditorDirty = false;
