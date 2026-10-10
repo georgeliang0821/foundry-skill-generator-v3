@@ -166,12 +166,14 @@ flowchart LR
 
 > 對話採「非串流」設計：後端把整回合事件收集成批次回傳，前端用同一套 `onEvent` 分派器重播。
 
+建立或還原 session 時，前端分別顯示載入與讀取 ACA 環境設定的狀態；這段流程不呼叫對話模型。聊天請求送出後，立即顯示模型處理中與經過秒數，無須等待事件批次回傳。完成或失敗摘要保留在對話區，區分內容未變更、等待使用者確認與已更新；ACA 查詢失敗時則說明技能已載入但環境設定不可用。
+
 **Script 型 skill 在前端的呈現**（形式規則見 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)）：
 
 - `GET /skill-form` 只在 capability session 有 `code` 素材或已鎖定為 script 時才呼叫，以 `session.updated_at` 快取；回應含 `form` / `locked` / `failures`（未滿足的條件）/ `replacement_problems`（新 code 素材為何沒取代已鎖定的 script）。
 - Materials：code 素材列標出 `script` / `inline` / `not the script`，表格下列出未滿足條件或取代失敗的原因（旗標關閉時只列旗標）。被 Agent 改過（`origin=agent_patch`）的素材另標 `edited by agent · not run`，點標示開啟素材檢視視窗，可 Copy / Download（code 素材下載為 `.py`）；使用者自己再編輯，或確認 `script_covers_operations` 後消失。超出 prompt 預算的素材標 `agent sees N / M chars`（`GET /material-views`，同樣以 `session.updated_at` 快取）。
 - 對話中的 `propose_material_patch` 以 `material-patch-card` 呈現 diff，接受 / 拒絕走同一個 `tool-result`。`stdout_fix=true` 的卡片顯示後端算出的 diff（寫在 `args.patch`），前端不分別處理。
-- Checklist 的 `variables_ok`：「Output form」列顯示形式與是否鎖定，提供 inline / script 選擇（隨 Save variables 送出 `prefer_inline`）與「code 素材涵蓋所有操作」勾選框（送出 `script_covers_operations`）；兩者在 DRAFT 後停用。MODIFY session 另有「Convert form」列，按鈕呼叫 `POST /convert-form`；session 已有 patch 時停用。
+- Checklist 的 `variables_ok`：「Output form」列顯示形式與是否鎖定，提供 inline / script 選擇（隨 Save variables 送出 `prefer_inline`）與「code 素材涵蓋所有操作」勾選框（送出 `script_covers_operations`）；兩者在 DRAFT 後停用。MODIFY session 另有「Convert form」列，按鈕呼叫 `POST /convert-form`；session 已有 patch 或請求執行中時停用。尚未有使用者訊息、且可轉換形式時，對話區上方另以單行呈現目前形式與轉換按鈕，說明放在資訊圖示的提示中；剩餘高度留給對話內容。
 - Files：有 script 時出現 `SKILL.md | scripts/<name>.py` 切換，script 為唯讀。
 - Draft 卡片註記會一併儲存 script；綁定狀態列與 modify 選單（`GET /api/skills` 的 `has_script`）標 `script` / `[script]`。
 - Tests：每筆結果列出 `requested_scripts`（script 路徑、args、valid / invalid 與 problems）。

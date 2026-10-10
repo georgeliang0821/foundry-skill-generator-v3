@@ -473,11 +473,18 @@ textarea:focus, input:focus, select:focus {
 
 .chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto auto;
   min-height: 0;
   overflow: hidden;
   border-top: 3px solid var(--brand-500);
 }
+.chat-panel > .chat-stage-overview { grid-row: 1; }
+.chat-panel > #formConvertCard { grid-row: 2; }
+.chat-panel > #chatStream { grid-row: 3; }
+.chat-panel > #toolCalls { grid-row: 4; }
+.chat-panel > #questionQueueStatus { grid-row: 5; }
+.chat-panel > #fixListStatus { grid-row: 6; }
+.chat-panel > .chat-form { grid-row: 7; }
 
 /* Stepper (4 phases) */
 .chat-stage-overview {
@@ -491,6 +498,7 @@ textarea:focus, input:focus, select:focus {
 }
 .stage-overview-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -608,10 +616,15 @@ textarea:focus, input:focus, select:focus {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 .llm-status {
   display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   align-items: center;
   gap: 6px;
   padding: 3px 10px;
@@ -2404,10 +2417,14 @@ textarea:focus, input:focus, select:focus {
 /* ─── Responsive ──────────────────────────────────────────── */
 
 @media (max-width: 1024px) {
+  .app-shell { height: auto; min-height: 100dvh; overflow: visible; }
   .workspace {
     grid-template-columns: minmax(0, 1fr);
     padding: 14px;
+    overflow: visible;
   }
+  .chat-panel, .context-panel { height: max(560px, calc(100dvh - 28px)); }
+  .header-status { justify-content: flex-start; }
   .workspace-resizer { display: none; }
   .context-panel { margin-top: 12px; }
   .app-header {
@@ -3386,13 +3403,14 @@ button.binding-convert:hover { background: var(--brand-100); }
   justify-content: space-between;
   gap: 12px;
   margin: 0 0 10px;
-  padding: 10px 12px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--form-script);
   border-radius: var(--r-md);
   background: var(--surface-2);
 }
 .form-convert-card strong { font-size: var(--fs-sm); color: var(--text-1); }
+.form-convert-card > div { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .form-convert-card p { margin: 2px 0 0; font-size: var(--fs-xs); color: var(--text-2); }
 .form-convert-card button {
   flex: none;

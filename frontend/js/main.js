@@ -896,7 +896,7 @@ function renderSkillBindingStatus() {
     : "";
   const convertTarget = formConversionTarget();
   const convertBadge = convertTarget
-    ? `<button type="button" class="binding-convert" data-convert-form="${convertTarget}" data-testid="binding-convert-button" title="Move the code of this ${session.skill_form} skill into ${convertTarget} form">Convert to ${convertTarget}</button>`
+    ? `<button type="button" class="binding-convert" data-convert-form="${convertTarget}" data-testid="binding-convert-button"${isSending ? " disabled" : ""} title="Move the code of this ${session.skill_form} skill into ${convertTarget} form">Convert to ${convertTarget}</button>`
     : "";
   node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}${scriptBadge}${convertBadge}`;
   node.title = binding.hasRemote
@@ -2381,8 +2381,8 @@ function renderFormConvertCard() {
   const what = target === "script"
     ? "Moves the one Python code block of SKILL.md into a bundled script."
     : "Moves the bundled script into a Python code block of SKILL.md.";
-  node.innerHTML = `<div><strong>This skill is ${escapeHtml(session.skill_form)}</strong><p>${escapeHtml(what)} SKILL.md is not rewritten; the agent fixes what the ${escapeHtml(target)} form still needs.</p></div>
-    <button type="button" data-convert-form="${target}" data-testid="form-convert-card-button">Convert to ${target}</button>`;
+  node.innerHTML = `<div><strong>${escapeHtml(labelize(session.skill_form))}</strong><span tabindex="0" role="img" aria-label="${escapeHtml(what)}" title="${escapeHtml(what)}">${svgIcon("i-info")}</span></div>
+    <button type="button" data-convert-form="${target}" data-testid="form-convert-card-button"${isSending ? " disabled" : ""}>Convert to ${target}</button>`;
 }
 
 function renderFormConversionRow() {
@@ -2395,12 +2395,12 @@ function renderFormConversionRow() {
   return `<div class="var-group skill-form-convert" data-testid="form-convert-row">
       <div class="var-group-head"><strong>Convert form</strong></div>
       <p class="spl-hint">${escapeHtml(hint)}${edited ? " Disabled: this session already has edits." : ""}</p>
-      <button type="button" class="spl-add-btn" data-convert-form="${toScript ? "script" : "inline"}" data-testid="form-convert-button"${edited ? " disabled" : ""}>Convert to ${toScript ? "script" : "inline"}</button>
+      <button type="button" class="spl-add-btn" data-convert-form="${toScript ? "script" : "inline"}" data-testid="form-convert-button"${edited || isSending ? " disabled" : ""}>Convert to ${toScript ? "script" : "inline"}</button>
     </div>`;
 }
 
 async function convertSkillForm(target) {
-  if (!session || !window.confirm(`Convert this skill to ${target} form? SKILL.md is not rewritten; the agent will help fix what the ${target} form needs. The first accepted SKILL.md patch also syncs the skill to Blob, so finish the conversion promptly.`)) return;
+  if (!session || isSending || !window.confirm(`Convert this skill to ${target} form? SKILL.md is not rewritten; the agent will help fix what the ${target} form needs. The first accepted SKILL.md patch also syncs the skill to Blob, so finish the conversion promptly.`)) return;
   try {
     session = await convertSessionForm(session.id, target);
     persistSessionState();
@@ -5671,12 +5671,13 @@ function nextTestPrompt() {
 
 async function startSession() {
   appLog("Starting session");
-  setInputBusy(true);
+  setInputBusy(true, "Loading...");
   if (el("modeSelect").value === "modify" && !el("targetSkill").value) {
     appendMessage("assistant", "Please select an existing skill before starting a modify session.");
     setInputBusy(false);
     return;
   }
+  const activity = beginConversationActivity("Loading session and skill");
   try {
     session = await createSession({
       mode: el("modeSelect").value,
@@ -5695,19 +5696,22 @@ async function startSession() {
     await refreshSessions();
     attachedMaterials = [];
     userPickedContextTab = false;
-    el("chatStream").innerHTML = `<div class="empty-state chat-empty">${svgIcon("i-sparkles")}<strong>Tell me what skill to build</strong><em>Paste API specs, sample code, an existing SKILL.md, or a few user examples.</em></div>`;
+    el("chatStream").innerHTML = session.mode === "modify" ? "" : `<div class="empty-state chat-empty">${svgIcon("i-sparkles")}<strong>Tell me what skill to build</strong><em>Paste API specs, sample code, an existing SKILL.md, or a few user examples.</em></div>`;
     el("toolCalls").innerHTML = "";
     pendingQuestionCalls.clear();
     pendingChoiceAnswers.clear();
     renderQuestionQueueStatus();
     renderSession();
-    await refreshCurrentAcaEnv();
-    if (session.current_skill?.skill_md) {
-      appendStatus(`Loaded skill: ${el("targetSkill").value || inferCurrentName()}`);
-    }
+    el("chatStream").appendChild(activity.node);
+    activity.update("Reading ACA environment settings");
+    const environment = await refreshCurrentAcaEnv();
+    const loaded = session.current_skill?.skill_md
+      ? `Loaded skill: ${session.target_skill_id || inferCurrentName()}. Skill content unchanged.`
+      : "Session ready.";
+    activity.finish(`${loaded} ${environment.message}`, environment.failed);
   } catch (err) {
     appLog(`Start session failed: ${err.message}`);
-    appendMessage("assistant", `Could not start session: ${err.message}`);
+    activity.finish(`Could not start session: ${err.message}`, true);
   } finally {
     setInputBusy(false);
   }
@@ -5752,7 +5756,7 @@ async function sendChatPayload(message, materials, options = {}) {
   appLog(`Calling chat API: /api/sessions/${session.id}/chat`);
   const isTopLevelTurn = !options.autoContinue;
   if (isTopLevelTurn) chatBatchAnchor = el("chatStream").lastElementChild;
-  setInputBusy(true);
+  setInputBusy(true, "Running...");
   el("toolCalls").innerHTML = "";
   pendingChoiceAnswers.clear();
   lastGateMissing = [];
@@ -5761,11 +5765,15 @@ async function sendChatPayload(message, materials, options = {}) {
   let autoContinueTarget = null;
   let responseStarted = false;
   let recoverableRejection = false;
-  const thinkingNode = appendConversationStatus(conversationWaitText(options), { running: true, ephemeral: true });
+  let failure = "";
+  let hasAssistantText = false;
+  const originalDraft = JSON.stringify([session.current_skill?.skill_md, session.current_skill?.script]);
+  const activity = beginConversationActivity(conversationWaitText(options));
   const flushAssistantMessage = () => {
     const text = assistantBuffer;
     assistantBuffer = "";
     if (text.trim()) {
+      hasAssistantText = true;
       dbgLog("stream", `flush assistant bubble (${text.length} chars)`);
       appendMessage("assistant", text);
     }
@@ -5782,19 +5790,14 @@ async function sendChatPayload(message, materials, options = {}) {
       eventSeq += 1;
       dbgLog("event", `#${eventSeq} ${eventName}`, eventName === "text_delta" ? { chars: (data.delta || "").length } : eventName === "tool_call" ? { tool: data.tool, call_id: data.call_id } : data);
       if (eventName === "llm_status") {
-        setLlmStatus(data);
-        if (data.status === "started") {
-          markConversationStatus(thinkingNode, `Thinking with ${data.model || "model"}...`, false, true);
-        }
+        if (data.status === "failed") failure = data.error || "Model request failed.";
       } else if (eventName === "text_delta") {
-        if (!responseStarted) {
-          removeConversationStatus(thinkingNode);
+        if (!responseStarted && (data.delta || "").trim()) {
           responseStarted = true;
         }
         assistantBuffer += data.delta || "";
       } else if (eventName === "tool_call") {
         if (!responseStarted) {
-          removeConversationStatus(thinkingNode);
           responseStarted = true;
         }
         if (["ask_user_input", "request_positive_samples", "propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(data.tool)) {
@@ -5814,7 +5817,6 @@ async function sendChatPayload(message, materials, options = {}) {
         renderSession();
       } else if (eventName === "quality_gate_failed") {
         if (!responseStarted) {
-          removeConversationStatus(thinkingNode);
           responseStarted = true;
         }
         flushAssistantMessage();
@@ -5830,7 +5832,6 @@ async function sendChatPayload(message, materials, options = {}) {
         if (session?.prepare_brief) renderChecklist();
       } else if (eventName === "tool_effect_rejected") {
         if (!responseStarted) {
-          removeConversationStatus(thinkingNode);
           responseStarted = true;
         }
         flushAssistantMessage();
@@ -5840,31 +5841,46 @@ async function sendChatPayload(message, materials, options = {}) {
           `**That step was not allowed.** ${data.guidance || data.message || ""}`,
         );
       } else if (eventName === "error") {
+        failure = data.message || "Model request failed.";
         responseStarted = true;
         flushAssistantMessage();
-        markConversationStatus(thinkingNode, `Model error: ${data.message}`, true);
         appendMessage("assistant", `Error: ${data.message}`);
       }
     });
+  } catch (err) {
+    failure = err.message || String(err);
+    appLog(`Chat failed: ${failure}`);
   } finally {
     flushAssistantMessage();
     resetActivityGroup();
     dbgLog("stream", `turn end (responseStarted=${responseStarted}, interactive=${responseHasInteractiveTool}, autoContinueTarget=${autoContinueTarget || "none"})`);
-    if (!responseStarted) {
-      markConversationStatus(thinkingNode, "Model turn completed.", false);
-      window.setTimeout(() => removeConversationStatus(thinkingNode), 1400);
-    }
-    setLlmStatus({ status: "completed" });
-    setInputBusy(false);
+    const changed = originalDraft !== JSON.stringify([session.current_skill?.skill_md, session.current_skill?.script]);
+    const outcome = failure
+      ? `Model request failed: ${failure}`
+      : responseHasInteractiveTool
+        ? `Response ready; waiting for your confirmation.${changed ? "" : " Skill content unchanged."}`
+        : changed
+          ? "Request completed. Skill content updated."
+          : hasAssistantText
+            ? "Response received. Skill content unchanged."
+            : responseStarted
+              ? "Request completed. Skill content unchanged."
+              : "Request finished without a response or proposed changes. Skill content unchanged.";
+    activity.finish(outcome, Boolean(failure));
+    const continuing = !failure && (options.autoDepth || 0) < 4 && !responseHasInteractiveTool
+      && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection);
+    if (!continuing) setInputBusy(false);
   }
   await refreshSessions();
 
   const shouldAutoContinue =
+    !failure &&
     autoContinueTarget &&
     autoContinueTarget !== "DONE" &&
     !responseHasInteractiveTool &&
     (options.autoDepth || 0) < 4;
   const shouldRecover =
+    !failure &&
     recoverableRejection &&
     !shouldAutoContinue &&
     !responseHasInteractiveTool &&
@@ -5903,15 +5919,44 @@ async function sendChatPayload(message, materials, options = {}) {
 }
 
 function conversationWaitText(options = {}) {
-  if (options.autoDepth) return "Continuing to the next stage...";
-  return "Sending to model...";
+  if (options.autoDepth) return "Model processing the next step";
+  return "Model processing your request";
 }
 
-function setInputBusy(busy) {
+function beginConversationActivity(initialText) {
+  const started = Date.now();
+  let text = initialText;
+  const node = appendConversationStatus(text, { running: true });
+  node.setAttribute("role", "status");
+  const render = () => {
+    const label = `${text} (${Math.floor((Date.now() - started) / 1000)}s)`;
+    markConversationStatus(node, label, false, true);
+    el("llmStatus").classList.remove("hidden", "failed-status");
+    el("llmStatusText").textContent = label;
+  };
+  render();
+  const timer = window.setInterval(render, 1000);
+  return {
+    node,
+    update(value) { text = value; render(); },
+    finish(value, failed = false) {
+      window.clearInterval(timer);
+      markConversationStatus(node, `${value} (${Math.floor((Date.now() - started) / 1000)}s)`, failed);
+      el("llmStatus").classList.add("hidden");
+    },
+  };
+}
+
+function setInputBusy(busy, label = "Running...") {
   isSending = busy;
   el("messageInput").disabled = busy;
   el("sendBtn").disabled = busy;
-  el("sendBtn").textContent = busy ? "Sending..." : "Send";
+  el("sendBtn").innerHTML = `<span>${escapeHtml(busy ? label : "Send")}</span>${svgIcon("i-send")}`;
+  el("chatForm").setAttribute("aria-busy", String(busy));
+  el("newSessionBtn").disabled = busy;
+  document.querySelectorAll("[data-convert-form]").forEach((node) => {
+    node.disabled = busy || Boolean(session?.patch_history?.length);
+  });
   document.querySelectorAll('[data-action="new-material"], [data-action="save-new"], [data-new-content], [data-new-kind]').forEach((node) => { node.disabled = busy; });
   updateActionButtons();
   renderSkillSelector();
@@ -6789,15 +6834,21 @@ async function refreshCurrentPeerSkills({ silent = true } = {}) {
 }
 
 async function refreshCurrentAcaEnv({ silent = true } = {}) {
-  if (!session?.id) return;
+  if (!session?.id) return { failed: true, message: "No session loaded." };
   try {
     session = await refreshAcaEnv(session.id);
     persistSessionState();
     renderSession();
     if (!silent) appendConversationStatus("ACA environment variables refreshed.");
+    return session.aca_env_error
+      ? { failed: true, message: `ACA environment settings unavailable: ${session.aca_env_error}` }
+      : session.aca_env_result
+        ? { failed: false, message: "ACA environment settings ready." }
+        : { failed: false, message: "ACA environment settings not available." };
   } catch (err) {
     appLog(`ACA env lookup failed: ${err.message}`);
     if (!silent) appendConversationStatus(`ACA env lookup failed: ${err.message}`, { failed: true });
+    return { failed: true, message: `ACA environment settings unavailable: ${err.message}` };
   }
 }
 
@@ -6808,7 +6859,8 @@ async function resumeSession(sessionId) {
     renderSessionSelector();
     return;
   }
-  setInputBusy(true);
+  setInputBusy(true, "Loading...");
+  const activity = beginConversationActivity("Loading saved session");
   try {
     session = await getSession(sessionId);
     localEditorDirty = false;
@@ -6819,10 +6871,13 @@ async function resumeSession(sessionId) {
     userPickedContextTab = false;
     renderLoadedSessionContent(`Resumed saved session ${sessionId}.`);
     renderSession();
-    await refreshCurrentAcaEnv();
+    el("chatStream").appendChild(activity.node);
+    activity.update("Reading ACA environment settings");
+    const environment = await refreshCurrentAcaEnv();
+    activity.finish(`Session resumed. Skill content unchanged. ${environment.message}`, environment.failed);
     appLog(`Session resumed: ${sessionId}`);
   } catch (err) {
-    appendConversationStatus(`Could not resume session: ${err.message}`, { failed: true });
+    activity.finish(`Could not resume session: ${err.message}`, true);
     appLog(`Resume session failed: ${err.message}`);
   } finally {
     setInputBusy(false);
