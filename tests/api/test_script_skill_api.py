@@ -146,6 +146,63 @@ def test_modify_session_of_an_inline_skill_stays_inline(client, backend_main, gr
     assert form == {"form": "inline", "locked": True, "failures": [], "replacement_problems": []}
 
 
+def test_convert_form_moves_a_stored_script_into_skill_md_and_the_save_removes_it(
+    client, backend_main, grant_skill, fake_sql, monkeypatch
+) -> None:
+    _lint_recorder(backend_main, monkeypatch)
+    _seed(backend_main, grant_skill, "room-finder")
+    session_id = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()["id"]
+
+    converted = client.post(f"/api/sessions/{session_id}/convert-form", json={"target": "inline"})
+    saved = client.post(f"/api/sessions/{session_id}/save", json={})
+
+    body = converted.json()
+    assert (converted.status_code, body["skill_form"], body["current_skill"]["script"]) == (200, "inline", None)
+    assert SCRIPT.strip() in body["current_skill"]["skill_md"]
+    assert saved.status_code == 200
+    assert not backend_main.store.has_script("room-finder")
+    assert SCRIPT.strip() in backend_main.store.load_skill("room-finder").skill_md
+
+
+def test_convert_form_moves_the_sample_block_into_the_script(client, backend_main, grant_skill) -> None:
+    md = _skill_md("room-finder") + f"\n## API Reference / Sample Code\n\n```python\n{SCRIPT}```\n"
+    backend_main.store.save_skill(SkillFiles(name="room-finder", skill_md=md))
+    grant_skill("room-finder")
+    session_id = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()["id"]
+    backend_main.sessions[session_id].aca_env_result = FLAGS_ON
+
+    response = client.post(f"/api/sessions/{session_id}/convert-form", json={"target": "script"})
+
+    body = response.json()
+    assert (response.status_code, body["skill_form"], body["current_skill"]["script"]) == (200, "script", SCRIPT)
+    assert "```" not in body["current_skill"]["skill_md"]
+    assert backend_main.store.load_skill("room-finder").script is None
+
+
+def test_convert_to_script_is_refused_while_the_flags_are_off(client, backend_main, grant_skill, monkeypatch) -> None:
+    _aca_lookup(backend_main, monkeypatch, {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "false"}})
+    _seed(backend_main, grant_skill, "room-finder", script=None)
+    session_id = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()["id"]
+
+    response = client.post(f"/api/sessions/{session_id}/convert-form", json={"target": "script"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["kind"] == "script_flags_off"
+    assert backend_main.sessions[session_id].skill_form == "inline"
+
+
+def test_convert_form_refusal_is_a_recoverable_409(client, backend_main, grant_skill) -> None:
+    _seed(backend_main, grant_skill, "room-finder", script=None)
+    session_id = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()["id"]
+    backend_main.sessions[session_id].aca_env_result = FLAGS_ON
+
+    response = client.post(f"/api/sessions/{session_id}/convert-form", json={"target": "script"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["kind"] == "form_conversion_refused"
+    assert "0 Python" in response.json()["detail"]["message"]
+
+
 def test_skill_form_endpoint_says_why_a_code_material_did_not_replace_the_script(client, backend_main) -> None:
     session = backend_main.Session(
         mode="modify",

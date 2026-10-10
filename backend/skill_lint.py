@@ -282,6 +282,12 @@ def _python_code(skill_md: str) -> str:
     return "\n".join(_PY_FENCE_RE.findall(skill_md or ""))
 
 
+def body_python_fences(skill_md: str) -> list[tuple[str, str]]:
+    """``(whole fence, code)`` per Python block outside ``## Gatekeeper Addendum``, LF-normalised."""
+    text = _without_gatekeeper_addendum((skill_md or "").replace("\r\n", "\n"))
+    return [(match.group(0), match.group(1)) for match in _PY_FENCE_RE.finditer(text)]
+
+
 def _declared_names(section_body: str) -> list[str]:
     """Variable names declared in a section: backticked, ALL-CAPS-ish tokens."""
     return _unique(

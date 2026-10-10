@@ -224,6 +224,16 @@ export async function updateVariables(sessionId, payload) {
   return res.json();
 }
 
+export async function convertSessionForm(sessionId, target) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/convert-form`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target }),
+  });
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
 export async function updateNeighbors(sessionId, payload) {
   const res = await apiFetch(`/api/sessions/${sessionId}/neighbors`, {
     method: "POST",

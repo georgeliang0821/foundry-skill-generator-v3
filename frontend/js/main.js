@@ -5,6 +5,7 @@ import {
   removeSkillGrant,
   setSkillVisibility,
   createSession,
+  convertSessionForm,
   fetchAuthStatus,
   fetchInspect,
   fetchSessionTopology,
@@ -2335,7 +2336,7 @@ function renderSkillFormRow() {
   const covers = Boolean(session.prepare_brief?.script_covers_operations);
   const preferInline = Boolean(session.prepare_brief?.prefer_inline);
   const hint = locked
-    ? `Fixed when the draft started${form === "script" ? `: SKILL.md plus ${scriptRelpath()}, the code material verbatim` : ""}. Switching between inline and script is not supported.`
+    ? `Fixed when the draft started${form === "script" ? `: SKILL.md plus ${scriptRelpath()}, the code material verbatim` : ""}. ${session.mode === "modify" ? "Use Convert form to switch." : "Switching between inline and script is not supported."}`
     : "Script form ships the single code material verbatim as scripts/<name>.py instead of inline sample code. It is decided when the draft starts.";
   const choiceRadio = (value, label, checked) =>
     `<label><input type="radio" name="skill-form-choice" value="${value}" data-form-choice${checked ? " checked" : ""}${locked ? " disabled" : ""} /> ${escapeHtml(label)}</label>`;
@@ -2352,6 +2353,33 @@ function renderSkillFormRow() {
       ${coversBox}
       ${unmet.length ? `<div class="skill-form-note skill-form-info">${formChecksListHtml(unmet)}</div>` : ""}
     </div>`;
+}
+
+function renderFormConversionRow() {
+  if (!session || session.mode !== "modify" || session.skill_kind === "scenario") return "";
+  const toScript = session.skill_form !== "script";
+  const edited = (session.patch_history || []).length > 0;
+  const hint = toScript
+    ? "Moves the one Python code block of SKILL.md into scripts/<name>.py. SKILL.md is not rewritten; the agent fixes what the script form still needs."
+    : "Moves the bundled script into a Python code block of SKILL.md. SKILL.md is not rewritten; the agent fixes what the inline form still needs.";
+  return `<div class="var-group skill-form-convert" data-testid="form-convert-row">
+      <div class="var-group-head"><strong>Convert form</strong></div>
+      <p class="spl-hint">${escapeHtml(hint)}${edited ? " Disabled: this session already has edits." : ""}</p>
+      <button type="button" class="spl-add-btn" data-convert-form="${toScript ? "script" : "inline"}" data-testid="form-convert-button"${edited ? " disabled" : ""}>Convert to ${toScript ? "script" : "inline"}</button>
+    </div>`;
+}
+
+async function convertSkillForm(target) {
+  if (!session || !window.confirm(`Convert this skill to ${target} form? SKILL.md is not rewritten; the agent will help fix what the ${target} form needs. Nothing is saved until you save the skill.`)) return;
+  try {
+    session = await convertSessionForm(session.id, target);
+    persistSessionState();
+    renderSession();
+    appendConversationStatus(`Skill converted to ${target} form. Ask the agent to bring SKILL.md in line.`);
+  } catch (err) {
+    appLog("convert form failed: " + err);
+    appendConversationStatus(`Form conversion refused: ${err.message}`);
+  }
 }
 
 function renderVariablesPanel(activeSub = null) {
@@ -2371,6 +2399,7 @@ function renderVariablesPanel(activeSub = null) {
   }).join("");
   return `<div class="variables-editor" data-variables-editor>
     ${renderSkillFormRow()}
+    ${renderFormConversionRow()}
     ${sections}
     <div class="spl-actions">
       <button type="button" class="icon-button primary" data-var-save>Save variables</button>
@@ -6359,6 +6388,11 @@ document.addEventListener("click", async (event) => {
   const nbeditSave = event.target.closest("[data-nbedit-save]");
   if (nbeditSave) {
     await saveNeighborEdit(nbeditSave.getAttribute("data-nbedit-save"));
+    return;
+  }
+  const convertForm = event.target.closest("[data-convert-form]");
+  if (convertForm) {
+    if (!convertForm.disabled) await convertSkillForm(convertForm.getAttribute("data-convert-form"));
     return;
   }
   const addVar = event.target.closest("[data-var-add]");

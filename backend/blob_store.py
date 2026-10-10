@@ -252,8 +252,9 @@ class LocalSkillStore:
         saved.name = safe
         saved.version_hash = compute_hash(saved.skill_md)
         saved.blob_path = blob_path_of(safe)
-        if saved.script is None and current is not None:
+        if saved.script is None and current is not None and not saved.remove_script:
             saved.script = current.script
+        saved.remove_script = False
         if saved.assets is not None:
             self._assets[safe] = {path: text.encode("utf-8") for path, text in saved.assets.items()}
         self._skills[safe] = saved
@@ -473,7 +474,7 @@ class AzureBlobSkillStore:
 
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
         from azure.core import MatchConditions
-        from azure.core.exceptions import ResourceModifiedError
+        from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
         from azure.storage.blob import ContentSettings
 
         safe = safe_skill_name(files.name)
@@ -505,6 +506,11 @@ class AzureBlobSkillStore:
                     overwrite=True,
                     content_settings=ContentSettings(content_type="text/x-python; charset=utf-8"),
                 )
+            elif files.remove_script:
+                try:
+                    container.delete_blob(self._script_path(safe))
+                except ResourceNotFoundError:
+                    pass
         except ResourceModifiedError as exc:
             log_event("skill_store.azure.save.version_mismatch", level="warning", skill_name=safe)
             raise VersionConflict("SKILL.md changed on Blob since it was loaded; reload latest skill before saving.") from exc

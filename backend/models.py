@@ -671,6 +671,8 @@ class Session(BaseModel):
     current_skill: SkillDraft = Field(default_factory=SkillDraft)
     # None until locked: at PREPARE -> DRAFT for NEW, from Blob for MODIFY. Never switches after.
     skill_form: Literal["inline", "script"] | None = None
+    # A MODIFY session converted a stored script skill to inline; the next save deletes the script.
+    script_removed: bool = False
     # Refused propose_material_patch calls since the code material last changed.
     material_patch_rejections: int = 0
     # Full text lives only in the persisted JSON; API responses carry path/size/sha256.
@@ -875,6 +877,10 @@ class VariablesUpdateRequest(BaseModel):
     prefer_inline: bool | None = None
 
 
+class ConvertFormRequest(BaseModel):
+    target: Literal["inline", "script"]
+
+
 class SkillIndexEntry(BaseModel):
     name: str
     description: str = ""
@@ -891,6 +897,8 @@ class SkillFiles(BaseModel):
     blob_path: str = ""
     # None on save leaves any stored script untouched.
     script: str | None = None
+    # With script None, delete the stored script instead of leaving it.
+    remove_script: bool = False
     # Relative path -> text. None on save leaves stored assets untouched; a dict is the full set.
     assets: dict[str, str] | None = None
 

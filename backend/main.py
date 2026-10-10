@@ -78,6 +78,7 @@ from .models import (
     ChatMessage,
     ChatRequest,
     ChildrenUpdateRequest,
+    ConvertFormRequest,
     CreateSessionRequest,
     Material,
     MaterialKind,
@@ -107,6 +108,7 @@ from .models import (
     delegation_children,
 )
 from .patch import PatchError, apply_v4a_to_content, v4a_from_contents, version_hash
+from .form_conversion import FormConversionError, convert_session_form
 from .session_store import LocalSessionStore, make_session_store
 from .topology import (
     Severity,
@@ -1158,7 +1160,7 @@ def save_skill_dual_write(
     if existing is not None:
         acl_mod.assert_can_access(user_upn, skill_name)
     script = session.current_skill.script
-    if script is None and existing is not None and store.has_script(skill_name):
+    if script is None and existing is not None and store.has_script(skill_name) and not session.script_removed:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1184,6 +1186,7 @@ def save_skill_dual_write(
         skill_md=session.current_skill.skill_md,
         version_hash=session.current_skill.version_hash,
         script=script,
+        remove_script=script is None and session.script_removed,
         assets=assets,
     )
     log_event(
@@ -2615,6 +2618,26 @@ def inspect_session_skill_form(session_id: str, upn: str = Depends(require_upn))
         **evaluate_skill_form(session).to_dict(),
         "replacement_problems": [problem.to_dict() for problem in script_replacement_problems(session)],
     }
+
+
+@app.post("/api/sessions/{session_id}/convert-form")
+def convert_session_form_endpoint(
+    session_id: str, req: ConvertFormRequest, upn: str = Depends(require_upn)
+) -> Session:
+    """Move a modify session's code between SKILL.md and a bundled script; nothing is saved."""
+    session = get_session_for_user(session_id, upn)
+    if req.target == "script":
+        _assert_script_flags_on(session)
+    try:
+        convert_session_form(session, req.target)
+    except FormConversionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"kind": "form_conversion_refused", "recoverable": True, "message": str(exc)},
+        ) from exc
+    persist_session(session)
+    log_event("session.form.converted", session_id=session.id, target=req.target)
+    return session
 
 
 @app.get("/api/sessions/{session_id}/material-views")
