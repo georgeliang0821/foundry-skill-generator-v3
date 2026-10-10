@@ -825,6 +825,7 @@ function renderSession() {
   el("kindHelp").textContent = kindHelp[el("skillKindSelect").value] || "";
   renderAuthStatus();
   renderSkillBindingStatus();
+  renderFormConvertCard();
   renderSkillSelector();
   renderSessionSelector();
   renderStages();
@@ -893,7 +894,11 @@ function renderSkillBindingStatus() {
   const scriptBadge = session?.skill_form === "script"
     ? `<span class="binding-script" data-testid="binding-script-badge" title="Script-based skill: SKILL.md plus ${escapeHtml(scriptRelpath())}">script</span>`
     : "";
-  node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}${scriptBadge}`;
+  const convertTarget = formConversionTarget();
+  const convertBadge = convertTarget
+    ? `<button type="button" class="binding-convert" data-convert-form="${convertTarget}" data-testid="binding-convert-button" title="Move the code of this ${session.skill_form} skill into ${convertTarget} form">Convert to ${convertTarget}</button>`
+    : "";
+  node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}${scriptBadge}${convertBadge}`;
   node.title = binding.hasRemote
     ? `Remote: ${binding.remoteName || "none"}\nRemote version: ${binding.remoteVersion || "unknown"}\nLocal version: ${binding.localVersion || "none"}`
     : "This session is not bound to a Blob skill yet.";
@@ -2353,6 +2358,31 @@ function renderSkillFormRow() {
       ${coversBox}
       ${unmet.length ? `<div class="skill-form-note skill-form-info">${formChecksListHtml(unmet)}</div>` : ""}
     </div>`;
+}
+
+// The target form when a conversion is possible now; null otherwise. Mirrors the backend refusals that the UI can know.
+function formConversionTarget() {
+  if (!session || session.mode !== "modify" || session.skill_kind === "scenario" || !session.skill_form) return null;
+  if (!String(session.current_skill?.skill_md || "").trim() || (session.patch_history || []).length) return null;
+  return session.skill_form === "script" ? "inline" : "script";
+}
+
+// Shown above the chat until the user has said something, since many modify sessions exist only to convert.
+function renderFormConvertCard() {
+  const node = el("formConvertCard");
+  if (!node) return;
+  const target = formConversionTarget();
+  const untouched = !(session?.conversation || []).some((m) => m.role === "user");
+  node.classList.toggle("hidden", !(target && untouched));
+  if (!target || !untouched) {
+    node.innerHTML = "";
+    return;
+  }
+  const what = target === "script"
+    ? "Moves the one Python code block of SKILL.md into a bundled script."
+    : "Moves the bundled script into a Python code block of SKILL.md.";
+  node.innerHTML = `<div><strong>This skill is ${escapeHtml(session.skill_form)}</strong><p>${escapeHtml(what)} SKILL.md is not rewritten; the agent fixes what the ${escapeHtml(target)} form still needs.</p></div>
+    <button type="button" data-convert-form="${target}" data-testid="form-convert-card-button">Convert to ${target}</button>`;
 }
 
 function renderFormConversionRow() {
