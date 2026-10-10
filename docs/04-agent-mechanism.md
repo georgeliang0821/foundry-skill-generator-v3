@@ -512,7 +512,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | `code_material` | 恰好一份 `code` 素材 |
 | `parses` | 該素材可被 `ast` 解析 |
 | `entry_point` | 模組頂層除了 import、函式／類別定義、賦值與 docstring 之外，至少還有一個會執行的語句（例如 `main()` 或 `if __name__ == "__main__":`）；只有定義的函式庫直接執行時什麼都不做 |
-| `script_lint` | `script_only_errors()` 沒有 error（S4/S5/S6/S7/S10/S10b/S11/S12/S13；S12 擋 inline 範本：字面 `request_inputs` dict 打包成腳本後每次都用同一組值；S13 擋讀 `globals()`：bundled script 是獨立行程，沒有 host 注入的變數）。S4 訊息附上該行原始碼；`[NEEDS_INFO]` 之後的純文字另有專屬訊息（說明要放進其後的 JSON，EAA 會先去掉標記行再 `json.loads` 其餘 stdout） |
+| `script_lint` | `script_only_errors()` 沒有 error（S4/S5/S6/S7/S10/S10b/S11/S12/S13；S12 擋固定或來源不明的 `request_inputs` dict，含字面值與 `dict(...)`；每個值直接來自同一作用域的 argparse namespace 時允許，預設值在 parser 宣告；S13 擋讀 `globals()`：bundled script 是獨立行程，沒有 host 注入的變數）。S4 訊息附上該行原始碼；`[NEEDS_INFO]` 之後的純文字另有專屬訊息（說明要放進其後的 JSON，EAA 會先去掉標記行再 `json.loads` 其餘 stdout） |
 | `inputs` | `variables` 中每個 `kind=runtime`、`source=request` 的變數都有對應的 `add_argument`（`dest`，或 `--target-tables` → `TARGET_TABLES`）。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
 | `covers_operations` | 使用者在 `variables_ok` 確認「code 素材涵蓋本 skill 的所有操作」（`script_covers_operations`），**且** `variables_ok` 已確認 |
 
@@ -543,7 +543,9 @@ MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，�
   - 比例只看原始的非邊界行保留多少，新增的行（例如收集失敗清單）不會拉高比例。
 - 殘留判定：`script_readiness_problems()` 對 patch 後的程式碼仍有任何問題（`script_lint` 或 `inputs`）→ 拒絕，逐條列出 finding（含 patch 後行號與原始碼），要求 Agent 在**一個** patch 內全部修正。
 - 重試上限：提出時被 gate 拒絕（套不上、無改動、無法解析、改寫、殘留問題）會累加 `session.material_patch_rejections`，階段或資格不符不計。每次拒絕訊息都附 `Refusal N of 3`；可重送的拒絕另外說明「素材完全沒有被修改，下一個 patch 要以原素材為基準並包含先前所有修正，且不必再問使用者」。`propose_material_patch` 的恢復指引不附加「詢問使用者」的通用尾句。第 3 次拒絕即宣告達到 `MAX_MATERIAL_PATCH_REJECTIONS`，之後的提案直接被拒，並要求 Agent 停止提案、告訴使用者維持 inline 並列出每條 finding。code 素材內容一變（含接受 patch）計數歸零。
-- 重試不是後端迴圈：每次拒絕以 system 訊息交回 Agent，由 Agent 在下一輪依訊息重送；後端只負責判定、計數與停止。
+- 重試不是後端迴圈：每次拒絕以 system 訊息交回 Agent；`tool_effect_rejected` 與訊息 metadata 的 `recovery_action` 指定下一步。`retry_corrected_patch` 讓前端在自動續行上限內要求 Agent 依拒絕指引提出完整修正版；改寫、拒絕上限、其他資格錯誤使用 `ask_user`，保留通用詢問流程。缺少分類的事件也採保守詢問流程。已有互動卡時不自動續行，修正版仍須使用者接受；後端只負責判定、計數與停止。
+
+S11 是保守的靜態檢查，不是執行證明。它會排除可辨識的非零退出區塊、直接 stderr 輸出，以及只供 stderr 使用或未被讀取的簡單局部字典；局部字典不得重新綁定、跨作用域引用或經未知 helper 傳遞。別名、複雜 helper 與來源不明的資料仍可能被報告，不能把每個 finding 都當成已實際輸出的錯誤，也不能只改欄位名稱掩蓋真正失敗。
 
 **機械式 stdout 修正**（`propose_material_patch(stdout_fix=true)`，不帶 `patch`）：使用者最常問「為什麼不能 `print`」。原因是 EAA 把 exit 0 的 stdout 當成結果交給呼叫端 agent，整段能解析成一份 JSON 時只檢查少數硬性錯誤 pattern，否則連 `failed`、`Error:` 等字眼都掃，成功的執行可能被判成 `content_error`；exit 0 時 stderr 不會交給 agent（S4）。`skill_lint.stdout_to_stderr()` 以 AST 找出 S4 中「只印進度文字」的 `print`，加上 `file=sys.stderr`，必要時補 `import sys`：
 

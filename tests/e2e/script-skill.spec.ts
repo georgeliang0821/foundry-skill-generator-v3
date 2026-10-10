@@ -217,3 +217,47 @@ test("an accepted material patch replaces the code material and marks it as not 
   expect(download.suggestedFilename()).toMatch(/\.py$/);
   await expect(page.getByTestId("material-view-copy")).toBeVisible();
 });
+
+for (const recoveryAction of ["retry_corrected_patch", "ask_user", undefined]) {
+  test(`material patch recovery follows ${recoveryAction || "legacy"} policy`, async ({ page, request }) => {
+    await setScenario(request, "material_patch");
+    await openApp(page);
+    await startNewSession(page);
+    await page.getByTestId("add-material-row-button").click();
+    await page.getByTestId("material-kind").selectOption("code");
+    const original = 'import requests\n\nROOM_ID = "room-1"\nresponse = requests.get(f"https://graph.example.invalid/rooms/{ROOM_ID}", timeout=10)\nprint(response.text)\n';
+    await page.getByTestId("material-input").fill(original);
+    await page.getByTestId("attach-material-button").click();
+    const uploaded = await readSession(request, await currentSessionId(page));
+    const messages: string[] = [];
+    await page.route("**/api/sessions/*/chat", async (route) => {
+      messages.push(route.request().postDataJSON().message);
+      if (messages.length === 1) {
+        await route.fulfill({
+          json: { events: [{ event: "tool_effect_rejected", data: {
+            tool: "propose_material_patch", guidance: "Material unchanged; follow the recovery policy.",
+            ...(recoveryAction ? { recovery_action: recoveryAction } : {}),
+          } }] },
+        });
+      } else if (recoveryAction === "retry_corrected_patch") {
+        await route.continue();
+      } else {
+        await route.fulfill({ json: { events: [{ event: "text_delta", data: { delta: "Waiting for user." } }] } });
+      }
+    });
+    await sendChat(page, "Adapt the script edges.");
+    await expect.poll(() => messages.length).toBe(2);
+    if (recoveryAction === "retry_corrected_patch") {
+      expect(messages[1]).toContain("corrected complete patch");
+      expect(messages[1]).not.toContain("Do not repeat the rejected action");
+      await expect(page.getByTestId("material-patch-card")).toBeVisible();
+    } else {
+      expect(messages[1]).toContain("ask_user_input");
+      expect(messages[1]).toContain("Do not repeat the rejected action");
+      await expect(page.getByText("Waiting for user.", { exact: true })).toBeVisible();
+    }
+    const session = await readSession(request, await currentSessionId(page));
+    expect(session.materials[0].content).toBe(uploaded.materials[0].content);
+    expect(session.materials[0].origin).toBe("user");
+  });
+}

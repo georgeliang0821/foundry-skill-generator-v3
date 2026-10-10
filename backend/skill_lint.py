@@ -2902,6 +2902,42 @@ def _exit_zero_texts(s: _ScriptModel) -> list[tuple[int, str]]:
             excluded.update(id(sub) for sub in ast.walk(node))
 
     texts: list[tuple[int, str]] = []
+    for binding in ast.walk(s.tree):
+        if not (
+            isinstance(binding, ast.Assign) and len(binding.targets) == 1
+            and isinstance(binding.targets[0], ast.Name) and isinstance(binding.value, ast.Dict)
+            and not any(isinstance(sub, ast.Call) for sub in ast.walk(binding.value))
+        ):
+            continue
+        name = binding.targets[0].id
+        scope = s.function_of(binding)
+        if scope is None:
+            continue
+        references = [sub for sub in ast.walk(s.tree) if isinstance(sub, ast.Name) and sub.id == name]
+        if any(s.function_of(sub) is not scope for sub in references):
+            continue
+        if sum(isinstance(sub.ctx, ast.Store) for sub in references) != 1:
+            continue
+        if any(
+            isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+            and sub.func.id in {"locals", "globals", "eval", "exec", "vars"}
+            for sub in _own_nodes(scope)
+        ):
+            continue
+        loads = [sub for sub in references if isinstance(sub.ctx, ast.Load)]
+        stderr_only = True
+        for load in loads:
+            ancestor = s.parents.get(load)
+            while ancestor is not None and ancestor is not scope and not _is_stderr_write(ancestor):
+                if isinstance(ancestor, ast.Call) and not _is_module_attr(ancestor.func, "json", "dumps"):
+                    stderr_only = False
+                    break
+                ancestor = s.parents.get(ancestor)
+            if not stderr_only or ancestor is None or ancestor is scope:
+                stderr_only = False
+                break
+        if stderr_only:
+            excluded.update(id(sub) for sub in ast.walk(binding.value))
     for node in ast.walk(s.tree):
         if id(node) in excluded:
             continue
@@ -2958,7 +2994,7 @@ def _check_exit_zero_content(s: _ScriptModel) -> list[LintIssue]:
 
 
 def _check_inline_template(s: _ScriptModel) -> list[LintIssue]:
-    """S12 -- a literal ``request_inputs`` dict is the inline template the host rewrites per query."""
+    """S12 -- request dictionaries must bind runtime arguments, not fixed sample values."""
     for node in ast.walk(s.tree):
         if isinstance(node, ast.Assign):
             targets = node.targets
@@ -2966,17 +3002,68 @@ def _check_inline_template(s: _ScriptModel) -> list[LintIssue]:
             targets = [node.target]
         else:
             continue
-        if isinstance(node.value, ast.Dict) and any(
+        value = node.value
+        entries = None
+        if isinstance(value, ast.Dict):
+            entries = value.values if all(key is not None for key in value.keys) else []
+        elif (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "dict"
+        ):
+            if not value.args:
+                entries = [keyword.value for keyword in value.keywords] if all(
+                    keyword.arg is not None for keyword in value.keywords
+                ) else []
+            elif len(value.args) == 1 and not value.keywords and isinstance(value.args[0], ast.Dict):
+                mapping = value.args[0]
+                entries = mapping.values if all(key is not None for key in mapping.keys) else []
+            else:
+                entries = []
+        if entries is not None and any(
             isinstance(t, ast.Name) and t.id == "request_inputs" for t in targets
         ):
+            namespace_names = {
+                target.id
+                for binding in ast.walk(s.tree)
+                if isinstance(binding, ast.Assign) and s.function_of(binding) is s.function_of(node)
+                and isinstance(binding.value, ast.Call)
+                and isinstance(binding.value.func, ast.Attribute)
+                and binding.value.func.attr in {"parse_args", "parse_intermixed_args"}
+                and binding.lineno < node.lineno
+                for target in binding.targets if isinstance(target, ast.Name)
+                if sum(
+                    isinstance(other, ast.Name) and isinstance(other.ctx, ast.Store)
+                    and other.id == target.id and s.function_of(other) is s.function_of(node)
+                    for other in ast.walk(s.tree)
+                ) == 1
+                and not any(
+                    isinstance(other, ast.Attribute) and isinstance(other.ctx, ast.Store)
+                    and isinstance(other.value, ast.Name) and other.value.id == target.id
+                    and s.function_of(other) is s.function_of(node)
+                    for other in ast.walk(s.tree)
+                )
+                and all(
+                    isinstance(s.parents.get(other), ast.Attribute)
+                    and s.parents[other].value is other
+                    for other in ast.walk(s.tree)
+                    if isinstance(other, ast.Name) and isinstance(other.ctx, ast.Load)
+                    and other.id == target.id and s.function_of(other) is s.function_of(node)
+                )
+            }
+            if entries and all(
+                isinstance(entry, ast.Attribute) and isinstance(entry.value, ast.Name)
+                and entry.value.id in namespace_names
+                for entry in entries
+            ):
+                continue
             return [LintIssue(
                 rule="S12",
                 severity="error",
                 message=(
-                    f"Line {node.lineno} assigns a literal `request_inputs` dict. That is inline "
-                    "sample code: a template the host rewrites with each request's values. A "
-                    "bundled script runs unchanged, so these values would apply to every run "
-                    "whatever the user asked; script form takes business inputs as `--flag` arguments."
+                    f"Line {node.lineno} assigns a `request_inputs` dict whose values cannot all "
+                    "be traced to argparse arguments. Fixed sample values apply to every run; "
+                    "script form takes business inputs as `--flag` arguments. Bind each value "
+                    "to the parsed namespace and declare defaults on the parser."
                 ),
                 detail=f"line {node.lineno}",
             )]

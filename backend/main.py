@@ -1702,6 +1702,7 @@ class MaterialPatchRefused(ValueError):
     def __init__(self, message: str, *, retryable: bool = True) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.recovery_action = "retry_corrected_patch" if retryable else "ask_user"
 
 
 def _material_patch_refusal(exc: MaterialPatchRefused, count: int, *, modify: bool = False) -> str:
@@ -2218,10 +2219,11 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             _checked_material_patch(session, str(args.get("material_id", "")), str(args.get("patch", "")))
         except MaterialPatchRefused as exc:
             session.material_patch_rejections += 1
-            raise ValueError(
+            raise MaterialPatchRefused(
                 _material_patch_refusal(
                     exc, session.material_patch_rejections, modify=script_edge_material(session) is not None
-                )
+                ),
+                retryable=exc.retryable and session.material_patch_rejections < MAX_MATERIAL_PATCH_REJECTIONS,
             ) from exc
         return
 
@@ -3287,7 +3289,10 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
                         ChatMessage(
                             role=MessageRole.SYSTEM,
                             content=guidance,
-                            metadata={"tool": data.get("tool"), "recoverable_error": str(rejected)},
+                            metadata={
+                                "tool": data.get("tool"), "recoverable_error": str(rejected),
+                                "recovery_action": getattr(rejected, "recovery_action", "ask_user"),
+                            },
                         )
                     )
                     session.touch()
@@ -3307,6 +3312,7 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
                         "tool": data.get("tool"),
                         "message": str(rejected),
                         "guidance": guidance,
+                        "recovery_action": getattr(rejected, "recovery_action", "ask_user"),
                     }})
                     persist_session(session)
                     continue

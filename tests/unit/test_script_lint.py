@@ -354,6 +354,99 @@ def test_s12_inline_request_template_cannot_ship_as_a_script() -> None:
 # --- test runner and material fidelity --------------------------------------
 
 
+@pytest.mark.parametrize("expression", [
+    '{"target": ns.target}', "dict(target=ns.target)", 'dict({"target": ns.target})',
+])
+def test_s12_accepts_argument_bound_request_dicts(expression) -> None:
+    script = f'''import argparse
+import json
+parser = argparse.ArgumentParser(add_help=False)
+parser.add_argument("--target", default="")
+try:
+    ns = parser.parse_args()
+except SystemExit:
+    print("[NEEDS_INFO] missing=target")
+    raise SystemExit(0)
+request_inputs = {expression}
+print(json.dumps(request_inputs))
+'''
+    assert not [issue for issue in script_only_errors(script) if issue.rule == "S12"]
+
+
+@pytest.mark.parametrize("expression", [
+    'dict(target="fixed")', '{"target": "fixed"}',
+    '{"target": ns.target, "mode": "fixed"}', 'dict(**fixed)', '{**fixed}',
+    'dict({"target": "fixed"})', 'dict([("target", "fixed")])', 'dict(fixed)',
+])
+def test_s12_rejects_fixed_or_unresolved_request_values(expression) -> None:
+    script = f'''import argparse
+parser = argparse.ArgumentParser(add_help=False)
+ns = parser.parse_args()
+request_inputs = {expression}
+'''
+    assert [issue for issue in script_only_errors(script) if issue.rule == "S12"]
+
+
+def test_s12_reassigned_namespace_is_not_argument_evidence() -> None:
+    script = '''import argparse
+parser = argparse.ArgumentParser(add_help=False)
+ns = parser.parse_args()
+ns = object()
+request_inputs = {"target": ns.target}
+'''
+    assert [issue for issue in script_only_errors(script) if issue.rule == "S12"]
+
+
+def test_s12_overwritten_argument_is_not_runtime_input() -> None:
+    script = '''import argparse
+parser = argparse.ArgumentParser(add_help=False)
+ns = parser.parse_args()
+ns.target = "fixed"
+request_inputs = {"target": ns.target}
+'''
+    assert [issue for issue in script_only_errors(script) if issue.rule == "S12"]
+
+
+@pytest.mark.parametrize("use", ["", "    print(json.dumps(diagnostic), file=sys.stderr)\n"])
+def test_s11_local_dict_not_sent_to_stdout(use) -> None:
+    script = f'''import json
+import sys
+def main():
+    diagnostic = {{"error": "internal"}}
+{use}    print(json.dumps({{"status": "ok"}}))
+    return 0
+sys.exit(main())
+'''
+    assert not [issue for issue in script_only_errors(script) if issue.rule == "S11"]
+
+
+@pytest.mark.parametrize("use", [
+    "    print(json.dumps(diagnostic))\n",
+    "    result = diagnostic\n    print(json.dumps(result))\n",
+    "    print(json.dumps(locals()))\n",
+    "    print(json.dumps(helper(diagnostic)), file=sys.stderr)\n",
+])
+def test_s11_local_dict_that_may_reach_stdout_still_fails(use) -> None:
+    script = f'''import json
+import sys
+def main():
+    diagnostic = {{"error": "internal"}}
+{use}    return 0
+sys.exit(main())
+'''
+    assert [issue for issue in script_only_errors(script) if issue.rule == "S11"]
+
+
+def test_s12_namespace_passed_to_unknown_helper_is_not_argument_evidence() -> None:
+    script = '''import argparse
+parser = argparse.ArgumentParser(add_help=False)
+ns = parser.parse_args()
+modify(ns)
+request_inputs = {"target": ns.target}
+'''
+    assert [issue for issue in script_only_errors(script) if issue.rule == "S12"]
+
+
 def test_prepared_code_lint_is_skipped_for_script_form() -> None:
     results = [RunResult(query="find a room", expected_skill="x", apim_response=PY)]
 

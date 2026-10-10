@@ -21,7 +21,11 @@
     result JSON and exit 3.
   - Values from the user's request arrive only as argparse `--flag` arguments;
     `globals()` never holds them and environment variables carry only
-    deployment settings and credentials.
+    deployment settings and credentials. If retaining a `request_inputs`
+    dictionary, bind each value directly to an attribute of the parsed
+    namespace in the same scope; declare defaults on the parser, not as
+    fixed sample values in that dictionary. Do not rename a fixed template
+    just to evade S12.
   - Adding argparse brings two rules of its own: create the parser with
     `ArgumentParser(add_help=False)`, and call `parse_args()` inside
     `try` / `except SystemExit` whose handler prints the `[NEEDS_INFO]` line

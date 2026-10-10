@@ -204,6 +204,7 @@ def test_a_rewrite_refusal_counts_but_does_not_invite_a_retry(backend_main) -> N
     with pytest.raises(ValueError, match="Refusal 1 of 3") as exc:
         _propose(backend_main, session, REWRITE_PATCH)
     assert "Nothing was applied" not in str(exc.value)
+    assert exc.value.recovery_action == "ask_user"
     assert session.material_patch_rejections == 1
 
 
@@ -238,11 +239,14 @@ def test_a_request_input_without_a_flag_is_refused(backend_main) -> None:
 def test_refusals_stop_after_the_limit_and_reset_when_the_code_changes(backend_main) -> None:
     session = _session()
     for count in range(1, backend_main.MAX_MATERIAL_PATCH_REJECTIONS):
-        with pytest.raises(ValueError, match=f"Refusal {count} of 3\\. Nothing was applied"):
+        with pytest.raises(ValueError, match=f"Refusal {count} of 3\\. Nothing was applied") as retry:
             _propose(backend_main, session, PARTIAL_PATCH)
+        assert retry.value.recovery_action == "retry_corrected_patch"
+        assert session.materials[0].content == CODE
     with pytest.raises(ValueError, match="Refusal 3 of 3: the limit is reached") as last:
         _propose(backend_main, session, PARTIAL_PATCH)
     assert "Nothing was applied" not in str(last.value)
+    assert last.value.recovery_action == "ask_user"
 
     with pytest.raises(ValueError, match="refused 3 times") as exc:
         _propose(backend_main, session)
@@ -256,6 +260,36 @@ def test_refusals_stop_after_the_limit_and_reset_when_the_code_changes(backend_m
 
 
 # --- tool result --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("patch", "count", "action"), [
+    (PARTIAL_PATCH, 0, "retry_corrected_patch"),
+    (REWRITE_PATCH, 0, "ask_user"),
+    (PARTIAL_PATCH, 2, "ask_user"),
+    (EDGE_PATCH, 3, "ask_user"),
+])
+def test_chat_rejection_event_preserves_recovery_policy(client, backend_main, monkeypatch, patch, count, action) -> None:
+    session = _session(owner_upn="test@example.com", material_patch_rejections=count)
+    backend_main.sessions[session.id] = session
+
+    class RejectingAgent:
+        def stream(self, current, message):
+            call = PendingToolCall(
+                tool="propose_material_patch", args={"material_id": "code-1", "patch": patch},
+            )
+            current.pending_tool_calls.append(call)
+            yield {"event": "tool_call", "data": call.model_dump()}
+
+    monkeypatch.setattr(backend_main, "agent", RejectingAgent())
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "Adapt edges"})
+    assert response.status_code == 200
+    rejection = next(event["data"] for event in response.json()["events"] if event["event"] == "tool_effect_rejected")
+    assert rejection["recovery_action"] == action
+    assert rejection["tool"] == "propose_material_patch"
+    note = next(message for message in session.conversation if message.metadata.get("recoverable_error"))
+    assert note.metadata["recovery_action"] == action
+    assert session.materials[0].content == CODE
+    assert session.pending_tool_calls == []
 
 
 def test_accepting_replaces_the_material_and_resets_the_coverage(client, backend_main) -> None:

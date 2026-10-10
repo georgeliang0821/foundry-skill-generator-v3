@@ -5834,7 +5834,7 @@ async function sendChatPayload(message, materials, options = {}) {
           responseStarted = true;
         }
         flushAssistantMessage();
-        recoverableRejection = true;
+        recoverableRejection = data.recovery_action || "ask_user";
         appendMessage(
           "assistant",
           `**That step was not allowed.** ${data.guidance || data.message || ""}`,
@@ -5872,7 +5872,9 @@ async function sendChatPayload(message, materials, options = {}) {
   if (shouldRecover) {
     appendConversationStatus("-> recovering");
     await sendChatPayload(
-      "The previous action was rejected (see the latest guidance message). Either request a valid stage transition that matches the user's intent, or call ask_user_input to ask the user how to proceed. Do not repeat the rejected action.",
+      recoverableRejection === "retry_corrected_patch"
+        ? "Continue according to the latest material patch rejection guidance. Propose a corrected complete patch against the unchanged material, including every previous fix. Do not resend the unchanged rejected patch or ask again for permission already granted."
+        : "The previous action was rejected (see the latest guidance message). Either request a valid stage transition that matches the user's intent, or call ask_user_input to ask the user how to proceed. Do not repeat the rejected action.",
       [],
       { autoDepth: (options.autoDepth || 0) + 1, autoContinue: true },
     );
