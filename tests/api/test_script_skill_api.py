@@ -158,6 +158,7 @@ def test_convert_form_moves_a_stored_script_into_skill_md_and_the_save_removes_i
 
     body = converted.json()
     assert (converted.status_code, body["skill_form"], body["current_skill"]["script"]) == (200, "inline", None)
+    assert body["materials"] == []
     assert SCRIPT.strip() in body["current_skill"]["skill_md"]
     assert saved.status_code == 200
     assert not backend_main.store.has_script("room-finder")
@@ -176,6 +177,7 @@ def test_convert_form_moves_the_sample_block_into_the_script(client, backend_mai
     body = response.json()
     assert (response.status_code, body["skill_form"], body["current_skill"]["script"]) == (200, "script", SCRIPT)
     assert "```" not in body["current_skill"]["skill_md"]
+    assert [(m["kind"], m["content"]) for m in body["materials"]] == [("code", SCRIPT)]
     assert backend_main.store.load_skill("room-finder").script is None
 
 

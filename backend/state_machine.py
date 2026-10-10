@@ -77,7 +77,12 @@ KIND_FORMAT_SPEC: dict[SkillKind, str] = {
 # "script_candidate" = a NEW capability skill whose form is not locked yet, with a code material and the flags on.
 FORM_STAGE_ADDENDA: dict[str, dict[Stage, tuple[str, ...]]] = {
     "script_candidate": {
-        Stage.PREPARE: ("01_prepare_script_addendum.md",),
+        Stage.PREPARE: ("01_prepare_script_addendum.md", "15_script_edge_rules.md"),
+    },
+    # Added on top of "script" while a MODIFY session holds a code material identical to the script.
+    "script_modify": {
+        Stage.PREPARE: ("16_script_modify_edges.md", "15_script_edge_rules.md"),
+        Stage.REFINE: ("16_script_modify_edges.md", "15_script_edge_rules.md"),
     },
     "script": {
         Stage.DRAFT: ("02_draft_script_addendum.md", "13_script_save.md"),
@@ -495,6 +500,15 @@ def lock_skill_form(session: Session) -> None:
 
 def code_material_contents(session: Session) -> list[str]:
     return [m.content for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+
+
+def script_edge_material(session: Session) -> Material | None:
+    """The code material identical to a MODIFY session's bundled script: the one the agent may adapt."""
+    script = session.current_skill.script
+    if Mode(session.mode) is not Mode.MODIFY or session.skill_form != "script" or script is None:
+        return None
+    codes = [m for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
+    return codes[0] if len(codes) == 1 and codes[0].content == script else None
 
 
 def script_material_id(session: Session) -> str | None:
@@ -1548,8 +1562,12 @@ def build_system_prompt(session: Session) -> str:
     if addendum:
         parts.append(load_prompt(addendum))
     form_key = _form_prompt_key(session)
-    for filename in FORM_STAGE_ADDENDA.get(form_key or "", {}).get(stage, ()):
-        parts.append(load_prompt(filename))
+    form_keys = [form_key or ""]
+    if script_edge_material(session) is not None:
+        form_keys.append("script_modify")
+    for key in form_keys:
+        for filename in FORM_STAGE_ADDENDA.get(key, {}).get(stage, ()):
+            parts.append(load_prompt(filename))
     if session.assets and stage in ASSET_STAGE_ADDENDA:
         parts.append(load_prompt(ASSET_STAGE_ADDENDA[stage]))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"

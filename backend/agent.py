@@ -108,7 +108,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "propose_material_patch",
         "description": (
             "Propose a V4A patch to the single code material so it can ship verbatim as the "
-            "bundled script. PREPARE only, and only while `## Skill Form` is not locked. Adapt the "
+            "bundled script. PREPARE only, and only while `## Skill Form` is not locked, or in a "
+            "modify session on the code material that holds the bundled script (PREPARE/REFINE). Adapt the "
             "edges only: argparse inputs, stdout JSON / [NEEDS_INFO], stderr, exit codes. Never "
             "change an external call, auth or business logic; a patch that does is rejected as a "
             "rewrite. The user reviews the diff before it is applied. With stdout_fix=true omit "

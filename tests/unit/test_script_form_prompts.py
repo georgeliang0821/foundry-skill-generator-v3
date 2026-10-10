@@ -124,15 +124,29 @@ def _script_session(stage: Stage, **overrides) -> Session:
 @pytest.mark.parametrize(
     ("session", "expected"),
     [
-        (_session(Stage.PREPARE, materials=[TEXT, CODE]), ["01_prepare_script_addendum.md"]),
+        (_session(Stage.PREPARE, materials=[TEXT, CODE]), ["01_prepare_script_addendum.md", "15_script_edge_rules.md"]),
         (_script_session(Stage.PREPARE), []),
         (_script_session(Stage.DRAFT), ["02_draft_script_addendum.md", "13_script_save.md"]),
         (_script_session(Stage.REFINE), ["02_draft_script_addendum.md", "13_script_save.md"]),
         (_script_session(Stage.TEST), ["04_test_script_addendum.md", "13_script_save.md"]),
         (_script_session(Stage.DONE), ["13_script_save.md"]),
-        (_script_session(Stage.REFINE, mode="modify"), ["02_draft_script_addendum.md", "13_script_save.md"]),
+        (
+            _script_session(Stage.REFINE, mode="modify"),
+            ["02_draft_script_addendum.md", "13_script_save.md", "15_script_edge_rules.md", "16_script_modify_edges.md"],
+        ),
+        (
+            _script_session(Stage.PREPARE, mode="modify"),
+            ["15_script_edge_rules.md", "16_script_modify_edges.md"],
+        ),
+        (
+            _script_session(Stage.REFINE, mode="modify", materials=[TEXT]),
+            ["02_draft_script_addendum.md", "13_script_save.md"],
+        ),
     ],
-    ids=["prepare-candidate", "prepare-locked", "draft", "refine", "test", "done", "modify-refine"],
+    ids=[
+        "prepare-candidate", "prepare-locked", "draft", "refine", "test", "done",
+        "modify-refine", "modify-prepare", "modify-refine-no-material",
+    ],
 )
 def test_script_instructions_follow_the_form_and_stage(session, expected) -> None:
     assert _script_instructions(build_system_prompt(session)) == expected
@@ -173,11 +187,19 @@ def test_the_script_section_set_is_the_golden_fixture() -> None:
             "ask about the coverage again", "locked", "needs a new session",
             "copied from the `form:` line of `## Skill Form`", "never infer it from the conversation",
             "list every unmet condition",
+            "A refused patch changes nothing", "carry every fix from the refused patch",
+            "without asking again", "`Refusal N of 3`", "never infer the limit yourself",
+        ]),
+        ("15_script_edge_rules.md", [
+            "Mechanical stdout fix first", "`propose_material_patch(stdout_fix=true)`",
             "One patch fixes every finding", "never onto its own stdout line",
             "Collect it into the result JSON and exit 3", "`globals()` never holds them",
             "`ArgumentParser(add_help=False)`", "`try` / `except SystemExit`",
-            "A refused patch changes nothing", "carry every fix from the refused patch",
-            "without asking again", "`Refusal N of 3`", "never infer the limit yourself",
+        ]),
+        ("16_script_modify_edges.md", [
+            "`propose_material_patch`", "Never change an external call", "ask them to add the corrected full script",
+            "A refused patch changes nothing", "`Refusal N of 3`", "`origin=agent_patch, not run by the user`",
+            "Copy and Download", "(S3)",
         ]),
         ("02_draft_script_addendum.md", [
             "No Python code fence", "no `scripts/` path", "`eaa_runs`", "You never modify the script",

@@ -4,7 +4,7 @@ import pytest
 
 from backend.blob_store import LocalSkillStore
 from backend.form_conversion import FormConversionError, convert_session_form, inline_to_script, script_to_inline
-from backend.models import Mode, PatchRecord, Session, SkillAsset, SkillFiles, SkillKind
+from backend.models import Material, MaterialKind, Mode, PatchRecord, Session, SkillAsset, SkillFiles, SkillKind
 
 CODE = 'import json\nprint(json.dumps({"status": "ok"}))\n'
 INLINE_MD = f"---\nname: demo\n---\n\n## Overview\n\nBody.\n\n## API Reference / Sample Code\n\n```python\n{CODE}```\n\n## Prerequisites\n\nNone.\n"
@@ -68,7 +68,25 @@ def test_convert_inline_session_to_script() -> None:
 
     assert (session.skill_form, session.current_skill.script) == ("script", CODE)
     assert "```" not in session.current_skill.skill_md
+    assert [(m.kind, m.content) for m in session.materials] == [("code", CODE)]
     assert session.conversation[-1].role == "system" and "inline to script" in session.conversation[-1].content
+
+
+def test_converting_to_script_keeps_an_existing_code_material_and_adds_none() -> None:
+    session = _session(materials=[Material(kind=MaterialKind.CODE, content="print(1)\n")])
+
+    convert_session_form(session, "script")
+
+    assert [m.content for m in session.materials] == ["print(1)\n"]
+
+
+def test_converting_back_and_forth_leaves_no_stray_material() -> None:
+    session = _session()
+
+    convert_session_form(session, "script")
+    convert_session_form(session, "inline")
+
+    assert session.materials == [] and session.current_skill.script is None
 
 
 def test_convert_script_session_to_inline_marks_the_script_for_removal() -> None:

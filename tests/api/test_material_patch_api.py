@@ -431,3 +431,48 @@ def test_accepting_a_stale_stdout_fix_is_refused(client, backend_main) -> None:
 
     assert response.status_code == 409
     assert "changed after this stdout fix was proposed" in response.json()["detail"]["error"]
+
+
+# --- modify: the script converted from inline ---------------------------------
+
+
+def _modify_script_session(stage: Stage = Stage.REFINE, script: str = CODE) -> Session:
+    session = _session(mode="modify", skill_form="script", current_stage=stage)
+    session.current_skill.script = script
+    return session
+
+
+def test_a_modify_script_session_may_patch_the_material_that_holds_the_script(backend_main) -> None:
+    _propose(backend_main, _modify_script_session())
+    _propose(backend_main, _modify_script_session(Stage.PREPARE))
+
+
+def test_a_modify_script_session_refuses_a_stage_outside_prepare_and_refine(backend_main) -> None:
+    with pytest.raises(ValueError, match="only allowed in PREPARE/REFINE"):
+        _propose(backend_main, _modify_script_session(Stage.TEST))
+
+
+def test_a_modify_script_session_refuses_a_material_that_is_not_the_script(backend_main) -> None:
+    with pytest.raises(ValueError, match="only available"):
+        _propose(backend_main, _modify_script_session(Stage.PREPARE, script="print(1)\n"))
+
+
+def test_a_modify_rewrite_refusal_asks_for_a_new_code_material(backend_main) -> None:
+    with pytest.raises(ValueError) as exc:
+        _propose(backend_main, _modify_script_session(), REWRITE_PATCH)
+
+    assert "add the corrected full script as a new code material" in str(exc.value)
+    assert "keep the inline form" not in str(exc.value)
+
+
+def test_accepting_a_modify_patch_replaces_the_bundled_script(client, backend_main) -> None:
+    session = _modify_script_session()
+    _stage(backend_main, session)
+
+    response = _answer(client, session, "accept")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["materials"][0]["origin"] == "agent_patch"
+    assert body["current_skill"]["script"] == body["materials"][0]["content"] != CODE
+    assert "--room-id" in body["current_skill"]["script"]

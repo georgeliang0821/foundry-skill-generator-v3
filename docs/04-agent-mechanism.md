@@ -412,8 +412,9 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 | key | 條件 | PREPARE | DRAFT | REFINE | TEST | DONE |
 | --- | --- | --- | --- | --- | --- | --- |
-| `script_candidate` | 形式未鎖定、capability、NEW、至少一份 `code` 素材、EAA script 旗標開啟 | `01_prepare_script_addendum.md` | | | | |
+| `script_candidate` | 形式未鎖定、capability、NEW、至少一份 `code` 素材、EAA script 旗標開啟 | `01_prepare_script_addendum.md` + `15_script_edge_rules.md` | | | | |
 | `script` | `session.skill_form == "script"` | （無） | `02_draft_script_addendum.md` + `13_script_save.md` | 同 DRAFT | `04_test_script_addendum.md` + `13_script_save.md` | `13_script_save.md` |
+| `script_modify` | 疊加在 `script` 上：MODIFY，且恰有一份 `code` 素材內容等於 `current_skill.script`（`script_edge_material()`） | `16_script_modify_edges.md` + `15_script_edge_rules.md` | | 同 PREPARE | | |
 | （無） | 其他（含 inline、scenario、旗標關閉） | | | | | |
 
 `13_script_save.md` 規定儲存收到 409 `script_flags_off` 時：等平台開啟旗標後再存一次，**絕不建議改成 inline**。
@@ -519,11 +520,11 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，預設）直接在已載入的 skill 上從 REFINE 開始，不經 PREPARE 關卡；`prepare`（re-plan）從 PREPARE 開始。MODIFY 回到 PREPARE 時保留已載入的 `SKILL.md`。要換 script，在 Materials 加入新版 code 素材即可（MODIFY 沒有舊素材需要移除）；檢查與 NEW 相同，通過後才替換。
 
-**MODIFY 的形式轉換**：`POST /api/sessions/{id}/convert-form`（body `{"target": "inline" | "script"}`）由 `form_conversion.convert_session_form()` 只搬程式碼，不改寫 `SKILL.md`。inline → script 要求 `SKILL.md` 正文（不含 `## Gatekeeper Addendum`）剛好一個可解析的 Python 區塊，區塊搬到 `current_skill.script`，且 session 不能有 skill 資產；script → inline 把 script 放進 `## API Reference / Sample Code`（沒有就新增在 Gatekeeper Addendum 之前）並設 `script_removed`，下次儲存時 `SkillFiles.remove_script` 會刪掉 Blob 上的 script。兩個方向都只允許 MODIFY capability skill、session 尚無 patch；轉成 script 會先重查 EAA 旗標（關閉回 409 `script_flags_off`）；其餘拒絕回 409 `form_conversion_refused`。轉換只改 session，不寫 Blob，並寫入一則 system 訊息要 Agent 依 `## Skill Form` 與 lint 結果修正 `SKILL.md`；檢查與缺口都走既有的儲存 lint 與 `GET /skill-form`。
+**MODIFY 的形式轉換**：`POST /api/sessions/{id}/convert-form`（body `{"target": "inline" | "script"}`）由 `form_conversion.convert_session_form()` 只搬程式碼，不改寫 `SKILL.md`。inline → script 要求 `SKILL.md` 正文（不含 `## Gatekeeper Addendum`）剛好一個可解析的 Python 區塊，區塊搬到 `current_skill.script`，且 session 不能有 skill 資產；script → inline 把 script 放進 `## API Reference / Sample Code`（沒有就新增在 Gatekeeper Addendum 之前）並設 `script_removed`，下次儲存時 `SkillFiles.remove_script` 會刪掉 Blob 上的 script。兩個方向都只允許 MODIFY capability skill、session 尚無 patch；轉成 script 會先重查 EAA 旗標（關閉回 409 `script_flags_off`）；其餘拒絕回 409 `form_conversion_refused`。轉換只改 session，不寫 Blob（第一個被接受的 `propose_patch` 會依既有行為同步到 Blob），並寫入一則 system 訊息要 Agent 依 `## Skill Form` 與 lint 結果修正 `SKILL.md`；檢查與缺口都走既有的儲存 lint 與 `GET /skill-form`。inline → script 時，若 session 沒有任何 `code` 素材，會同時加入一份內容等於 script 的 `code` 素材，讓 Agent 可以用 `propose_material_patch` 調整它的邊界（見下方）；script → inline 時移除內容等於 script 的 `code` 素材。
 
 `record_variables` 的 `variables` 可省略：省略時變數不變；帶入的清單會整份取代現有變數。只記錄 `script_covers_operations` 或 `prefer_inline` 時應省略它。
 
-**Generator 不改 script**。REFINE 的 patch 只作用在 `SKILL.md`；UI 的 Files 分頁把 script 顯示為唯讀。要換 script 只能換 `code` 素材：
+**Generator 不改 script**。REFINE 的 patch 只作用在 `SKILL.md`；UI 的 Files 分頁把 script 顯示為唯讀。唯一的例外是 MODIFY 中內容等於 script 的 `code` 素材（下方 `propose_material_patch`）。要換 script 只能換 `code` 素材：
 
 | 何時 | code 素材的內容有變（新增 / 修改 / 刪除 / kind 在 code 與其他之間切換 / 對話附上） | 結果 |
 | --- | --- | --- |
@@ -534,7 +535,7 @@ MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，�
 
 內容完全相同的 PUT 不算變動。五個入口（`POST` / `PUT` / `DELETE /materials`、chat 附上素材、接受 `propose_material_patch`）都走 `apply_code_material_change()`。
 
-**Agent 調整 code 素材**（`propose_material_patch`）：只在 PREPARE、`_form_prompt_key() == "script_candidate"`、恰好一份 `code` 素材且該素材在 prompt 中未被截斷時可用（依 [7.2](#72-注入時的預算與截斷)，即不超過 120,000 字元）；scenario skill 由 `KIND_ONLY_TOOLS` 擋下。提出時（`apply_tool_effect`）與接受時（`tool-result`，對**當下**的素材內容）都跑 `_checked_material_patch()`：
+**Agent 調整 code 素材**（`propose_material_patch`）：在 PREPARE、`_form_prompt_key() == "script_candidate"`、恰好一份 `code` 素材且該素材在 prompt 中未被截斷時可用（依 [7.2](#72-注入時的預算與截斷)，即不超過 120,000 字元）；另一個入口是 MODIFY：形式為 script、恰有一份 `code` 素材內容等於 `current_skill.script`（`script_edge_material()`，由 inline → script 的轉換加入），階段為 PREPARE 或 REFINE，接受後 `apply_code_material_change()` 依上表取代 script。兩個入口的檢查相同，只有拒絕時給 Agent 的指引不同：MODIFY 不能退回 inline，改請使用者以新的 `code` 素材提供完整 script。scenario skill 由 `KIND_ONLY_TOOLS` 擋下。提出時（`apply_tool_effect`）與接受時（`tool-result`，對**當下**的素材內容）都跑 `_checked_material_patch()`：
 
 - patch 套不上、沒有改動、改完無法解析 → 可重送的錯誤。
 - 改寫判定（[backend/material_patch.py](../backend/material_patch.py) `rewrite_reasons()`）：原素材無法解析、刪改了任何外部呼叫、或邊界以外的原始行改動超過 `MAX_CHANGED_RATIO`（0.5，忽略縮排，搬進 `main()` 不算）→ 拒絕，並要求 Agent 不要再送 patch，改請使用者選擇維持 inline 或自行撰寫 script（草稿只能出現在對話中）。
@@ -600,7 +601,7 @@ MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，�
 - **沒改什麼**：單價的欄位、`_price()` 的換算、報表計算與所有外部呼叫都原封不動。重新包成 `try` 的 `return` 區塊只改了縮排，比例計算忽略縮排，不算改動；新增的 `print` / `json.dumps` / `SystemExit` 都是邊界語句。
 - **Gate 會擋下的寫法**：只加 `add_help=False`、漏掉 `try` / `except SystemExit`（殘留 S10）；`[NEEDS_INFO]` 後面再印一行純文字（S4）；把 `p.error(...)` 換成印到 stderr 後 `sys.exit(2)`（S5：exit code 只能是 0 / 1 / 3）。
 
-Agent 端的寫法由 [prompts/01_prepare_script_addendum.md](../prompts/01_prepare_script_addendum.md) 規範：`## Skill Form` 提供機械式 stdout 修正時先提它；一般 patch 要一個修掉所有 finding（依 finding 引用的原始碼找行，不數行號）；`[NEEDS_INFO]` 後的說明放進其後的 JSON；回報失敗的診斷要進結果 JSON 並 exit 3，不能只移到 stderr；request 輸入改用 argparse，並用 `ArgumentParser(add_help=False)`、把 `parse_args()` 包在 `try` / `except SystemExit`（S10 / S10b）；被拒的 patch 不會套用，下一個要以原素材為基準；只有工具回報達到上限時才停止，不自行推斷。
+Agent 端的寫法由 [prompts/15_script_edge_rules.md](../prompts/15_script_edge_rules.md)（NEW 與 MODIFY 共用）與 [prompts/01_prepare_script_addendum.md](../prompts/01_prepare_script_addendum.md)（NEW）、[prompts/16_script_modify_edges.md](../prompts/16_script_modify_edges.md)（MODIFY）規範：`## Skill Form` 提供機械式 stdout 修正時先提它；一般 patch 要一個修掉所有 finding（依 finding 引用的原始碼找行，不數行號）；`[NEEDS_INFO]` 後的說明放進其後的 JSON；回報失敗的診斷要進結果 JSON 並 exit 3，不能只移到 stderr；request 輸入改用 argparse，並用 `ArgumentParser(add_help=False)`、把 `parse_args()` 包在 `try` / `except SystemExit`（S10 / S10b）；被拒的 patch 不會套用，下一個要以原素材為基準；只有工具回報達到上限時才停止，不自行推斷。
 
 提出時被拒走一般的 `tool_effect_rejected`；接受時被拒回 409 `material_patch_rejected`，素材不變。接受成功後素材 `origin="agent_patch"`，`user_content` 保留第一次被改前的使用者原文；覆蓋確認照上表重置，並寫入 system 訊息要求使用者先實際執行一次，並告訴使用者改過的程式在 Materials 分頁標示列、可複製或下載。`## Materials` 的素材標頭會加上 `origin=agent_patch, not run by the user`。使用者之後自行編輯素材（`PUT`），或 `script_covers_operations` 被記為 true，即回到 `origin="user"`。沒有 undo；是否已執行只靠 prompt 與 UI 標記，後端不擋 `script_covers_operations`。
 

@@ -11,7 +11,7 @@ import ast
 import re
 from typing import Literal
 
-from .models import ChatMessage, MessageRole, Mode, Session, SkillKind
+from .models import ChatMessage, Material, MaterialKind, MessageRole, Mode, Session, SkillKind
 from .sections import h2_sections, normalize_section
 from .skill_lint import GATEKEEPER_ADDENDUM_SECTION, body_python_fences
 
@@ -99,11 +99,23 @@ def convert_session_form(session: Session, target: Literal["inline", "script"]) 
             )
         draft.skill_md, draft.script = inline_to_script(draft.skill_md)
         session.script_removed = False
-        moved = "the Python code block is now the bundled script."
+        # The agent adapts the script's edges through this material; see script_edge_material().
+        has_code_material = any(MaterialKind(m.kind) is MaterialKind.CODE for m in session.materials)
+        if not has_code_material:
+            session.materials.append(Material(kind=MaterialKind.CODE, content=draft.script))
+        moved = (
+            "the Python code block is now the bundled script"
+            + ("." if has_code_material else ", and a code material identical to it was added so you "
+               "can adapt its edges with `propose_material_patch`.")
+        )
     else:
         if draft.script is None:
             raise FormConversionError("This skill has no script to move into SKILL.md.")
         draft.skill_md = script_to_inline(draft.skill_md, draft.script)
+        session.materials = [
+            m for m in session.materials
+            if not (MaterialKind(m.kind) is MaterialKind.CODE and m.content == draft.script)
+        ]
         draft.script = None
         session.script_removed = True
         moved = "the bundled script is now a Python code block in SKILL.md."

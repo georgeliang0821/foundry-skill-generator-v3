@@ -60,7 +60,9 @@ What they would say is covered by Reading the Result and Prerequisites.
 
 - You never modify the script. `propose_patch` edits SKILL.md only. When a
   problem lies in the script itself (an operation it lacks, a flag the user
-  wants), say so plainly instead of working around it in the prose.
+  wants), say so plainly instead of working around it in the prose. The one
+  exception is a code material identical to the script, which the modify
+  addendum lets you adapt with `propose_material_patch`.
 - **Replacing the script:** ask the user to add the new version as a new code
   material and to remove the old code material. The bundled script is replaced
   once exactly one code material remains that differs from it, parses and

@@ -130,6 +130,7 @@ from .state_machine import (
     needs_flag_lookup_before_lock,
     open_fix_items,
     register_post_transition_hook,
+    script_edge_material,
     script_readiness_problems,
     script_replacement_problems,
     session_materials_for_prompt,
@@ -1660,6 +1661,27 @@ _MATERIAL_PATCH_LIMIT_GUIDANCE = (
     "edit the code material themselves."
 )
 
+# The same three refusals for a MODIFY session, where the form is already a script and cannot fall back to inline.
+_MATERIAL_PATCH_REWRITE_GUIDANCE_MODIFY = (
+    "propose_material_patch only adapts a script's edges (argparse inputs, stdout JSON / "
+    "[NEEDS_INFO], stderr, exit codes), and this change is a rewrite. Do not retry with another "
+    "patch. Tell the user which part needs a rewrite and ask them to add the corrected full "
+    "script as a new code material. You may show a draft in the chat, but never put it into a "
+    "material yourself."
+)
+
+_MATERIAL_PATCH_INCOMPLETE_GUIDANCE_MODIFY = (
+    "Fix every one of these in ONE new patch: a patch that leaves any of them does not make the "
+    "code shippable as the bundled script. If one cannot be fixed at the edges, stop patching "
+    "and ask the user for a corrected full script, quoting the source line of each finding."
+)
+
+_MATERIAL_PATCH_LIMIT_GUIDANCE_MODIFY = (
+    "propose_material_patch was refused {count} times for this code material. Do not propose "
+    "another patch. List every unmet condition in `## Skill Form`, quoting the source line each "
+    "finding names, and ask the user for a corrected full script as a new code material."
+)
+
 
 class FormLockDeferred(ValueError):
     """PREPARE -> DRAFT held back once: the EAA flags were only just read and allow a script."""
@@ -1682,11 +1704,12 @@ class MaterialPatchRefused(ValueError):
         self.retryable = retryable
 
 
-def _material_patch_refusal(exc: MaterialPatchRefused, count: int) -> str:
+def _material_patch_refusal(exc: MaterialPatchRefused, count: int, *, modify: bool = False) -> str:
     if count >= MAX_MATERIAL_PATCH_REJECTIONS:
+        limit = _MATERIAL_PATCH_LIMIT_GUIDANCE_MODIFY if modify else _MATERIAL_PATCH_LIMIT_GUIDANCE
         return (
             f"{exc} Refusal {count} of {MAX_MATERIAL_PATCH_REJECTIONS}: the limit is reached. "
-            + _MATERIAL_PATCH_LIMIT_GUIDANCE.format(count=count)
+            + limit.format(count=count)
         )
     tail = f" Refusal {count} of {MAX_MATERIAL_PATCH_REJECTIONS}."
     return f"{exc}{tail} {_MATERIAL_PATCH_RETRY_GUIDANCE}" if exc.retryable else f"{exc}{tail}"
@@ -1694,13 +1717,21 @@ def _material_patch_refusal(exc: MaterialPatchRefused, count: int) -> str:
 
 def _material_patch_target(session: Session, material_id: str) -> int:
     """Index of the code material a propose_material_patch may change now; ValueError otherwise."""
-    if session.current_stage != Stage.PREPARE.value:
-        raise ValueError(f"propose_material_patch only allowed in PREPARE (current={session.current_stage}).")
-    if _form_prompt_key(session) != "script_candidate":
-        raise ValueError(
-            "propose_material_patch is only available while a new capability skill with a code "
-            "material is still choosing its form and the EAA script flags are on."
-        )
+    edge = script_edge_material(session)
+    if edge is not None:
+        if session.current_stage not in {Stage.PREPARE.value, Stage.REFINE.value}:
+            raise ValueError(f"propose_material_patch only allowed in PREPARE/REFINE (current={session.current_stage}).")
+        if material_id != edge.id:
+            raise ValueError(f"`{material_id}` is not the code material that holds the bundled script.")
+    else:
+        if session.current_stage != Stage.PREPARE.value:
+            raise ValueError(f"propose_material_patch only allowed in PREPARE (current={session.current_stage}).")
+        if _form_prompt_key(session) != "script_candidate":
+            raise ValueError(
+                "propose_material_patch is only available while a new capability skill with a code "
+                "material is still choosing its form and the EAA script flags are on, or in a modify "
+                "session whose bundled script was converted from inline."
+            )
     codes = code_material_contents(session)
     if len(codes) != 1:
         raise ValueError(f"propose_material_patch needs exactly one code material; there are {len(codes)}.")
@@ -1768,7 +1799,12 @@ def _checked_material_patch(session: Session, material_id: str, patch: str) -> t
         raise MaterialPatchRefused(" ".join(defects))
     reasons = rewrite_reasons(before, updated)
     if reasons:
-        raise MaterialPatchRefused(" ".join(reasons) + " " + _MATERIAL_PATCH_REWRITE_GUIDANCE, retryable=False)
+        raise MaterialPatchRefused(
+            " ".join(reasons) + " " + (
+                _MATERIAL_PATCH_REWRITE_GUIDANCE_MODIFY if script_edge_material(session) else _MATERIAL_PATCH_REWRITE_GUIDANCE
+            ),
+            retryable=False,
+        )
     remaining = script_readiness_problems(session, updated)
     if remaining:
         raise MaterialPatchRefused(
@@ -1776,7 +1812,9 @@ def _checked_material_patch(session: Session, material_id: str, patch: str) -> t
             + "\n".join(
                 f"- {p.check}{f' ({p.rule})' if p.rule else ''}: {p.message}" for p in remaining
             )
-            + "\n" + _MATERIAL_PATCH_INCOMPLETE_GUIDANCE
+            + "\n" + (
+                _MATERIAL_PATCH_INCOMPLETE_GUIDANCE_MODIFY if script_edge_material(session) else _MATERIAL_PATCH_INCOMPLETE_GUIDANCE
+            )
         )
     return index, updated
 
@@ -2172,12 +2210,19 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             _checked_stdout_fix(session, str(args.get("material_id", "")), args.get("patch"))
             return
         if session.material_patch_rejections >= MAX_MATERIAL_PATCH_REJECTIONS:
-            raise ValueError(_MATERIAL_PATCH_LIMIT_GUIDANCE.format(count=session.material_patch_rejections))
+            limit = (
+                _MATERIAL_PATCH_LIMIT_GUIDANCE_MODIFY if script_edge_material(session) else _MATERIAL_PATCH_LIMIT_GUIDANCE
+            )
+            raise ValueError(limit.format(count=session.material_patch_rejections))
         try:
             _checked_material_patch(session, str(args.get("material_id", "")), str(args.get("patch", "")))
         except MaterialPatchRefused as exc:
             session.material_patch_rejections += 1
-            raise ValueError(_material_patch_refusal(exc, session.material_patch_rejections)) from exc
+            raise ValueError(
+                _material_patch_refusal(
+                    exc, session.material_patch_rejections, modify=script_edge_material(session) is not None
+                )
+            ) from exc
         return
 
     if tool == "rename_skill":

@@ -2360,7 +2360,7 @@ function renderFormConversionRow() {
   const toScript = session.skill_form !== "script";
   const edited = (session.patch_history || []).length > 0;
   const hint = toScript
-    ? "Moves the one Python code block of SKILL.md into scripts/<name>.py. SKILL.md is not rewritten; the agent fixes what the script form still needs."
+    ? "Moves the one Python code block of SKILL.md into scripts/<name>.py and adds it to Materials as a code material, so the agent can adapt its edges (argparse, stdout JSON, exit codes). SKILL.md is not rewritten; the agent fixes what the script form still needs."
     : "Moves the bundled script into a Python code block of SKILL.md. SKILL.md is not rewritten; the agent fixes what the inline form still needs.";
   return `<div class="var-group skill-form-convert" data-testid="form-convert-row">
       <div class="var-group-head"><strong>Convert form</strong></div>
@@ -2370,7 +2370,7 @@ function renderFormConversionRow() {
 }
 
 async function convertSkillForm(target) {
-  if (!session || !window.confirm(`Convert this skill to ${target} form? SKILL.md is not rewritten; the agent will help fix what the ${target} form needs. Nothing is saved until you save the skill.`)) return;
+  if (!session || !window.confirm(`Convert this skill to ${target} form? SKILL.md is not rewritten; the agent will help fix what the ${target} form needs. The first accepted SKILL.md patch also syncs the skill to Blob, so finish the conversion promptly.`)) return;
   try {
     session = await convertSessionForm(session.id, target);
     persistSessionState();
