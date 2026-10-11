@@ -122,10 +122,13 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 
 1. 儲存體帳戶 → **Endpoints** → Blob service 的 URL → `AZURE_STORAGE_ACCOUNT_URL`（例如 `https://youraccount.blob.core.windows.net`）；容器名稱 → `AZURE_BLOB_CONTAINER`。
 2. 執行 `az login`，並在儲存體帳戶上將 **Storage Blob Data Contributor** 指派給該登入帳號。一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。
+3. 若需要覆寫前自動備份，在同一帳戶預先建立獨立容器（例如 `skill-history`），將名稱填入 `AZURE_BLOB_HISTORY_CONTAINER`。此容器不能與 `AZURE_BLOB_CONTAINER` 相同，也不能附帶路徑。Generator 不會自動建立容器；沿用上述 Blob 身分，須具有正式容器的讀取權與歷史容器的讀寫權。容器請維持非匿名存取，僅授予需要存取歷史的管理員與應用程式身分。
 
 > Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，刻意忽略 `AZURE_*` service principal，也不支援連線字串。
 
 > 儲存體帳戶可啟用或不啟用階層命名空間（ADLS Gen2）；啟用時列出的目錄項目（`hdi_isfolder`）不會被當成 skill 資產，刪除 skill 時也會一併移除其目錄。
+
+> 自動備份只在 Generator 覆寫既有 skill 時執行，不以 session 的 NEW / MODIFY 模式判斷；首次建立不備份。備份包含覆寫前的 `SKILL.md`、script 與所有附帶檔案，全部完成後才寫 `manifest.json`，備份失敗回 HTTP 503 並停止覆寫。`captured_by` / `captured_at` 是本次備份觸發者與時間，不是舊內容的作者與儲存時間。歷史不自動清理，刪除或改名也保留已有備份；請依客戶的敏感資料與保留期限政策由管理員清理。此功能不另替刪除或改名建立備份，也不提供歷史查詢或還原介面；不保證涵蓋外部寫入或跨檔案的原子一致性。正式 Azure 容器與權限須在部署環境另行驗證。
 
 ### 2.6 EAA MCP
 
@@ -182,6 +185,7 @@ Copy-Item .env.example .env
 | --- | --- | --- |
 | `AZURE_STORAGE_ACCOUNT_URL` | 是 | 例如 `https://youraccount.blob.core.windows.net` |
 | `AZURE_BLOB_CONTAINER` | 是 | 容器名稱，例如 `agent-skills`。只填容器名稱 |
+| `AZURE_BLOB_HISTORY_CONTAINER` | 否 | 同帳戶下獨立歷史容器，例如 `skill-history`；留空不啟用。填入後須重新啟動，備份失敗會阻止覆寫；準備步驟見 [2.5](#25-azure-blob) |
 
 ### 3.5 EAA MCP
 

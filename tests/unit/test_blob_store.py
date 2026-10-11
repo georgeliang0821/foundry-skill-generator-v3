@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
+import json
+import hashlib
+from datetime import datetime
 
 import pytest
 
 from backend.blob_store import (
     MAX_SKILL_NAME_LEN,
     AzureBlobSkillStore,
+    CachedSkillStore,
     LocalSkillStore,
+    SkillBackupError,
     VersionConflict,
     blob_path_of,
     blob_prefix_of,
@@ -318,6 +323,9 @@ class _FakeBlobContainer:
 
         class _Client:
             def upload_blob(self, data, overwrite=False, content_settings=None, **_kw):
+                if "etag" in _kw and _kw["etag"] != self.get_blob_properties().etag:
+                    from azure.core.exceptions import ResourceModifiedError
+                    raise ResourceModifiedError("Changed")
                 if not overwrite and name in container.blobs:
                     from azure.core.exceptions import ResourceExistsError
                     raise ResourceExistsError("Already exists")
@@ -326,9 +334,15 @@ class _FakeBlobContainer:
                     container.content_types[name] = content_settings.content_type
 
             def get_blob_properties(self):
-                return type("_P", (), {"etag": "etag-1"})()
+                if name not in container.blobs:
+                    from azure.core.exceptions import ResourceNotFoundError
+                    raise ResourceNotFoundError("Missing")
+                return type("_P", (), {"etag": hashlib.sha256(container.blobs[name]).hexdigest()})()
 
-            def download_blob(self):
+            def download_blob(self, **_kw):
+                if "etag" in _kw and _kw["etag"] != self.get_blob_properties().etag:
+                    from azure.core.exceptions import ResourceModifiedError
+                    raise ResourceModifiedError("Changed")
                 return self
 
             def readall(self) -> bytes:
@@ -342,6 +356,179 @@ def _azure_store(container: _FakeBlobContainer) -> AzureBlobSkillStore:
     store.prefix, store.container, store.id = "skills", "c", "azure:test"
     store.service = type("_Service", (), {"get_container_client": lambda self, _name: container})()
     return store
+
+
+def test_azure_backup_preserves_complete_old_package() -> None:
+    original = {
+        "skills/demo/SKILL.md": b"old",
+        "skills/demo/scripts/demo.py": b"old script",
+        "skills/demo/assets/data.bin": b"\xff\x00",
+    }
+    live = _FakeHnsContainer(original)
+    history = _FakeBlobContainer({})
+    store = _azure_store(live)
+    store.history_container = "skill-history"
+    store.service = type("_Service", (), {"get_container_client": lambda self, name: history if name == "skill-history" else live})()
+    store.save_skill(SkillFiles(name="demo", skill_md="new", remove_script=True, assets={}), captured_by="User@Example.com")
+    manifests = [name for name in history.blobs if name.endswith("/manifest.json")]
+    assert len(manifests) == 1
+    manifest = json.loads(history.blobs[manifests[0]])
+    assert manifest["captured_by"] == "user@example.com"
+    assert manifest["source_etag"] == hashlib.sha256(b"old").hexdigest()
+    assert datetime.fromisoformat(manifest["captured_at"]).utcoffset().total_seconds() == 0
+    for entry in manifest["files"]:
+        data = original[f"skills/demo/{entry['path']}"]
+        assert entry["size_bytes"] == len(data)
+        assert entry["sha256"] == hashlib.sha256(data).hexdigest()
+    prefix = manifests[0].removesuffix("manifest.json")
+    for path, data in original.items():
+        assert history.blobs[f"{prefix}files/{path.removeprefix('skills/demo/')}"] == data
+    assert live.blobs == {"skills/demo/SKILL.md": b"new"}
+
+
+def test_azure_backup_skips_first_creation() -> None:
+    live = _FakeBlobContainer({})
+    store = _azure_store(live)
+    store.history_container = "skill-history"
+    store.save_skill(SkillFiles(name="demo", skill_md="new"))
+    assert live.blobs == {"skills/demo/SKILL.md": b"new"}
+
+
+def test_azure_backup_failure_prevents_overwrite(monkeypatch) -> None:
+    live = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"})
+    store = _azure_store(live)
+    store.history_container = "skill-history"
+    def fail(*args):
+        raise RuntimeError("Permission denied")
+    monkeypatch.setattr(store, "_backup_skill", fail)
+    with pytest.raises(SkillBackupError):
+        store.save_skill(SkillFiles(name="demo", skill_md="new"))
+    assert live.blobs == {"skills/demo/SKILL.md": b"old"}
+
+
+def test_local_backup_retains_history_after_deletion() -> None:
+    store = LocalSkillStore(history_enabled=True)
+    first = store.save_skill(SkillFiles(name="demo", skill_md="old", script="script", assets={"assets/a.txt": "a"}))
+    assert not store.history
+    store.save_skill(SkillFiles(name="demo", skill_md="new"), first.version_hash, captured_by="test@example.com")
+    backup = next(iter(store.history.values()))
+    assert backup["files"] == {"SKILL.md": b"old", "scripts/demo.py": b"script", "assets/a.txt": b"a"}
+    store.delete_skill("demo")
+    assert len(store.history) == 1
+
+
+def _history_store(live, history):
+    store = _azure_store(live)
+    store.history_container = "skill-history"
+    store.service = type("_Service", (), {"get_container_client": lambda self, name: history if name == "skill-history" else live})()
+    return store
+
+
+@pytest.mark.parametrize("fail_manifest", [False, True])
+def test_history_upload_failure_leaves_live_untouched(monkeypatch, fail_manifest) -> None:
+    original = {"skills/demo/SKILL.md": b"old", "skills/demo/assets/a.txt": b"a"}
+    live, history = _FakeBlobContainer(original), _FakeBlobContainer({})
+    store = _history_store(live, history)
+    get_client = history.get_blob_client
+    def failing_client(name):
+        client = get_client(name)
+        if name.endswith("manifest.json") == fail_manifest:
+            def fail(*args, **kwargs):
+                raise RuntimeError("Storage unavailable")
+            client.upload_blob = fail
+        return client
+    monkeypatch.setattr(history, "get_blob_client", failing_client)
+    with pytest.raises(SkillBackupError):
+        store.save_skill(SkillFiles(name="demo", skill_md="new", assets={}))
+    assert live.blobs == original
+    assert not any(name.endswith("/manifest.json") for name in history.blobs)
+
+
+def test_history_stale_version_has_no_backup_or_live_write() -> None:
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+    with pytest.raises(VersionConflict):
+        _history_store(live, history).save_skill(SkillFiles(name="demo", skill_md="new"), "stale")
+    assert not history.blobs
+    assert live.blobs["skills/demo/SKILL.md"] == b"old"
+
+
+@pytest.mark.parametrize("change", ["content", "add", "delete"])
+def test_history_detects_source_changes_before_manifest(monkeypatch, change) -> None:
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+    store = _history_store(live, history)
+    get_client = history.get_blob_client
+    def changing_client(name):
+        client = get_client(name)
+        upload = client.upload_blob
+        def write(data, **kwargs):
+            upload(data, **kwargs)
+            if change == "content":
+                live.blobs["skills/demo/SKILL.md"] = b"external change"
+            elif change == "add":
+                live.blobs["skills/demo/assets/new.txt"] = b"added"
+            else:
+                live.blobs.pop("skills/demo/SKILL.md", None)
+        client.upload_blob = write
+        return client
+    monkeypatch.setattr(history, "get_blob_client", changing_client)
+    with pytest.raises(VersionConflict):
+        store.save_skill(SkillFiles(name="demo", skill_md="replacement"))
+    assert live.blobs.get("skills/demo/SKILL.md") != b"replacement"
+    assert not any(name.endswith("/manifest.json") for name in history.blobs)
+
+
+def test_history_cas_protects_live_after_manifest(monkeypatch) -> None:
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+    store = _history_store(live, history)
+    get_client = history.get_blob_client
+    def changing_client(name):
+        client = get_client(name)
+        upload = client.upload_blob
+        def write(data, **kwargs):
+            upload(data, **kwargs)
+            if name.endswith("/manifest.json"):
+                live.blobs["skills/demo/SKILL.md"] = b"external change"
+        client.upload_blob = write
+        return client
+    monkeypatch.setattr(history, "get_blob_client", changing_client)
+    with pytest.raises(VersionConflict):
+        store.save_skill(SkillFiles(name="demo", skill_md="replacement"))
+    assert live.blobs["skills/demo/SKILL.md"] == b"external change"
+    assert any(name.endswith("/manifest.json") for name in history.blobs)
+
+
+def test_history_repeated_saves_and_delete_preserve_isolated_revisions() -> None:
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+    store = _history_store(live, history)
+    store.save_skill(SkillFiles(name="demo", skill_md="new"))
+    store.save_skill(SkillFiles(name="demo", skill_md="new"))
+    store.delete_skill("demo")
+    assert len([name for name in history.blobs if name.endswith("/manifest.json")]) == 2
+    assert not live.blobs
+
+
+def test_history_create_only_conflict_does_not_capture() -> None:
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+    with pytest.raises(VersionConflict):
+        _history_store(live, history).save_skill(SkillFiles(name="demo", skill_md="new"), create_only=True)
+    assert not history.blobs
+
+
+def test_cached_store_forwards_backup_actor() -> None:
+    local = LocalSkillStore(history_enabled=True)
+    store = CachedSkillStore(local)
+    store.save_skill(SkillFiles(name="demo", skill_md="old"))
+    store.save_skill(SkillFiles(name="demo", skill_md="new"), captured_by="Author@Example.com")
+    assert next(iter(local.history.values()))["manifest"]["captured_by"] == "author@example.com"
+
+
+@pytest.mark.parametrize("history_name", ["skills-container", "bad/name", "UPPER", "aa", "bad--name"])
+def test_azure_history_rejects_invalid_or_live_container(monkeypatch, history_name) -> None:
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://example.blob.core.windows.net")
+    monkeypatch.setenv("AZURE_BLOB_CONTAINER", "skills-container")
+    monkeypatch.setenv("AZURE_BLOB_HISTORY_CONTAINER", history_name)
+    with pytest.raises(ValueError, match="AZURE_BLOB_HISTORY_CONTAINER"):
+        AzureBlobSkillStore()
 
 
 def test_azure_store_writes_assets_and_sweeps_only_its_own_prefix() -> None:

@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import pytest
+
 from backend.models import TestResult as ModelTestResult
 from backend.models import TestRun as ModelTestRun
 
@@ -31,6 +33,44 @@ def test_save_empty_skill_returns_400(client) -> None:
     response = client.post(f"/api/sessions/{session_id}/save", json={})
 
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("neighbor", [False, True])
+def test_save_backup_failure_returns_503_without_live_write(client, backend_main, grant_skill, monkeypatch, neighbor) -> None:
+    original = "---\nname: demo-skill\ndescription: Demo\n---\nOriginal"
+    backend_main.store.save_skill(backend_main.SkillFiles(name="demo-skill", skill_md=original))
+    grant_skill("demo-skill")
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo-skill"}).json()["id"]
+    replacement = original.replace("Original", "Changed")
+    if neighbor:
+        assert client.post(f"/api/sessions/{sid}/neighbor-edits/demo-skill/propose", json={"skill_md": replacement}).status_code == 200
+        endpoint = f"/api/sessions/{sid}/neighbor-edits/demo-skill/save"
+    else:
+        client.put(f"/api/sessions/{sid}/draft", json={"skill_md": replacement})
+        endpoint = f"/api/sessions/{sid}/save"
+    def fail(files, expected_version_hash="", *, create_only=False, captured_by=""):
+        assert captured_by == "test@example.com"
+        raise backend_main.SkillBackupError("Skill backup failed; live content was not saved.")
+    monkeypatch.setattr(backend_main.store, "save_skill", fail)
+    response = client.post(endpoint, json={})
+    assert response.status_code == 503
+    assert "backup failed" in response.json()["detail"]
+    assert backend_main.store.load_skill("demo-skill").skill_md == original
+
+
+def test_new_session_second_save_captures_previous_content(client, backend_main) -> None:
+    local = backend_main.store.store
+    local.history_enabled = True
+    sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    original = "---\nname: demo-skill\ndescription: Demo\n---\nOriginal"
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": original})
+    assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
+    assert not local.history
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": original.replace("Original", "Changed")})
+    assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
+    backup = next(iter(local.history.values()))
+    assert backup["files"]["SKILL.md"] == original.encode("utf-8")
+    assert backup["manifest"]["captured_by"] == "test@example.com"
 
 
 def test_create_modify_session_loads_existing_skill(client, backend_main, grant_skill) -> None:

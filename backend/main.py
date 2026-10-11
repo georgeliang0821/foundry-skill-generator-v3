@@ -31,6 +31,7 @@ from .blob_store import (
     MAX_SKILL_NAME_LEN,
     CachedSkillStore,
     LocalSkillStore,
+    SkillBackupError,
     VersionConflict,
     compute_hash,
     make_skill_store,
@@ -1212,7 +1213,9 @@ def save_skill_dual_write(
         if_match=bool(expected_version),
     )
     try:
-        saved = store.save_skill(files, expected_version, create_only=existing is None)
+        saved = store.save_skill(files, expected_version, create_only=existing is None, captured_by=user_upn)
+    except SkillBackupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VersionConflict as exc:
         if existing is None:
             raise HTTPException(status_code=409, detail="Skill name was claimed while saving; choose a different name.") from exc
@@ -4113,7 +4116,9 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
         raise HTTPException(status_code=403, detail=f"You cannot modify the skill: {ne.skill_name}")
     files = SkillFiles(name=ne.skill_name, skill_md=version.skill_md, version_hash=version.version_hash)
     try:
-        saved = store.save_skill(files, ne.remote_version_hash)
+        saved = store.save_skill(files, ne.remote_version_hash, captured_by=upn)
+    except SkillBackupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VersionConflict as exc:
         raise HTTPException(
             status_code=409,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -10,6 +11,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
+from uuid import uuid4
 
 import yaml
 
@@ -31,6 +33,27 @@ SCRIPTS_DIR = "scripts"
 
 class VersionConflict(RuntimeError):
     """The stored SKILL.md changed since the caller last read it."""
+
+
+class SkillBackupError(RuntimeError):
+    """The pre-overwrite backup failed; live content was not written."""
+
+
+def _backup_manifest(store_id: str, source_path: str, name: str, etag: str, captured_by: str, contents: dict[str, bytes]) -> dict:
+    return {
+        "schema_version": 1,
+        "revision_id": uuid4().hex,
+        "skill_name": name,
+        "source_store": store_id,
+        "source_blob_path": source_path,
+        "source_etag": etag,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_by": captured_by.strip().lower(),
+        "files": [
+            {"path": path, "size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for path, data in sorted(contents.items())
+        ],
+    }
 
 
 def compute_hash(*parts: str) -> str:
@@ -195,7 +218,7 @@ class SkillStore(Protocol):
     def store_id(self) -> str: ...
     def list_skills(self) -> list[SkillIndexEntry]: ...
     def load_skill(self, name: str) -> SkillFiles: ...
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles: ...
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "") -> SkillFiles: ...
     def delete_skill(self, name: str) -> None: ...
     def has_script(self, name: str) -> bool: ...
     def load_assets(self, name: str) -> dict[str, bytes]: ...
@@ -204,9 +227,11 @@ class SkillStore(Protocol):
 class LocalSkillStore:
     """Process-local store used only when SGV2_SKILL_STORE=local is explicit."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, history_enabled: bool = False) -> None:
         self._skills: dict[str, SkillFiles] = {}
         self._lock = threading.RLock()
+        self.history_enabled = history_enabled
+        self.history: dict[str, dict] = {}
         # Raw bytes so a test can plant a file that would fail the asset checks.
         self._assets: dict[str, dict[str, bytes]] = {}
         self.id = "local"
@@ -243,11 +268,11 @@ class LocalSkillStore:
         log_event("skill_store.local.load.done", skill_name=safe, duration_ms=elapsed_ms(started))
         return files
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "") -> SkillFiles:
         with self._lock:
-            return self._save_skill(files, expected_version_hash, create_only=create_only)
+            return self._save_skill(files, expected_version_hash, create_only=create_only, captured_by=captured_by)
 
-    def _save_skill(self, files: SkillFiles, expected_version_hash: str, *, create_only: bool) -> SkillFiles:
+    def _save_skill(self, files: SkillFiles, expected_version_hash: str, *, create_only: bool, captured_by: str) -> SkillFiles:
         started = now_ms()
         safe = safe_skill_name(files.name)
         current = self._skills.get(safe)
@@ -256,6 +281,13 @@ class LocalSkillStore:
         if expected_version_hash and (current is None or current.version_hash != expected_version_hash):
             log_event("skill_store.local.save.version_mismatch", level="warning", skill_name=safe)
             raise VersionConflict("Version hash mismatch; reload latest skill before saving.")
+        if self.history_enabled and current is not None:
+            contents = dict(self._assets.get(safe, {}))
+            contents["SKILL.md"] = current.skill_md.encode("utf-8")
+            if current.script is not None:
+                contents[script_relpath_of(safe)] = current.script.encode("utf-8")
+            manifest = _backup_manifest(self.id, blob_path_of(safe), safe, current.version_hash, captured_by, contents)
+            self.history[manifest["revision_id"]] = {"manifest": manifest, "files": contents}
         saved = files.model_copy(deep=True)
         saved.name = safe
         saved.version_hash = compute_hash(saved.skill_md)
@@ -307,6 +339,13 @@ class AzureBlobSkillStore:
         if not container:
             raise ValueError("Azure Blob container is not configured. Set AZURE_BLOB_CONTAINER.")
         self.container = container
+        self.history_container = os.getenv("AZURE_BLOB_HISTORY_CONTAINER", "").strip()
+        if self.history_container and (
+            not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.history_container)
+            or not 3 <= len(self.history_container) <= 63
+            or self.history_container == self.container
+        ):
+            raise ValueError("AZURE_BLOB_HISTORY_CONTAINER must be a separate, valid bare container name.")
         if embedded_prefix and embedded_prefix != BLOB_ROOT:
             raise ValueError(
                 f"AZURE_BLOB_CONTAINER must be a bare container name (got prefix '{embedded_prefix}'). "
@@ -480,7 +519,63 @@ class AzureBlobSkillStore:
             container.delete_blob(blob_name)
         log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
+    def _backup_skill(self, safe: str, expected_version_hash: str, captured_by: str) -> str:
+        from azure.core import MatchConditions
+        from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
+        from azure.storage.blob import ContentSettings
+
+        container = self._container()
+        skill_path = self._skill_path(safe)
+        prefix = self._skill_dir(safe)
+        skill_blob = container.get_blob_client(skill_path)
+        try:
+            source_etag = str(skill_blob.get_blob_properties().etag)
+        except ResourceNotFoundError:
+            if expected_version_hash:
+                raise VersionConflict("SKILL.md was deleted since it was loaded.")
+            return ""
+        if expected_version_hash and source_etag != expected_version_hash:
+            raise VersionConflict("SKILL.md changed since it was loaded.")
+
+        contents: dict[str, bytes] = {}
+        etags: dict[str, str] = {}
+        try:
+            names = sorted(self._list_entries(prefix)[0])
+            if skill_path not in names:
+                raise VersionConflict("SKILL.md disappeared during backup.")
+            for name in names:
+                client = container.get_blob_client(name)
+                etag = source_etag if name == skill_path else str(client.get_blob_properties().etag)
+                contents[name[len(prefix):]] = client.download_blob(
+                    etag=etag, match_condition=MatchConditions.IfNotModified,
+                ).readall()
+                etags[name] = etag
+        except (ResourceModifiedError, ResourceNotFoundError) as exc:
+            raise VersionConflict("Skill files changed during backup; reload before saving.") from exc
+
+        manifest = _backup_manifest(self.id, skill_path, safe, source_etag, captured_by, contents)
+        source_key = hashlib.sha256(f"{self.id}\0{skill_path}".encode("utf-8")).hexdigest()
+        revision_prefix = f"{safe}/{source_key}/{manifest['revision_id']}/"
+        history = self.service.get_container_client(self.history_container)
+        for path, data in sorted(contents.items()):
+            history.get_blob_client(f"{revision_prefix}files/{path}").upload_blob(data, overwrite=False)
+        try:
+            if sorted(self._list_entries(prefix)[0]) != names:
+                raise VersionConflict("Skill file set changed during backup.")
+            for name, etag in etags.items():
+                if str(container.get_blob_client(name).get_blob_properties().etag) != etag:
+                    raise VersionConflict("Skill files changed during backup.")
+        except ResourceNotFoundError as exc:
+            raise VersionConflict("Skill files disappeared during backup.") from exc
+        history.get_blob_client(f"{revision_prefix}manifest.json").upload_blob(
+            json.dumps(manifest, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+            overwrite=False,
+            content_settings=ContentSettings(content_type="application/json; charset=utf-8"),
+        )
+        log_event("skill_store.backup.done", skill_name=safe, revision_id=manifest["revision_id"], history_container=self.history_container)
+        return source_etag
+
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "") -> SkillFiles:
         from azure.core import MatchConditions
         from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
         from azure.storage.blob import ContentSettings
@@ -490,6 +585,16 @@ class AzureBlobSkillStore:
         container = self._container()
         skill_blob = container.get_blob_client(skill_path)
 
+        if getattr(self, "history_container", "") and not create_only:
+            try:
+                expected_version_hash = self._backup_skill(safe, expected_version_hash, captured_by)
+            except VersionConflict:
+                raise
+            except Exception as exc:
+                log_exception("skill_store.backup.failed", exc, skill_name=safe)
+                raise SkillBackupError("Skill backup failed; live content was not saved. Contact the administrator.") from exc
+            if not expected_version_hash:
+                create_only = True
         kwargs = {}
         if expected_version_hash:
             kwargs = {
@@ -602,8 +707,8 @@ class CachedSkillStore:
     def load_skill(self, name: str) -> SkillFiles:
         return self.store.load_skill(name)
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
-        saved = self.store.save_skill(files, expected_version_hash, create_only=create_only)
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "") -> SkillFiles:
+        saved = self.store.save_skill(files, expected_version_hash, create_only=create_only, captured_by=captured_by)
         self._index = None
         self._expires_at = None
         return saved

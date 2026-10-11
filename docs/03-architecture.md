@@ -28,6 +28,7 @@ flowchart LR
         FND[Microsoft Foundry Agent]
         SQL[(Azure SQL<br/>dbo.skills / dbo.user_skill_grants)]
         BLOB[(Azure Blob<br/>SKILL.md 全文、資產、script)]
+        HISTORY[(Azure Blob 選用歷史容器<br/>覆寫前套件、manifest)]
         ROUTER[Router endpoint<br/>可選擇經 APIM 對外提供<br/>僅 TEST 路由盲測]
         ENTRA[Microsoft Entra ID]
     end
@@ -39,6 +40,7 @@ flowchart LR
     API --> ACL --> SQL
     STORES --> SQL
     STORES --> BLOB
+    STORES --> HISTORY
     API -- OAuth2 授權碼 + PKCE --> ENTRA
 ```
 
@@ -102,6 +104,8 @@ sequenceDiagram
 - **寫入時機**：REFINE 每個被接受的 patch、以及按下「儲存」都會雙寫 Blob + SQL（`save_skill_dual_write`）；DRAFT 被接受也雙寫。
 - **寫入前的關卡**（依序，任一失敗就不寫）：既有 skill 的建立者權限（改名同時檢查來源，NEW 同名覆寫也適用）→ topology 驗證 → skill 資產檢查（見 [04-agent-mechanism.md 第 7.6 節](04-agent-mechanism.md#76-skill-資產assetsreferences)）→ `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則；有資產時含 F2/F3）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)）→ EAA MCP `lint_skill_package`（見 [2.3](#23-eaa-skill-lint)）。
 - **寫入順序**：`SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ skill 資產（把 session 的完整集合寫到 `skills/<name>/assets/`、`references/`，並移除該資料夾內不在集合裡的檔案）→ script 型才有 `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
+- **覆寫前備份（選用）**：設定 `AZURE_BLOB_HISTORY_CONTAINER` 後，共用 `save_skill()` 在任何正式檔案寫入前，先讀取目的地的舊套件，以來源檔案的 ETag 做條件式讀取，將原始 bytes 寫到獨立歷史容器。一般 session 與鄰近 skill 儲存都帶入已驗證登入者；首次建立與只能建立的改名目的地不備份。正式覆寫仍使用舊 `SKILL.md` 的 ETag 作條件，來源變更回 409；備份讀寫失敗回 503，不寫正式內容。未設定時維持一般儲存流程。
+- **歷史格式與範圍**：路徑為 `<skill-name>/<source-key>/<revision-id>/files/<relative-path>`，其中 `source-key` 是來源 store ID 與實際 Blob 路徑的 SHA256，`revision-id` 是系統產生的 UUID。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者，以及各檔案路徑、長度與 SHA256；不推定歷史作者。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈，刪除或改名不移除歷史，也不額外建立快照。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
 - **new vs modify**：new skill 首次儲存是 INSERT（同時寫 `created_by` / `created_at` / `updated_at`）；modify 既有 skill 是覆寫內容的 UPDATE。新建與改名目的地的 Blob 使用只能建立、不可覆寫的條件式寫入，名稱被其他寫入占用時回 409；只有 Blob、沒有 SQL metadata 的名稱也不能被認領。
 - **upsert 行為**：`upsert_skill` 是 `MERGE dbo.skills`，比對鍵是 `skill_key`：不存在 -> INSERT `(skill_name, owner_upn, created_by, is_public, enabled, is_internal)`；已存在 -> UPDATE `is_public` / `enabled` / 指定的 `is_internal`，並**設 `updated_at = SYSUTCDATETIME()`**。`created_by` 只在 INSERT 填入，UPDATE 不修改，包括空白值；改名的新列沿用來源建立者。
 - **絕不寫入計算欄位**：`skill_key` / `blob_path` / `blob_prefix` 都是 PERSISTED computed column，由 SQL 自行產生；應用程式若嘗試寫入會直接被 SQL Server 拒絕。
@@ -112,8 +116,9 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     P[接受 Patch / 儲存] --> MEM[更新記憶體中的 SKILL.md]
-    MEM --> BLOB[(寫入 Azure Blob<br/>SKILL.md 全文、資產、script)]
-    MEM --> SQL[(MERGE dbo.skills ON skill_key<br/>skill_name / owner_upn / is_public / enabled<br/>既有則更新 updated_at)]
+    MEM --> BACKUP[已啟用且覆寫既有技能時<br/>先完成套件備份與 manifest]
+    BACKUP --> BLOB[(寫入 Azure Blob<br/>SKILL.md 全文、資產、script)]
+    BLOB --> SQL[(MERGE dbo.skills ON skill_key<br/>skill_name / owner_upn / is_public / enabled<br/>既有則更新 updated_at)]
     SQL --> GRANT[私有 skill: 補作者 grant]
 ```
 
@@ -196,7 +201,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `acl.py` | 身分與授權：從請求取出 UPN（email）、`AclCache` 快取讀取授權、FastAPI 相依 `require_upn`；`assert_can_modify` 直接查 SQL 建立者，不使用 grant 快取 |
 | `auth_store.py` | 登入狀態保存：`LocalAuthStore`（記憶體）與選用的 `AzureBlobAuthStore`（共用 / 多實例） |
 | `session_store.py` | 撰寫 session 的 JSON 持久化（本機檔案，或 `SGV2_SESSION_STORE=blob` 改存 Blob）；以 `PERSIST_CONTEXT` 序列化，skill 資產全文只在這裡寫出 |
-| `blob_store.py` | Azure Blob 版 Skill 儲存與 `SKILL.md` frontmatter 解析（含含冒號 description 的容錯）；script 型 skill 另存 `scripts/<name>.py`，列表以 `has_script` 標示，`SkillFiles.remove_script` 會刪除既有 script；skill 資產的寫入、清掃、讀取（`load_assets`），刪除 skill 時刪整個 prefix |
+| `blob_store.py` | Azure Blob 版 Skill 儲存與 `SKILL.md` frontmatter 解析（含含冒號 description 的容錯）；script 型 skill 另存 `scripts/<name>.py`，列表以 `has_script` 標示，`SkillFiles.remove_script` 會刪除既有 script；skill 資產的寫入、清掃、讀取（`load_assets`），刪除 skill 時刪整個 prefix；選用的覆寫前完整套件備份與 manifest（獨立歷史容器，不隨 skill 刪除） |
 | `form_conversion.py` | MODIFY session 的 inline ↔ script 機械轉換（`convert_session_form`）：只搬程式碼，不改寫 `SKILL.md` |
 | `skill_assets.py` | Skill 資產的檢查（`check_asset`、`check_asset_set`、`assets_blocked_reason`）：只接受或拒收，不轉換 |
 | `skills_repo.py` | Azure SQL 的 DAO：`dbo.skills` 與 `dbo.user_skill_grants` 的查詢 / upsert / 授權 / 可見性 / 刪除（一律以 `skill_key` 為鍵） |
