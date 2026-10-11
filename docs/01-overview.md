@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | **Skill 作者 / 領域專家** | 想把自己的工作知識（查資料、呼叫某個 API、操作某個系統）包裝成一個可重複使用的 Skill | 「我講得清楚，AI 就能產出正確的 SKILL.md，而且我能馬上測試對不對」 |
 | **平台 / Agent 維運者** | 管理整個 Skill 知識庫，確保新 Skill 不會和既有 Skill 路由衝突 | 「新 Skill 的 description 要夠精準，不要搶到別人的流量，也不要漏接」 |
-| **被授權的使用者** | 透過 `dbo.user_skill_grants` 被授權，或者該 Skill 被標為公開（`is_public`），才看得到與編輯它 | 「我只看得到我該看的 Skill（資料列級隔離 RLS）」 |
+| **被授權的使用者** | 透過 `dbo.user_skill_grants` 被授權，或者該 Skill 被標為公開（`is_public`），即可讀取與使用；只有建立者能修改 | 「我能使用被授權的 Skill，MODIFY 只列出我建立的 Skill」 |
 
 ---
 
@@ -34,7 +34,7 @@
 1. **手寫 `SKILL.md` 很難**：要同時顧到 YAML frontmatter、router 用的 `description`、執行用的內文、環境變數、OBO Token scope，門檻高。
 2. **不知道會不會路由錯**：寫好的 Skill 到底會不會被 Router 在對的問題上選中？會不會搶到鄰近 Skill 的流量？沒有地方測。
 3. **與既有 Skill 重複**：知識庫裡可能已有相似的 Skill，作者不知道該新增還是改既有的。
-4. **權限與隔離**：每個人只能動自己被授權的 Skill。
+4. **權限與隔離**：每個人只能修改自己建立的 Skill；讀取與使用另依 grants 或公開設定決定。
 
 本專案把以上痛點，收斂成一條「對話式、分階段、可測試」的流程。
 
@@ -48,7 +48,7 @@
 - **鄰近 Skill 差異化（Peer Skills）**：載入使用者有權限的其他 Skill，協助把 `description` 的路由邊界寫清楚（何時用、何時不要用）。
 - **路由測試（TEST）**：把正面/負面範例查詢送到設定的 Router runtime endpoint，驗證「該選中時有選中、不該選中時沒選中」，並把結果回饋給 AI 自動修正。端點只需實作 `/run` 契約，可直接連到 runtime，也可選擇經由 APIM 等閘道對外提供；APIM 不是必要元件。請求以 `mode="route_only"` 送出：Router 照常路由並回傳它「本來會執行」的腳本，但**不執行、不寫入任何外部系統**，因此負面樣本不會誤觸有寫入行為的 skill。
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
-- **登入與資料列級隔離（RLS）**：以 Entra 登入後的 email 作為身分，依 `dbo.user_skill_grants` 決定可存取的 Skill。
+- **登入與權限隔離**：以 Entra 登入後的小寫 email 作為身分，依 grants 或公開設定決定可讀取、使用的 Skill；Generator 依 `dbo.skills.created_by` 決定可修改的 Skill，開啟 MODIFY 與每次內容寫入都由後端檢查。
 - **公開 Skill（`is_public`）**：將一個全域 Skill 標為公開，所有登入者即可使用，**不需逐人授權**。前端在「Skill access」彈窗切換，並以 `public` 標記顯示於 Skill 清單與綁定狀態列。
 - **Script 型 Skill**：使用者附上**唯一一份** `code` 素材、確認它涵蓋本 skill 的所有操作，且 EAA 有開啟 script 執行時，產出物會是 `SKILL.md` 加上一支 `scripts/<name>.py`（該素材**原樣**出貨）；否則維持原本的 inline 形式（sample code 寫在 `SKILL.md` 裡）。使用者也可以在 Checklist 的 Output form 直接選擇 inline。素材還不符合 script 的規則時，AI 可以在 PREPARE 提出只動「邊界」的修改（`propose_material_patch`），使用者接受才會生效；進 DRAFT 之後 script 就不再被修改。形式在 PREPARE 決定、進 DRAFT 時鎖定；UI 會在 Materials、Checklist（Output form）、Files 分頁（`SKILL.md | scripts/<name>.py` 切換）與 Skill 清單的 `[script]` 標記顯示目前的形式與尚未滿足的條件。見下方〈Script 型 skill 的限制〉與 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)。
 - **Skill 資產**：在 Materials 分頁上傳 CSS、HTML 範本、對照表等文字檔，存檔時原封不動隨 skill 發佈；EAA 依 `SKILL.md` 的 `## Skill Resources` 讀取；AI 會在該段標示每個檔案是必讀或按需、要內嵌或只供參考，路由測試會檢查必讀的檔案有沒有被讀。AI 不會修改資產。見 [04-agent-mechanism.md 第 7.6 節](04-agent-mechanism.md#76-skill-資產assetsreferences)。

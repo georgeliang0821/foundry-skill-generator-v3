@@ -319,6 +319,7 @@ let activeContextTab = "materials";
 let userPickedContextTab = false;
 let isSending = false;
 let availableSkills = [];
+let modifiableSkills = [];
 let skillsLoaded = false;
 let savedSessions = [];
 let sessionsLoaded = false;
@@ -994,23 +995,16 @@ function renderSkillSelector() {
   if (!isModify) return;
   const currentSkill = session?.remote_skill_id || session?.target_skill_id || selector.value || "";
   if (!skillsLoaded) {
-    selector.innerHTML = currentSkill
-      ? `<option value="${escapeHtml(currentSkill)}">${escapeHtml(currentSkill)} - loading skill list...</option>`
-      : `<option value="">Loading skills...</option>`;
-    if (currentSkill) selector.value = currentSkill;
+    selector.innerHTML = `<option value="">Loading skills...</option>`;
     syncKindSelectToTargetSkill();
     return;
   }
-  if (!availableSkills.length) {
-    selector.innerHTML = currentSkill
-      ? `<option value="${escapeHtml(currentSkill)}">${escapeHtml(currentSkill)} - current session</option>`
-      : `<option value="">No skills you have access to - ask an owner to grant you</option>`;
-    if (currentSkill) selector.value = currentSkill;
+  if (!modifiableSkills.length) {
+    selector.innerHTML = `<option value="">No skills created by you</option>`;
     syncKindSelectToTargetSkill();
     return;
   }
-  const current = currentSkill || selector.value;
-  const currentInList = availableSkills.some((skill) => skill.name === current);
+  const current = modifiableSkills.some((skill) => skill.name === currentSkill) ? currentSkill : "";
   const option = (skill) => {
     const badge = skill.is_public ? " [public]" : "";
     const internalBadge = skill.is_internal ? " [internal]" : "";
@@ -1024,9 +1018,8 @@ function renderSkillSelector() {
     (skills.length ? `<optgroup label="${label}">${skills.map(option).join("")}</optgroup>` : "");
   selector.innerHTML = [
     `<option value="">Select an existing skill</option>`,
-    current && !currentInList ? `<option value="${escapeHtml(current)}">${escapeHtml(current)} - current session</option>` : "",
-    kindGroup("Capability", availableSkills.filter((skill) => skill.skill_kind !== "scenario")),
-    kindGroup("Scenario (orchestration)", availableSkills.filter((skill) => skill.skill_kind === "scenario")),
+    kindGroup("Capability", modifiableSkills.filter((skill) => skill.skill_kind !== "scenario")),
+    kindGroup("Scenario (orchestration)", modifiableSkills.filter((skill) => skill.skill_kind === "scenario")),
   ].join("");
   if (current) selector.value = current;
   syncKindSelectToTargetSkill();
@@ -1040,7 +1033,7 @@ function syncKindSelectToTargetSkill() {
   const picked = (el("targetSkill")?.value || "").trim();
   const bound = session?.remote_skill_id || session?.target_skill_id || "";
   const kind = (bound && (!picked || picked === bound) && session?.skill_kind)
-    || availableSkills.find((skill) => skill.name === picked)?.skill_kind
+    || modifiableSkills.find((skill) => skill.name === picked)?.skill_kind
     || "";
   el("skillKindSelect").value = kind;
   el("kindHelp").textContent = kindHelp[kind] || "";
@@ -6311,7 +6304,7 @@ bind("sessionList", "change", async () => {
   if (sessionId && sessionId !== session?.id) await resumeSession(sessionId);
 });
 bind("modeSelect", "change", async () => {
-  if (el("modeSelect").value === "modify") await refreshSkills();
+  if (el("modeSelect").value === "modify" && !skillsLoaded) await refreshSkills();
   renderSession();
   renderSessionSelector();
 });
@@ -6791,19 +6784,28 @@ async function doSaveTestSamples(choice) {
 }
 
 async function refreshSkills() {
+  const selectedSkill = el("targetSkill")?.value || "";
   skillsLoaded = false;
   renderSkillSelector();
   try {
     const storeFilter = session && session.blob_store_id ? session.blob_store_id : undefined;
     if (storeFilter) dbgLog("skills.refresh", "store filter", { store: storeFilter });
-    availableSkills = await listSkills(storeFilter);
+    [availableSkills, modifiableSkills] = await Promise.all([
+      listSkills(storeFilter),
+      listSkills(storeFilter, "modify"),
+    ]);
     skillsLoaded = true;
   } catch (err) {
     availableSkills = [];
+    modifiableSkills = [];
     skillsLoaded = true;
     appendMessage("assistant", `Could not load existing skills: ${err.message}`);
   }
   renderSkillSelector();
+  if (selectedSkill && modifiableSkills.some((skill) => skill.name === selectedSkill)) {
+    el("targetSkill").value = selectedSkill;
+    syncKindSelectToTargetSkill();
+  }
 }
 
 async function refreshSessions() {
@@ -6963,9 +6965,7 @@ async function handleRefreshSkillsClick() {
   if (btn) btn.disabled = true;
   try {
     await refreshSkillsCache();
-    if (typeof loadSkills === "function") {
-      await loadSkills();
-    }
+    await refreshSkills();
   } catch (err) {
     console.warn("[v7] refresh skills failed", err);
   } finally {

@@ -148,3 +148,38 @@ def test_require_upn_dependency_raises_401_when_anonymous():
     with pytest.raises(HTTPException) as info:
         dep(Req())
     assert info.value.status_code == 401
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_creator_can_modify_without_usage_grant(fake_sql, public):
+    fake_sql.upsert_skill("mine", created_by="author@x", is_public=public)
+    acl_mod.assert_can_modify("author@x", "mine")
+    assert acl_mod.can_modify(" Author@X ", "mine")
+
+
+@pytest.mark.parametrize("creator", [None, "", "other@x"])
+@pytest.mark.parametrize("public", [False, True])
+def test_grant_or_public_does_not_allow_modification(fake_sql, creator, public):
+    fake_sql.upsert_skill("shared", created_by=creator, is_public=public)
+    fake_sql.add_grant("shared", "reader@x")
+    acl_mod.assert_can_access("reader@x", "shared")
+    with pytest.raises(HTTPException) as info:
+        acl_mod.assert_can_modify("reader@x", "shared")
+    assert info.value.status_code == 403
+
+
+def test_modify_does_not_cache_creator(fake_sql):
+    fake_sql.upsert_skill("mine", created_by="author@x")
+    assert acl_mod.can_modify("author@x", "mine")
+    fake_sql.skills["mine"]["created_by"] = "other@x"
+    assert not acl_mod.can_modify("author@x", "mine")
+    fake_sql.skills["mine"]["created_by"] = "author@x"
+    fake_sql.skills["mine"]["enabled"] = False
+    assert not acl_mod.can_modify("author@x", "mine")
+
+
+def test_modify_missing_and_anonymous(fake_sql):
+    assert not acl_mod.can_modify("author@x", "missing")
+    with pytest.raises(HTTPException) as info:
+        acl_mod.assert_can_modify("", "missing")
+    assert info.value.status_code == 401

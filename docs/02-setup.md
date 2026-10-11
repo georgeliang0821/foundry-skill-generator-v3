@@ -112,8 +112,9 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 1. Azure 入口網站 → SQL database 的 Overview：**Server name** → `AZURE_SQL_SERVER`（例如 `your-server.database.windows.net`），資料庫名稱 → `AZURE_SQL_DATABASE`。
 2. 確認 `sql-database-permission.sql` Case C 中的 service principal 名稱就是 [2.2](#22-後端-service-principal) 那一支。Case C 只授予 `dbo.skills` 與 `dbo.user_skill_grants` 的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`；本專案也只需要這些。若名稱不同，請 EAA 管理員以這支 service principal 重新執行 Case C。
 3. 確認 SQL Server 的防火牆允許你本機的 IP。
+4. 確認 `dbo.skills` 具有 `created_by VARCHAR(256) NULL` 欄位，且沒有以 SQL 連線身分填值的預設值。Generator 首次儲存時由後端填入已驗證登入者的小寫 email；內容更新與重新命名保留建立者。空白建立者不會列入 MODIFY，也不能修改；需要修改的資料由管理員確認建立者後補登，不從 grants 推定。
 
-> 所有使用者共用這個連線身分；寫進 `dbo.user_skill_grants` 的仍是各自登入者的 email。細節見 [03-architecture.md](03-architecture.md#5-資料庫細節azure-sql--skill-rbac-schema-v22)。
+> 所有使用者共用這個連線身分；`dbo.skills.created_by` 與 `dbo.user_skill_grants` 記錄的是應用程式使用者，而不是 service principal。公開設定與 grants 只提供讀取、使用權，不授予內容修改權。細節見 [03-architecture.md](03-architecture.md#5-資料庫細節azure-sql)。
 
 ### 2.5 Azure Blob
 

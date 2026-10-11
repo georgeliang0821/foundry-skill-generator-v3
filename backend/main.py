@@ -832,13 +832,10 @@ def _extract_description(skill_md: str) -> str:
 
 
 def _user_can_modify_skill(user_upn: str, name: str) -> bool:
-    """True only when ``name`` is in the user's modifiable set: granted in
-    SQL (ACL) AND readable in the active blob store. Mirrors the SQL-grant
-    intersect blob-presence rule used by the modify-skill list.
-    """
+    """Creator-owned, enabled SQL skill with content in the active store."""
     if not user_upn or not name:
         return False
-    if not acl_mod.can_access(user_upn, name):
+    if not acl_mod.can_modify(user_upn, name):
         return False
     try:
         store.load_skill(name)
@@ -975,7 +972,7 @@ def _finalize_skill_rename(
 
     Called only AFTER the new skill is fully committed (blob + SQL + grant).
     Strictly gated: the old skill is deleted only if it is in the current
-    user's modifiable set (SQL grant intersect blob presence). Best-effort: a
+    user's modifiable set (SQL creator intersect blob presence). Best-effort: a
     cleanup failure is logged but never breaks the just-saved new skill.
     """
     if not _user_can_modify_skill(user_upn, old_name):
@@ -987,7 +984,7 @@ def _finalize_skill_rename(
             old_name=old_name,
             new_name=new_name,
         )
-        _warn_rename_cleanup(session, old_name, new_name, "you no longer have access to it")
+        _warn_rename_cleanup(session, old_name, new_name, "you no longer have creator modification rights")
         return
     # Grants hang off skill_key, so deleting the old row cascades every share
     # away. Copy them first, and abort the delete if that fails -- losing the
@@ -1064,6 +1061,21 @@ def save_skill_dual_write(
     # SQL metadata, and grants.
     started = now_ms()
     skill_name = infer_skill_name(session, requested_name)
+    old_name = safe_skill_name(session.remote_skill_id) if (session.remote_skill_id or "").strip() else ""
+    if session.mode == "modify" and not old_name:
+        raise HTTPException(status_code=403, detail="Modify requires an existing creator-owned skill.")
+    source_row = None
+    if old_name:
+        acl_mod.assert_can_modify(user_upn, old_name)
+        source_row = skills_repo.get_skill(old_name)
+        if source_row is None:
+            raise HTTPException(status_code=403, detail="The source skill no longer exists in SQL.")
+    is_rename = bool(old_name) and old_name != skill_name
+    existing = skills_repo.get_skill(skill_name)
+    if existing is not None and not is_rename:
+        acl_mod.assert_can_modify(user_upn, skill_name)
+    if existing is None and not is_rename and _skill_name_taken(skill_name):
+        raise HTTPException(status_code=409, detail="Skill content already exists without matching SQL metadata.")
     kind = SkillKind(session.skill_kind)
     issues = validate_topology(
         session.current_skill.skill_md,
@@ -1081,7 +1093,6 @@ def save_skill_dual_write(
     if kind is SkillKind.SCENARIO:
         _load_child_full_md(session)
     # Before the content lint, whose F2/F3 rules read the merged asset set.
-    old_name = safe_skill_name(session.remote_skill_id) if (session.remote_skill_id or "").strip() else ""
     if old_name and not session.assets_synced:
         merged = {asset.path: asset for asset in _load_stored_assets(session, old_name)}
         merged.update({asset.path: asset for asset in session.assets})
@@ -1141,8 +1152,6 @@ def save_skill_dual_write(
             },
         )
 
-    is_rename = bool(old_name) and old_name != skill_name
-    existing = skills_repo.get_skill(skill_name)
     if is_rename and _skill_name_taken(skill_name, existing):
         raise HTTPException(
             status_code=409,
@@ -1157,9 +1166,7 @@ def save_skill_dual_write(
                 ),
             },
         )
-    old_row = skills_repo.get_skill(old_name) if is_rename else None
-    if existing is not None:
-        acl_mod.assert_can_access(user_upn, skill_name)
+    old_row = source_row if is_rename else None
     script = session.current_skill.script
     if script is None and existing is not None and store.has_script(skill_name) and not session.script_removed:
         raise HTTPException(
@@ -1177,6 +1184,8 @@ def save_skill_dual_write(
     # Overwriting the skill this session loaded must not clobber a concurrent write (e.g. a
     # Gatekeeper Addendum); a rename writes a new path, and a first save has nothing to match.
     expected_version = session.remote_version_hash if old_name == skill_name else ""
+    if existing is not None and not expected_version:
+        expected_version = store.load_skill(skill_name).version_hash
     # Saving is a content action. Visibility is owned solely by
     # PATCH /api/skills/{name}/visibility, so it is only ever inherited here --
     # on a rename from the row being renamed, since the new name has none yet.
@@ -1203,8 +1212,10 @@ def save_skill_dual_write(
         if_match=bool(expected_version),
     )
     try:
-        saved = store.save_skill(files, expected_version)
+        saved = store.save_skill(files, expected_version, create_only=existing is None)
     except VersionConflict as exc:
+        if existing is None:
+            raise HTTPException(status_code=409, detail="Skill name was claimed while saving; choose a different name.") from exc
         raise HTTPException(
             status_code=409,
             detail={
@@ -1222,6 +1233,7 @@ def save_skill_dual_write(
         # hidden capability child reappears in the host catalog under its new name.
         skills_repo.upsert_skill(
             saved.name,
+            created_by=source_row.created_by if source_row is not None else user_upn,
             is_public=is_public,
             is_internal=old_row.is_internal if old_row is not None else None,
         )
@@ -2504,6 +2516,8 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
 @app.post("/api/sessions")
 def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -> Session:
     started = now_ms()
+    if req.mode == "modify" and not req.target_skill_id:
+        raise HTTPException(status_code=400, detail="Select a skill you created before starting MODIFY.")
     log_event(
         "session.create.start",
         mode=req.mode,
@@ -2523,11 +2537,11 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
     if req.mode == "modify" and req.target_skill_id and req.start_stage == "refine":
         session.current_stage = Stage.REFINE
     if req.mode == "modify" and req.target_skill_id:
-        # ACL: cannot create a session targeting a skill the user has no grant on.
+        # ACL: only the creator may open a modification session.
         # Convert 403 -> 404 so we do not leak the existence of skills the user
         # has no permission to see.
         try:
-            acl_mod.assert_can_access(upn, req.target_skill_id)
+            acl_mod.assert_can_modify(upn, req.target_skill_id)
         except HTTPException as exc:
             if exc.status_code == 403:
                 raise HTTPException(status_code=404, detail="Skill not found") from exc
@@ -2791,6 +2805,9 @@ def e2e_reset() -> dict[str, Any]:
     require_e2e_mode()
     global store, session_store, sessions, auth_tokens, oauth_states, agent
     store = CachedSkillStore(LocalSkillStore())
+    if os.getenv("SGV2_SKILL_STORE", "azure").strip().lower() == "local":
+        skills_repo.make_skills_repo()
+    acl_mod.get_cache().invalidate()
     session_store = LocalSessionStore()
     for path in session_store.root.glob("*.json"):
         try:
@@ -2825,7 +2842,7 @@ def e2e_seed_skill(payload: dict[str, Any]) -> SkillFiles:
         files.script = str(payload["script"])
     saved = store.save_skill(files)
     user_upn = str(payload.get("user_upn") or acl_mod.e2e_default_upn() or "e2e@example.com").strip().lower()
-    skills_repo.upsert_skill(saved.name)
+    skills_repo.upsert_skill(saved.name, created_by=user_upn)
     skills_repo.add_grant(saved.name, user_upn, granted_by=user_upn)
     acl_mod.get_cache().invalidate(user_upn)
     log_event("e2e.seed_skill.done", skill_name=saved.name)
@@ -4085,8 +4102,9 @@ def neighbor_edit_select(session_id: str, skill: str, req: NeighborSelectRequest
 @app.post("/api/sessions/{session_id}/neighbor-edits/{skill}/save")
 def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_upn)) -> Session:
     """Write the selected version of a neighbor skill to Blob + SQL. Gated by the
-    user's modify rights (readable == modifiable)."""
+    authenticated creator's modify rights."""
     session = get_session_for_user(session_id, upn)
+    acl_mod.assert_can_modify(upn, safe_skill_name(skill))
     ne = _get_or_init_neighbor_edit(session, skill)
     version = _neighbor_version(ne, ne.selected_version_id)
     if version is None:
@@ -4233,13 +4251,17 @@ def test_session_skill(session_id: str, req: RunSessionTestRequest, request: Req
 def list_skills(
     upn: str = Depends(require_upn),
     store_filter: str | None = Query(default=None, alias="store", description="Optional blob_store_id filter."),
+    purpose: str = Query(default="read", pattern="^(read|modify)$"),
 ):
     started = now_ms()
     store_id = _active_store_id()
     log_event("skills.list.start", user_upn=upn, store_filter=store_filter or "", active_store_id=store_id)
-    # 1) SQL: get skills the user has grants on (already enabled-only).
+    # 1) SQL: enabled readable skills, or creator-owned skills for MODIFY.
     try:
-        sql_rows = skills_repo.list_skills_for_user(upn)
+        sql_rows = (
+            skills_repo.list_skills_created_by(upn) if purpose == "modify"
+            else skills_repo.list_skills_for_user(upn)
+        )
     except Exception as exc:  # noqa: BLE001
         log_exception("skills.list.sql_failed", exc, user_upn=upn)
         raise HTTPException(
@@ -4270,8 +4292,7 @@ def list_skills(
             ),
         ) from exc
     blob_names = {s.name for s in blob_skills}
-    # 3) Intersection of (SQL grants) AND (Blob exists). Skills present in only
-    #    one side are intentionally hidden from modify mode.
+    # 3) Intersect the requested SQL permission set with Blob presence.
     visible_names = set(sql_by_name) & blob_names
     sql_only = sorted(set(sql_by_name) - blob_names)
     blob_only = sorted(blob_names - set(sql_by_name))
@@ -4291,6 +4312,7 @@ def list_skills(
         # description stays whatever the blob frontmatter says -- dbo.skills has
         # no description column since schema v2.
         payload["enabled"] = bool(sql_row.enabled)
+        payload["created_by"] = sql_row.created_by or ""
         payload["is_public"] = bool(sql_row.is_public)
         payload["is_internal"] = bool(sql_row.is_internal)
         payload["skill_scope"] = sql_row.skill_scope

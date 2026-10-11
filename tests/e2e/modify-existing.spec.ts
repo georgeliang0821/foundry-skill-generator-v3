@@ -8,6 +8,46 @@ test.beforeEach(async ({ request }) => {
   await resetE2E(request);
 });
 
+test("modify selector excludes other creators' granted and public skills", async ({ page, request }) => {
+  await seedSkill(request, "my-skill");
+  const headers = { "X-Test-UPN": "other@example.com" };
+  for (const name of ["granted-skill", "public-skill"]) {
+    const seeded = await request.post("/api/e2e/seed-skill", { data: { name, user_upn: "other@example.com" } });
+    expect(seeded.ok()).toBeTruthy();
+  }
+  expect((await request.post("/api/skills/granted-skill/grants", {
+    headers, data: { user_upn: "e2e@example.com" },
+  })).ok()).toBeTruthy();
+  expect((await request.patch("/api/skills/public-skill/visibility", {
+    headers, data: { is_public: true },
+  })).ok()).toBeTruthy();
+  await openApp(page);
+  await page.getByTestId("mode-select").selectOption("modify");
+  const selector = page.getByTestId("target-skill-select");
+  await expect(selector.locator("option[value='my-skill']")).toHaveCount(1);
+  await expect(selector.locator("option[value='granted-skill']")).toHaveCount(0);
+  await expect(selector.locator("option[value='public-skill']")).toHaveCount(0);
+});
+
+test("modify selector does not reinsert an unauthorized current session target", async ({ page, request }) => {
+  await seedSkill(request, "my-skill");
+  await openApp(page);
+  await page.getByTestId("mode-select").selectOption("modify");
+  await page.getByTestId("target-skill-select").selectOption("my-skill");
+  await startNewSession(page, "modify");
+  await page.route("**/api/skills?*", async (route) => {
+    if (new URL(route.request().url()).searchParams.get("purpose") === "modify") {
+      await route.fulfill({ json: [] });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.getByTestId("refresh-skills-button").click();
+  const selector = page.getByTestId("target-skill-select");
+  await expect(selector).toContainText("No skills created by you");
+  await expect(selector.locator("option[value='my-skill']")).toHaveCount(0);
+});
+
 test("loads and modifies an existing local skill", async ({ page, request }) => {
   await seedSkill(request, "e2e-existing-skill");
   await setScenario(request, "modify_existing");

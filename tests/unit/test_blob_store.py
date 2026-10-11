@@ -169,6 +169,57 @@ def test_local_store_rejects_stale_expected_version() -> None:
         store.save_skill(SkillFiles(name="demo", skill_md="changed"), expected_version_hash="stale")
 
 
+def test_local_store_create_only_keeps_existing_package() -> None:
+    store = LocalSkillStore()
+    original = SkillFiles(name="demo", skill_md="original", script="original script", assets={"assets/a.txt": "original"})
+    store.save_skill(original, create_only=True)
+    with pytest.raises(VersionConflict):
+        store.save_skill(SkillFiles(name="demo", skill_md="replacement", script="replacement", assets={}), create_only=True)
+    assert store.load_skill("demo").skill_md == "original"
+    assert store.load_skill("demo").script == "original script"
+    assert store.load_assets("demo") == {"assets/a.txt": b"original"}
+
+
+def test_local_store_concurrent_create_only_has_one_winner() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = LocalSkillStore()
+
+    def create(content):
+        try:
+            store.save_skill(SkillFiles(name="demo", skill_md=content), create_only=True)
+            return content
+        except VersionConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winners = [result for result in executor.map(create, ["first", "second"]) if result is not None]
+    assert len(winners) == 1
+    assert store.load_skill("demo").skill_md == winners[0]
+
+
+def test_local_store_expected_version_does_not_recreate_deleted_skill() -> None:
+    store = LocalSkillStore()
+    original = store.save_skill(SkillFiles(name="demo", skill_md="original"))
+    store.delete_skill("demo")
+    with pytest.raises(VersionConflict):
+        store.save_skill(original, original.version_hash)
+
+
+def test_azure_create_only_does_not_overwrite_package() -> None:
+    container = _FakeBlobContainer({"skills/demo/SKILL.md": b"original", "skills/demo/scripts/demo.py": b"script"})
+    store = _azure_store(container)
+    with pytest.raises(VersionConflict):
+        store.save_skill(SkillFiles(name="demo", skill_md="replacement", assets={}, script="replacement"), create_only=True)
+    assert container.blobs == {"skills/demo/SKILL.md": b"original", "skills/demo/scripts/demo.py": b"script"}
+
+
+def test_azure_create_only_accepts_new_skill() -> None:
+    container = _FakeBlobContainer({})
+    _azure_store(container).save_skill(SkillFiles(name="demo", skill_md="new"), create_only=True)
+    assert container.blobs["skills/demo/SKILL.md"] == b"new"
+
+
 def test_script_path_is_named_after_the_skill() -> None:
     assert script_relpath_of("Room Finder") == "scripts/room-finder.py"
     assert script_blob_path_of("room-finder") == "skills/room-finder/scripts/room-finder.py"
@@ -267,6 +318,9 @@ class _FakeBlobContainer:
 
         class _Client:
             def upload_blob(self, data, overwrite=False, content_settings=None, **_kw):
+                if not overwrite and name in container.blobs:
+                    from azure.core.exceptions import ResourceExistsError
+                    raise ResourceExistsError("Already exists")
                 container.blobs[name] = data
                 if content_settings is not None:
                     container.content_types[name] = content_settings.content_type

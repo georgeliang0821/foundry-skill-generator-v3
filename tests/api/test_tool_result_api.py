@@ -293,6 +293,7 @@ def test_accept_rename_skill_moves_blob_sql_and_grant(client, backend_main, gran
     with pytest.raises(Exception):
         backend_main.store.load_skill("old-skill")
     assert "new-skill" in fake_sql.skills and "old-skill" not in fake_sql.skills
+    assert fake_sql.skills["new-skill"]["created_by"] == "test@example.com"
     assert ("test@example.com", "new-skill") in fake_sql.grants
 
 
@@ -322,6 +323,32 @@ def test_rename_skill_preserves_is_internal(client, backend_main, grant_skill, f
 
     assert response.status_code == 200
     assert fake_sql.skills["new-skill"]["is_internal"] is True
+
+
+def test_rename_creator_without_grants_keeps_creator(client, backend_main, grant_skill, fake_sql) -> None:
+    session = _persisted_refine_session(backend_main, grant_skill, "old-skill", mode="modify")
+    fake_sql.grants.clear()
+    response = client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": "call_rename", "result": {"action": "accept"}},
+    )
+    assert response.status_code == 200
+    assert "old-skill" not in fake_sql.skills
+    assert fake_sql.skills["new-skill"]["created_by"] == "test@example.com"
+
+
+def test_rename_rechecks_source_creator_before_any_destination_write(client, backend_main, grant_skill, fake_sql) -> None:
+    session = _persisted_refine_session(backend_main, grant_skill, "old-skill", mode="modify")
+    original = backend_main.store.load_skill("old-skill")
+    fake_sql.skills["old-skill"]["created_by"] = "other@x"
+    client.post(
+        f"/api/sessions/{session.id}/tool-result",
+        json={"tool_call_id": "call_rename", "result": {"action": "accept"}},
+    )
+    assert "new-skill" not in fake_sql.skills
+    assert backend_main.store.load_skill("old-skill").skill_md == original.skill_md
+    with pytest.raises(FileNotFoundError):
+        backend_main.store.load_skill("new-skill")
 
 
 def test_rename_skill_preserves_is_public(client, backend_main, grant_skill, fake_sql) -> None:

@@ -6,6 +6,7 @@ import hashlib
 import mimetypes
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
@@ -194,7 +195,7 @@ class SkillStore(Protocol):
     def store_id(self) -> str: ...
     def list_skills(self) -> list[SkillIndexEntry]: ...
     def load_skill(self, name: str) -> SkillFiles: ...
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles: ...
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles: ...
     def delete_skill(self, name: str) -> None: ...
     def has_script(self, name: str) -> bool: ...
     def load_assets(self, name: str) -> dict[str, bytes]: ...
@@ -205,6 +206,7 @@ class LocalSkillStore:
 
     def __init__(self) -> None:
         self._skills: dict[str, SkillFiles] = {}
+        self._lock = threading.RLock()
         # Raw bytes so a test can plant a file that would fail the asset checks.
         self._assets: dict[str, dict[str, bytes]] = {}
         self.id = "local"
@@ -241,11 +243,17 @@ class LocalSkillStore:
         log_event("skill_store.local.load.done", skill_name=safe, duration_ms=elapsed_ms(started))
         return files
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
+        with self._lock:
+            return self._save_skill(files, expected_version_hash, create_only=create_only)
+
+    def _save_skill(self, files: SkillFiles, expected_version_hash: str, *, create_only: bool) -> SkillFiles:
         started = now_ms()
         safe = safe_skill_name(files.name)
         current = self._skills.get(safe)
-        if expected_version_hash and current and current.version_hash != expected_version_hash:
+        if create_only and current is not None:
+            raise VersionConflict("Skill already exists; choose a different name.")
+        if expected_version_hash and (current is None or current.version_hash != expected_version_hash):
             log_event("skill_store.local.save.version_mismatch", level="warning", skill_name=safe)
             raise VersionConflict("Version hash mismatch; reload latest skill before saving.")
         saved = files.model_copy(deep=True)
@@ -472,9 +480,9 @@ class AzureBlobSkillStore:
             container.delete_blob(blob_name)
         log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
         from azure.core import MatchConditions
-        from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
+        from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
         from azure.storage.blob import ContentSettings
 
         safe = safe_skill_name(files.name)
@@ -492,7 +500,7 @@ class AzureBlobSkillStore:
         try:
             skill_blob.upload_blob(
                 files.skill_md.encode("utf-8"),
-                overwrite=True,
+                overwrite=not create_only,
                 content_settings=ContentSettings(content_type="text/markdown; charset=utf-8"),
                 **kwargs,
             )
@@ -511,9 +519,13 @@ class AzureBlobSkillStore:
                     container.delete_blob(self._script_path(safe))
                 except ResourceNotFoundError:
                     pass
-        except ResourceModifiedError as exc:
+        except (ResourceModifiedError, ResourceExistsError) as exc:
             log_event("skill_store.azure.save.version_mismatch", level="warning", skill_name=safe)
             raise VersionConflict("SKILL.md changed on Blob since it was loaded; reload latest skill before saving.") from exc
+        except ResourceNotFoundError as exc:
+            if expected_version_hash:
+                raise VersionConflict("SKILL.md was deleted since it was loaded.") from exc
+            raise
         except Exception as exc:
             log_exception(
                 "skill_store.azure.save.failed",
@@ -590,8 +602,8 @@ class CachedSkillStore:
     def load_skill(self, name: str) -> SkillFiles:
         return self.store.load_skill(name)
 
-    def save_skill(self, files: SkillFiles, expected_version_hash: str = "") -> SkillFiles:
-        saved = self.store.save_skill(files, expected_version_hash)
+    def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False) -> SkillFiles:
+        saved = self.store.save_skill(files, expected_version_hash, create_only=create_only)
         self._index = None
         self._expires_at = None
         return saved

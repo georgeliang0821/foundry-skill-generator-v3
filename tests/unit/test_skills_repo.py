@@ -227,3 +227,52 @@ def test_local_repo_delete_cascades_grants(local_repo):
     skills_repo.delete_skill("child")
     assert skills_repo.get_skill("child") is None
     assert skills_repo.list_grants("child") == []
+
+
+def test_creator_is_normalized_and_immutable(local_repo):
+    skills_repo.upsert_skill("mine", created_by=" Author@X ")
+    skills_repo.upsert_skill("mine", created_by="other@x", is_public=True)
+    assert skills_repo.get_skill("mine").created_by == "author@x"
+    skills_repo.upsert_skill("legacy")
+    skills_repo.upsert_skill("legacy", created_by="author@x")
+    assert skills_repo.get_skill("legacy").created_by is None
+
+
+def test_creator_list_is_independent_of_grants_and_public(local_repo):
+    skills_repo.upsert_skill("mine", created_by="author@x")
+    skills_repo.upsert_skill("public", created_by="other@x", is_public=True)
+    skills_repo.upsert_skill("granted", created_by="other@x")
+    skills_repo.add_grant("granted", "author@x")
+    skills_repo.upsert_skill("disabled", created_by="author@x", enabled=False)
+    assert [row.skill_name for row in skills_repo.list_skills_created_by(" Author@X ")] == ["mine"]
+    assert skills_repo.list_skills_created_by("") == []
+
+
+def test_sql_creator_is_insert_only(fake_db):
+    captured = {}
+
+    def behavior(sql, params):
+        captured.update(sql=sql, params=params)
+        return [_row("INSERT")]
+
+    fake_db["execute"] = behavior
+    skills_repo.upsert_skill("mine", created_by=" Author@X ")
+    update = captured["sql"].split("WHEN MATCHED THEN")[1].split("WHEN NOT MATCHED THEN")[0]
+    assert "created_by" not in update
+    assert "source.created_by" in captured["sql"]
+    assert captured["params"][3] == "author@x"
+
+
+def test_sql_creator_list_does_not_require_grants(fake_db):
+    captured = {}
+
+    def behavior(sql, params):
+        captured.update(sql=sql, params=params)
+        return [_row("mine", "mine", None, False, False, True, None, None, "author@x")]
+
+    fake_db["execute"] = behavior
+    assert skills_repo.list_skills_created_by("author@x")[0].created_by == "author@x"
+    assert "s.created_by = ?" in captured["sql"]
+    assert "s.enabled = 1" in captured["sql"]
+    assert "user_skill_grants" not in captured["sql"]
+    assert captured["params"] == ("author@x",)

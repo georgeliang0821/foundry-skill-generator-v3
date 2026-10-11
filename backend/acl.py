@@ -168,5 +168,24 @@ def can_access(user_upn: str, skill_name: str) -> bool:
     return skill_name in _cache.get_or_load(user_upn)
 
 
+def can_modify(user_upn: str, skill_name: str) -> bool:
+    if not user_upn or not skill_name:
+        return False
+    row = skills_repo.get_skill(skill_name)
+    return bool(
+        row and row.enabled and row.created_by
+        and row.created_by.strip().lower() == user_upn.strip().lower()
+    )
+
+
+def assert_can_modify(user_upn: str, skill_name: str) -> None:
+    if not user_upn:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    if not skill_name:
+        raise HTTPException(status_code=400, detail="skill_name required.")
+    if not can_modify(user_upn, skill_name):
+        raise HTTPException(status_code=403, detail="Only the skill creator can modify this skill.")
+
+
 def visible_skill_names(user_upn: str) -> frozenset[str]:
     return _cache.get_or_load(user_upn)

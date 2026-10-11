@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from tests.conftest import TEST_UPN
+import pytest
 
 
 
@@ -136,18 +137,123 @@ def test_save_creates_sql_row_and_self_grant(client, backend_main, fake_sql):
     sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     client.put(
         f"/api/sessions/{sid}/draft",
-        json={"skill_md": "---\nname: new-saver\ndescription: Hello\n---\n"},
+        json={"skill_md": "---\nname: new-saver\ndescription: Hello\n---\n", "created_by": "spoofed@x"},
     )
-    r = client.post(f"/api/sessions/{sid}/save", json={"name": "new-saver"})
+    r = client.post(f"/api/sessions/{sid}/save", json={"name": "new-saver", "created_by": "spoofed@x"})
     assert r.status_code == 200
     # SQL row created.
     assert "new-saver" in fake_sql.skills
     assert fake_sql.skills["new-saver"]["is_public"] is False
+    assert fake_sql.skills["new-saver"]["created_by"] == TEST_UPN
     # Self-grant created.
     assert (TEST_UPN, "new-saver") in fake_sql.grants
     # User can now list it.
     listed = client.get("/api/skills").json()
     assert any(item["name"] == "new-saver" for item in listed)
+
+
+def test_modify_list_only_includes_creator_not_readers(client, backend_main, fake_sql):
+    for name, creator, public in (
+        ("mine", TEST_UPN, False), ("shared", "other@x", False),
+        ("public", "other@x", True), ("legacy", None, True),
+        ("disabled", TEST_UPN, False),
+    ):
+        backend_main.store.save_skill(backend_main.SkillFiles(name=name, skill_md=f"---\nname: {name}\n---\n"))
+        fake_sql.upsert_skill(name, created_by=creator, is_public=public, enabled=name != "disabled")
+    fake_sql.add_grant("shared", TEST_UPN)
+    fake_sql.upsert_skill("sql-only", created_by=TEST_UPN)
+    assert {entry["name"] for entry in client.get("/api/skills?purpose=modify").json()} == {"mine"}
+    assert {entry["name"] for entry in client.get("/api/skills").json()} == {"shared", "public", "legacy"}
+    response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "mine"})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("creator", [None, "other@x"])
+@pytest.mark.parametrize("public", [False, True])
+def test_modify_denies_noncreator_even_with_access(client, backend_main, fake_sql, creator, public):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="shared", skill_md="---\nname: shared\n---\n"))
+    fake_sql.upsert_skill("shared", created_by=creator, is_public=public)
+    fake_sql.add_grant("shared", TEST_UPN)
+    assert client.get("/api/skills/shared").status_code == 200
+    response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "shared"})
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("creator", [None, "other@x"])
+def test_new_same_name_cannot_overwrite_noncreator(client, backend_main, fake_sql, creator):
+    original = backend_main.store.save_skill(backend_main.SkillFiles(name="shared", skill_md="---\nname: shared\n---\nOriginal"))
+    fake_sql.upsert_skill("shared", created_by=creator, is_public=True)
+    sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: shared\n---\nChanged"})
+    response = client.post(f"/api/sessions/{sid}/save", json={"name": "shared"})
+    assert response.status_code == 403
+    assert backend_main.store.load_skill("shared").skill_md == original.skill_md
+    assert fake_sql.skills["shared"]["created_by"] == creator
+
+
+def test_old_modify_session_rechecks_creator_before_write(client, backend_main, fake_sql):
+    original = backend_main.store.save_skill(backend_main.SkillFiles(name="mine", skill_md="---\nname: mine\n---\nOriginal"))
+    fake_sql.upsert_skill("mine", created_by=TEST_UPN)
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "mine"}).json()["id"]
+    fake_sql.skills["mine"]["created_by"] = "other@x"
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: mine\n---\nChanged"})
+    response = client.post(f"/api/sessions/{sid}/save", json={"name": "mine"})
+    assert response.status_code == 403
+    assert backend_main.store.load_skill("mine").skill_md == original.skill_md
+
+
+def test_creator_can_save_without_usage_grant(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="mine", skill_md="---\nname: mine\n---\nOriginal"))
+    fake_sql.upsert_skill("mine", created_by=TEST_UPN)
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "mine"}).json()["id"]
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: mine\n---\nChanged"})
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "mine"}).status_code == 200
+    assert "Changed" in backend_main.store.load_skill("mine").skill_md
+    assert fake_sql.skills["mine"]["created_by"] == TEST_UPN
+
+
+@pytest.mark.parametrize("creator", [None, "other@x"])
+def test_neighbor_save_denies_noncreator_without_writing(client, backend_main, fake_sql, monkeypatch, creator):
+    original = backend_main.store.save_skill(backend_main.SkillFiles(name="shared", skill_md="---\nname: shared\n---\nOriginal"))
+    fake_sql.upsert_skill("shared", created_by=creator, is_public=True)
+    fake_sql.add_grant("shared", TEST_UPN)
+    sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    response = client.post(f"/api/sessions/{sid}/neighbor-edits/shared/propose", json={"skill_md": "Changed"})
+    assert response.status_code == 200
+
+    def no_write(*args, **kwargs):
+        pytest.fail("An unauthorized modification attempted a write")
+
+    monkeypatch.setattr(backend_main.store, "save_skill", no_write)
+    monkeypatch.setattr(backend_main.skills_repo, "upsert_skill", no_write)
+    assert client.post(f"/api/sessions/{sid}/neighbor-edits/shared/save").status_code == 403
+    assert backend_main.store.load_skill("shared").skill_md == original.skill_md
+
+
+def test_competing_create_cannot_overwrite_winner_or_claim_creator(client, backend_main, fake_sql, monkeypatch):
+    sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: racing\n---\nLosing draft"})
+    save = backend_main.store.save_skill
+
+    def race(files, expected_version_hash="", *, create_only=False):
+        save(backend_main.SkillFiles(name="racing", skill_md="Winning draft"), create_only=True)
+        fake_sql.upsert_skill("racing", created_by="winner@x")
+        return save(files, expected_version_hash, create_only=create_only)
+
+    monkeypatch.setattr(backend_main.store, "save_skill", race)
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "racing"}).status_code == 409
+    assert backend_main.store.load_skill("racing").skill_md == "Winning draft"
+    assert fake_sql.skills["racing"]["created_by"] == "winner@x"
+    assert (TEST_UPN, "racing") not in fake_sql.grants
+
+
+def test_orphan_blob_cannot_be_claimed_by_new_save(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="orphan", skill_md="Original"))
+    sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: orphan\n---\nChanged"})
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "orphan"}).status_code == 409
+    assert backend_main.store.load_skill("orphan").skill_md == "Original"
+    assert "orphan" not in fake_sql.skills
 
 
 # ---------------------------------------------------------------------------

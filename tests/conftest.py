@@ -41,6 +41,7 @@ class _FakeSqlState:
         name: str,
         *,
         owner_upn=None,
+        created_by=None,
         is_public: bool = False,
         enabled: bool = True,
         is_internal: bool | None = None,
@@ -52,6 +53,7 @@ class _FakeSqlState:
             self.skills[key] = {
                 "skill_name": name,
                 "owner_upn": owner_upn or None,
+                "created_by": (created_by or "").strip().lower() or None,
                 "is_public": is_public,
                 "is_internal": bool(is_internal),
                 "enabled": enabled,
@@ -124,6 +126,7 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
             enabled=meta["enabled"],
             created_at=meta["created_at"],
             updated_at=meta["updated_at"],
+            created_by=meta.get("created_by"),
         )
 
     def _list_skills_for_user(upn):
@@ -160,6 +163,13 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
             state.grants.pop(grant_key, None)
 
     monkeypatch.setattr(skills_repo, "list_skills_for_user", _list_skills_for_user)
+    monkeypatch.setattr(
+        skills_repo, "list_skills_created_by",
+        lambda upn: [
+            _row(key, meta) for key, meta in sorted(state.skills.items())
+            if upn.strip() and meta["enabled"] and meta.get("created_by") == upn.strip().lower()
+        ],
+    )
     monkeypatch.setattr(skills_repo, "get_skill", _get_skill)
     monkeypatch.setattr(skills_repo, "upsert_skill", state.upsert_skill)
     monkeypatch.setattr(skills_repo, "set_skill_visibility", state.set_skill_visibility)
@@ -240,10 +250,10 @@ def anon_client(backend_main):
 
 @pytest.fixture()
 def grant_skill(fake_sql):
-    """Helper to grant TEST_UPN access to a given skill name (creates skill row too)."""
+    """Seed an authored skill and grant TEST_UPN access; creator is explicit/overridable."""
 
-    def _grant(skill_name: str, description: str = "") -> None:
-        fake_sql.upsert_skill(skill_name)
+    def _grant(skill_name: str, description: str = "", *, created_by: str | None = TEST_UPN) -> None:
+        fake_sql.upsert_skill(skill_name, created_by=created_by)
         fake_sql.add_grant(skill_name, TEST_UPN, granted_by=TEST_UPN)
         # Invalidate ACL cache after each grant.
         from backend import acl as acl_mod

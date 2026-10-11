@@ -1,7 +1,7 @@
 """DAO for Azure SQL skills metadata and per-user grants (schema v2.2).
 
 Tables (from dbo schema):
-  - dbo.skills(skill_name, owner_upn, is_public, is_internal, enabled,
+    - dbo.skills(skill_name, owner_upn, created_by, is_public, is_internal, enabled,
                created_at, updated_at,
                skill_key / blob_path / blob_prefix = PERSISTED computed columns)
     PK = skill_key. There is no ``version`` or ``description`` column: the
@@ -49,6 +49,7 @@ class SkillRow:
     enabled: bool
     created_at: datetime | None
     updated_at: datetime | None
+    created_by: str | None = None
 
     @property
     def skill_scope(self) -> str:
@@ -59,6 +60,7 @@ class SkillRow:
             "skill_name": self.skill_name,
             "skill_key": self.skill_key,
             "owner_upn": self.owner_upn or "",
+            "created_by": self.created_by or "",
             "skill_scope": self.skill_scope,
             "is_public": bool(self.is_public),
             "is_internal": bool(self.is_internal),
@@ -132,11 +134,22 @@ class LocalSkillsRepo:
         with self._lock:
             return self._skills.get(skill_key_of(skill_name, owner_upn))
 
+    def list_skills_created_by(self, user_upn: str) -> list[SkillRow]:
+        creator = user_upn.strip().lower()
+        if not creator:
+            return []
+        with self._lock:
+            return sorted(
+                [row for row in self._skills.values() if row.enabled and row.created_by == creator],
+                key=lambda row: row.skill_name,
+            )
+
     def upsert_skill(
         self,
         skill_name: str,
         *,
         owner_upn: str | None = None,
+        created_by: str | None = None,
         is_public: bool = False,
         enabled: bool = True,
         is_internal: bool | None = None,
@@ -157,6 +170,7 @@ class LocalSkillsRepo:
                 enabled=enabled,
                 created_at=existing.created_at if existing else now,
                 updated_at=now,
+                created_by=existing.created_by if existing else (created_by or "").strip().lower() or None,
             )
             return existing is None
 
@@ -260,7 +274,7 @@ def make_skills_repo() -> LocalSkillsRepo | None:
 
 _SKILL_COLUMNS = """
         s.skill_name, s.skill_key, s.owner_upn, s.is_public, s.is_internal,
-        s.enabled, s.created_at, s.updated_at
+    s.enabled, s.created_at, s.updated_at, s.created_by
 """
 
 
@@ -298,10 +312,26 @@ def get_skill(skill_name: str, owner_upn: str | None = None) -> SkillRow | None:
     return SkillRow(*row) if row else None
 
 
+def list_skills_created_by(user_upn: str) -> list[SkillRow]:
+    creator = user_upn.strip().lower()
+    if not creator:
+        return []
+    if _local_repo is not None:
+        return _local_repo.list_skills_created_by(creator)
+    rows = db.fetchall(
+        f"SELECT {_SKILL_COLUMNS} FROM dbo.skills s "
+        "WHERE s.enabled = 1 AND s.created_by = ? "
+        "ORDER BY s.updated_at DESC, s.skill_name ASC",
+        (creator,),
+    )
+    return [SkillRow(*row) for row in rows]
+
+
 def upsert_skill(
     skill_name: str,
     *,
     owner_upn: str | None = None,
+    created_by: str | None = None,
     is_public: bool = False,
     enabled: bool = True,
     is_internal: bool | None = None,
@@ -311,11 +341,13 @@ def upsert_skill(
     Never touches skill_key / blob_path / blob_prefix (PERSISTED computed
     columns -- SQL Server rejects explicit assignment). ``is_internal=None``
     preserves an existing value and inserts the schema default of false.
+    ``created_by`` is normalized on INSERT and never changed on UPDATE.
     """
     if _local_repo is not None:
         return _local_repo.upsert_skill(
             skill_name,
             owner_upn=owner_upn,
+            created_by=created_by,
             is_public=is_public,
             enabled=enabled,
             is_internal=is_internal,
@@ -329,6 +361,7 @@ def upsert_skill(
             SELECT CAST(? AS VARCHAR(321)) AS skill_key,
                    CAST(? AS VARCHAR(64))  AS skill_name,
                    CAST(? AS VARCHAR(256)) AS owner_upn,
+                   CAST(? AS VARCHAR(256)) AS created_by,
                    CAST(? AS BIT)          AS is_public,
                    CAST(? AS BIT)          AS enabled,
                    CAST(? AS BIT)          AS is_internal
@@ -340,8 +373,8 @@ def upsert_skill(
                        is_internal = COALESCE(source.is_internal, target.is_internal),
                        updated_at = SYSUTCDATETIME()
         WHEN NOT MATCHED THEN
-            INSERT (skill_name, owner_upn, is_public, enabled, is_internal)
-            VALUES (source.skill_name, source.owner_upn, source.is_public, source.enabled,
+            INSERT (skill_name, owner_upn, created_by, is_public, enabled, is_internal)
+            VALUES (source.skill_name, source.owner_upn, source.created_by, source.is_public, source.enabled,
                     COALESCE(source.is_internal, 0))
         OUTPUT $action;
     """
@@ -349,6 +382,7 @@ def upsert_skill(
         skill_key_of(skill_name, owner),
         skill_name,
         owner,
+        (created_by or "").strip().lower() or None,
         1 if is_public else 0,
         1 if enabled else 0,
         None if is_internal is None else (1 if is_internal else 0),

@@ -34,8 +34,10 @@ export async function listSessions() {
   return res.json();
 }
 
-export async function listSkills(storeId) {
-  const qs = storeId ? `?store=${encodeURIComponent(storeId)}` : "";
+export async function listSkills(storeId, purpose = "read") {
+  const params = new URLSearchParams({ purpose });
+  if (storeId) params.set("store", storeId);
+  const qs = `?${params}`;
   const res = await apiFetch(`/api/skills${qs}`);
   if (!res.ok) throw new Error(await formatFetchError(res));
   return res.json();
