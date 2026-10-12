@@ -7,6 +7,26 @@
 
 ## 重大變更 (What's New) 2026-10
 
+### Skill 覆寫前自動備份
+
+啟用後，Generator 每次覆寫既有 skill 前，會先將 Blob 上的舊 `SKILL.md`、script 與所有附帶檔案保存到獨立歷史容器，再執行正常儲存。每份備份附有 `manifest.json`，記錄來源版本、備份觸發者與時間，以及各檔案的 SHA256；首次建立不備份，NEW session 再次儲存與鄰近 skill 儲存也適用。
+
+**啟用方式**：在同一 Storage Account 預先建立獨立、非匿名的歷史容器（例如 `skill-history`），授予 Generator 使用的 Blob 身分所需讀寫權限，設定 `AZURE_BLOB_HISTORY_CONTAINER` 後重新啟動。留空不啟用；啟用後備份失敗會回 HTTP 503 並停止覆寫，版本衝突仍回 409。
+
+**功能範圍**：歷史不自動清理，刪除或改名也不移除已有備份；目前不提供歷史清單、差異比較或還原介面，也不另替刪除或改名建立備份。備份不保證跨檔案原子一致性，亦非所有外部寫入的完整稽核紀錄。
+
+容器與權限設定見 [02-setup.md 第 2.5 節](docs/02-setup.md#25-azure-blob)，備份格式與儲存流程見 [03-architecture.md 第 2.2 節](docs/03-architecture.md#22-儲存接受-patch--按下儲存)。
+
+### Inline ↔ Script 形式轉換
+
+開啟既有 capability skill 的 **MODIFY session**，即可用 **Convert to script / inline** 將程式碼在 `SKILL.md` 的 Python 區塊與 `scripts/<name>.py` 之間搬移。quick edit 與 re-plan 都支援；入口位於對話區上方、Workflow 狀態列及 Checklist 的 Convert form 區塊。
+
+轉換只搬程式碼，不改寫 `SKILL.md`；後續由 Agent 配合新形式修正文案與章節。inline → script 時，若 session 沒有 `code` 素材，會加入一份與 script 相同的素材，讓 Agent 在 PREPARE / REFINE 提出使用者審閱的邊界 patch（命令列參數、JSON stdout、`[NEEDS_INFO]`、stderr、exit code），不改動外部呼叫、認證或業務邏輯。接受後仍需使用者實際執行確認。
+
+> ⚠️ **轉換條件**：session 尚無 patch；inline → script 要求正文（不含 Gatekeeper Addendum）剛好一個可解析的 Python 區塊、沒有 skill 資產，且 EAA script 旗標已開啟。搬移不代表通過 lint，儲存仍須通過本機與 EAA 檢查。轉換本身不寫 Blob，但接受後續 `SKILL.md` patch 時會嘗試同步 Blob / SQL；script → inline 儲存成功時會移除原 script 檔案。
+
+詳細規則見 [04-agent-mechanism.md 第 7.5 節](docs/04-agent-mechanism.md#75-code-素材與-script-形式)。
+
 ### Skill 資產
 
 在 Materials 分頁的 Skill assets 區塊上傳 UTF-8 文字檔，存檔時原封不動寫到 `skills/<name>/assets/` 或 `references/`；scenario 與 script 型 skill 不可附資產。檢查規則與資料流見 [04-agent-mechanism.md 第 7.6 節](docs/04-agent-mechanism.md#76-skill-資產assetsreferences)。
@@ -21,7 +41,7 @@
 
 | 項目 | 變更 | 詳細說明 |
 | --- | --- | --- |
-| **產出形式** | 依素材與 EAA 旗標自動判斷，進 DRAFT 後鎖定，不支援 inline ↔ script 互轉。Generator 不修改 script；要換 script，請更換 `code` 素材。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
+| **產出形式** | NEW 依素材與 EAA 旗標自動判斷，進 DRAFT 後鎖定；MODIFY 可用 Convert form 互轉（見上方）。script 透過 `code` 素材取代，Agent 僅在符合條件時調整素材邊界，不改寫業務邏輯。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
 | **檢查** | script 須通過專屬 lint（S 系列：stdout 只輸出 JSON、`[NEEDS_INFO]` 以 exit 0 結束等），並與 `SKILL.md` 一起送 EAA lint。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#75-code-素材與-script-形式) |
 | **儲存** | script 型每次儲存都重新確認 EAA 旗標。**所有 skill** 覆寫時都會比對 Blob 版本，載入後被改過（例如 Gatekeeper Addendum）就回 409，不會覆蓋。 | [04-agent-mechanism.md](docs/04-agent-mechanism.md#eaa-script-旗標)、[03-architecture.md](docs/03-architecture.md) |
 | **介面** | Materials、Checklist（Output form）、Files 分頁（`SKILL.md \| scripts/<name>.py`）與 Skill 清單（`[script]`）顯示目前形式與未滿足的條件。 | [01-overview.md](docs/01-overview.md) |
