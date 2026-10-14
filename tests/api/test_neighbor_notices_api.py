@@ -1,4 +1,5 @@
 import time
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -262,6 +263,41 @@ def test_recipient_loads_latest_content_projection_and_closes_immediately(client
     assert "do not skip to REFINE" not in prompt
 
 
+@pytest.mark.parametrize("persisted", [False, True])
+def test_open_notice_does_not_reuse_legacy_prepare_session(client, backend_main, fake_sql, persisted):
+    seed(backend_main, fake_sql, "target", AUTHOR, "Latest target")
+    seed(backend_main, fake_sql, "source", OWNER, "Latest source")
+    notice = repo.upsert_open_notice("target", AUTHOR, OWNER, ["source"])
+    legacy_id = uuid5(NAMESPACE_URL, f"neighbor-notice:{notice.id}:{AUTHOR}").hex
+    legacy = Session(
+        id=legacy_id, mode="modify", target_skill_id="target", owner_upn=AUTHOR,
+        neighbor_notice_review={"notice_id": notice.id, "sources": [{"name": "source", "description": "Old source"}]},
+    )
+    legacy.current_skill.skill_md = "---\nname: target\ndescription: Unsaved legacy content\n---\nKeep this content"
+    backend_main.sessions[legacy.id] = legacy
+    original = legacy.model_dump(mode="json")
+    legacy_path = backend_main.session_store.root / f"{legacy.id}.json"
+    if persisted:
+        backend_main.persist_session(legacy)
+        original_bytes = legacy_path.read_bytes()
+    response = client.post(f"/api/neighbor-notices/{notice.id}/start-modify")
+    assert response.status_code == 200
+    opened = response.json()
+    assert opened["id"] != legacy.id
+    assert opened["current_stage"] == "refine"
+    assert opened["current_skill"]["skill_md"] == backend_main.store.load_skill("target").skill_md
+    assert opened["neighbor_notice_review"]["sources"][0]["description"] == "Latest source"
+    assert legacy.model_dump(mode="json") == original
+    assert backend_main.sessions[legacy.id] is legacy
+    if persisted:
+        assert legacy_path.read_bytes() == original_bytes
+    else:
+        assert not legacy_path.exists()
+    assert client.post(f"/api/neighbor-notices/{notice.id}/start-modify").json()["id"] == opened["id"]
+    assert set(backend_main.sessions) == {legacy.id, opened["id"]}
+    assert repo.list_open_notices(AUTHOR) == []
+
+
 @pytest.mark.parametrize("stage", ["prepare", "test", "done"])
 def test_reopening_notice_preserves_persisted_review_stage(client, backend_main, fake_sql, stage):
     seed(backend_main, fake_sql, "target", AUTHOR)
@@ -284,18 +320,31 @@ def test_reopening_notice_preserves_persisted_review_stage(client, backend_main,
     assert list(backend_main.sessions) == [session.id]
 
 
-def test_persistence_failure_keeps_open_and_retry_recovers(client, backend_main, fake_sql, monkeypatch):
+@pytest.mark.parametrize("written_before_failure", [False, True])
+def test_persistence_failure_keeps_open_and_retry_recovers(client, backend_main, fake_sql, monkeypatch, written_before_failure):
     seed(backend_main, fake_sql, "target", AUTHOR)
     notice = repo.upsert_open_notice("target", AUTHOR, OWNER, ["missing-source"])
     original = backend_main.persist_session
-    monkeypatch.setattr(backend_main, "persist_session", lambda session: (_ for _ in ()).throw(RuntimeError("Disk unavailable")))
+    attempted_ids = []
+
+    def fail_persistence(session):
+        attempted_ids.append(session.id)
+        if written_before_failure:
+            original(session)
+        raise RuntimeError("Disk unavailable")
+
+    monkeypatch.setattr(backend_main, "persist_session", fail_persistence)
     with pytest.raises(RuntimeError, match="Disk unavailable"):
         client.post(f"/api/neighbor-notices/{notice.id}/start-modify")
     assert len(repo.list_open_notices(AUTHOR)) == 1
     monkeypatch.setattr(backend_main, "persist_session", original)
     result = client.post(f"/api/neighbor-notices/{notice.id}/start-modify")
     assert result.status_code == 200
+    assert result.json()["id"] == attempted_ids[0]
+    assert result.json()["current_stage"] == "refine"
     assert result.json()["neighbor_notice_review"]["sources"][0]["available"] is False
+    assert len(list(backend_main.session_store.root.glob("*.json"))) == 1
+    assert repo.list_open_notices(AUTHOR) == []
 
 
 @pytest.mark.parametrize("invalid", ["deleted", "creator", "scoped"])

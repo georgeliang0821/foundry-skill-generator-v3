@@ -4159,7 +4159,7 @@ def start_neighbor_notice_modify(notice_id: int, upn: str = Depends(require_upn)
             raise HTTPException(status_code=409, detail="此通知目標已不存在、停用或不再由您建立。")
         if target.owner_upn:
             raise HTTPException(status_code=409, detail="此目標使用私有範圍路徑，目前 MODIFY 不支援；未開啟其他同名 Skill。")
-        sid = uuid5(NAMESPACE_URL, f"neighbor-notice:{notice.id}:{upn}").hex
+        sid = uuid5(NAMESPACE_URL, f"neighbor-notice:quick-edit:{notice.id}:{upn}").hex
         stored = session_store.load(sid)
         if stored is not None and stored.owner_upn == upn:
             sessions[sid] = stored
