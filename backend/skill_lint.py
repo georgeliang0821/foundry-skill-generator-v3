@@ -12,9 +12,9 @@ Rules are namespaced by the layer they apply to: ``A*`` for capability skills
 that instructs the host), ``I*`` for the verified-actor identity contract and
 ``S*`` for script-form capability skills, whose code is a bundled script run
 with argv rather than a sample block the runtime rewrites.
-Only A1 is an error -- a python block that does not parse is never intentional
-and the host executes it verbatim. Everything else is a warning, because a
-content check that can reject a draft would be worse than the drift it catches.
+N1 rejects named references to other catalog skills outside dependency calls.
+Syntax, platform and named-reference errors block saving; other findings remain
+advisory.
 
 The scenario layer no longer restates a child's field contract, so the rule that
 required it to (B3) is gone; ``topology.py`` P6 now flags the opposite. That id
@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import Collection, Iterable, Mapping, Sequence
 
+from .blob_store import parse_frontmatter, parse_frontmatter_meta
 from .models import SkillKind
 from .eaa_platform import (
     CONTENT_ERROR_HARD_PATTERNS,
@@ -240,6 +241,53 @@ def has_lint_errors(issues: Sequence[LintIssue]) -> bool:
 
 def lint_warning_count(issues: Sequence[LintIssue]) -> int:
     return sum(1 for issue in issues if issue.severity in {"error", "warning"})
+
+
+def check_named_skill_references(
+    skill_md: str, kind: SkillKind, catalog_skill_names: Collection[str],
+) -> list[LintIssue]:
+    own_name, description = parse_frontmatter(skill_md + "\n")
+    names = {name.lower() for name in catalog_skill_names if name and name.lower() != own_name.lower()}
+    if not names:
+        return []
+    frontmatter = re.match(r"^\ufeff?---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|$)", skill_md, re.DOTALL)
+    body = skill_md[frontmatter.end():] if frontmatter else skill_md
+    if kind is SkillKind.SCENARIO:
+        children = parse_frontmatter_meta(skill_md + "\n").get("children", [])
+        declared = {child for child in children if isinstance(child, str)} if isinstance(children, list) else set()
+        masked = list(body)
+        for call in re.finditer(r"\bfetch_skill\s*\([^)]*\)", body, re.DOTALL):
+            headings = list(re.finditer(r"^##[ \t]+(.+)$", body[:call.start()], re.MULTILINE))
+            title = normalize_section(headings[-1].group(1)) if headings else ""
+            if any(marker in title for marker in ("whennottouse", "notapplicable", "不適用")):
+                continue
+            try:
+                expression = ast.parse(call.group(), mode="eval").body
+            except SyntaxError:
+                continue
+            if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name):
+                continue
+            arguments = [keyword.value for keyword in expression.keywords if keyword.arg == "skill_name"]
+            if len(arguments) != 1 or not isinstance(arguments[0], ast.Constant) or arguments[0].value not in declared:
+                continue
+            argument = re.search(r"\bskill_name\s*=\s*(['\"])([^'\"]+)\1", call.group())
+            if argument and argument.group(2) == arguments[0].value:
+                start, end = argument.span(2)
+                masked[call.start() + start:call.start() + end] = " " * (end - start)
+        body = "".join(masked)
+    pattern = re.compile(
+        r"(?<![a-z0-9_-])(?:" + "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+        + r")(?![a-z0-9_-])", re.IGNORECASE,
+    )
+    return [
+        LintIssue(
+            "N1", "Do not name other catalog skills in the description or body. "
+            "Describe this skill's scope and stopping conditions instead.",
+            detail=f"Named reference in {location}.", severity="error",
+        )
+        for location, text in (("description", description), ("body", body))
+        if pattern.search(text)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -3531,8 +3579,9 @@ def lint_skill(
     obo_registry_keys: Collection[str] | None = None,
     script: str | None = None,
     asset_paths: Collection[str] = (),
+    catalog_skill_names: Collection[str] = (),
 ) -> list[LintIssue]:
-    """Return every content issue in the artifact. Only A1 is an error.
+    """Return content issues, including blocking syntax, platform and N1 errors.
 
     ``code_override`` swaps the python block for another script -- the code the
     runtime PREPARED for a test sample. That script is regenerated from the body
@@ -3550,7 +3599,8 @@ def lint_skill(
         script = None
     platform_code = script if script is not None else code_override
     platform = (
-        _check_platform_secrets(skill_md, platform_code, script)
+        check_named_skill_references(skill_md, kind, catalog_skill_names)
+        + _check_platform_secrets(skill_md, platform_code, script)
         + _check_credential_placeholder(skill_md, platform_code)
         + _check_execution_environment(skill_md, platform_code)
         + _check_asset_references(skill_md, asset_paths)

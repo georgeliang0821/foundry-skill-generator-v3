@@ -28,6 +28,17 @@ def test_output_rules_come_from_the_prompt_file() -> None:
     assert len(rules) > 1
 
 
+def test_output_rules_forbid_named_handoffs_and_require_scope_only() -> None:
+    _, rules = _load_output_rules()
+    text = "\n".join(rules)
+    assert "No named references to other skills anywhere in SKILL.md" in text
+    assert "stopping conditions" in text
+    assert "in-scope portion" in text
+    assert "-> use `neighbor-skill`" not in text
+    assert "backlink must name" not in text
+    assert "-> use <new-skill-name>" not in text
+
+
 def test_load_output_rules_raises_when_the_prompt_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.agent.load_prompt", lambda _name: "<!-- Missing prompt -->")
 

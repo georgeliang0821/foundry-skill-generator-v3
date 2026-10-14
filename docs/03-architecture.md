@@ -95,18 +95,6 @@ sequenceDiagram
     API-->>UI: 回傳事件批次（文字、問題卡、patch、測試結果）
 ```
 
-對話診斷以 JSON log 輸出到後端終端，`SGV2_DEBUG_LOG=1` 啟用（預設開啟）。每次進入 `/chat` 都有獨立的 `request_id`，搭配 `session_id` 串起同一回合，並傳入 Foundry 呼叫所在的執行緒；JSON 格式修復重試也沿用同一個 `request_id`。
-
-| Log | 計時範圍 |
-| --- | --- |
-| `chat.phase.start/done/failed` | `phase` 分別標示 session 載入、初次保存、鄰居載入、取得下一個 Agent 事件、工具套用／保存、最後保存與狀態快照；完成或失敗帶 `duration_ms` |
-| `neighbor_full_md.sql.*` / `neighbor_full_md.blob.*` | 單一鄰居的 SQL 查詢與 Skill store 讀取，附 `skill_name`；store 可能命中快取，不代表每次都有遠端 Blob 請求 |
-| `llm.prompt_build.*` / `llm.client_init.*` / `llm.responses_create.*` | prompt 組裝、SDK client 初始化、`responses.create` 呼叫各自的耗時；SDK 呼叫可能包含驗證、網路與 SDK 重試，不能直接當成 Foundry trace 的 Agent 執行時間 |
-| `llm.response.received` | Foundry 回傳的 `foundry_response_id` 與 SDK 提供的 `foundry_request_id`（若有），用於對照遠端請求；不是本機 `request_id` |
-| `chat.done` / `chat.failed` | 回合處理的總耗時與結果；不包含 FastAPI 相依登入驗證、HTTP JSON 編碼、傳輸與瀏覽器渲染 |
-
-父階段與子階段的耗時互相包含，不應直接加總所有 `duration_ms`。卡住時先找最後一筆 `.start` 是否有對應的 `.done` 或 `.failed`，再依同一 `request_id` 比較鄰居讀取與 Foundry 呼叫。Session 訊息的時間差不是模型執行時間；前端 timeout 也不代表後端取消了處理。
-
 ### 2.2 儲存（接受 patch / 按下儲存）
 
 接受 patch 後在記憶體更新 `SKILL.md`，並在綁定遠端 Skill 時嘗試**雙寫 Blob + SQL**。雙寫完成即生效，**沒有額外的 publish / sync 步驟**：runtime 每次請求都直接從 SQL + Blob 動態解析 skill（Mode B）。
@@ -119,7 +107,7 @@ sequenceDiagram
 - **寫入前的關卡**（依序，任一失敗就不寫）：既有 skill 的建立者權限（改名同時檢查來源，NEW 同名覆寫也適用）→ topology 驗證 → skill 資產檢查（見 [04-agent-mechanism.md 第 7.6 節](04-agent-mechanism.md#76-skill-資產assetsreferences)）→ `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則；有資產時含 F2/F3）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)）→ EAA MCP `lint_skill_package`（見 [2.3](#23-eaa-skill-lint)）。
 - **寫入順序**：完成關卡與候選版號驗證 → 選用的覆寫前備份 → `SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ skill 資產（把 session 的完整集合寫到 `skills/<name>/assets/`、`references/`，並移除該資料夾內不在集合裡的檔案）→ script 型才有 `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
 - **覆寫前備份（選用）**：設定 `AZURE_BLOB_HISTORY_CONTAINER` 後，共用 `save_skill()` 在任何正式檔案寫入前，先讀取目的地的舊套件，以來源檔案的 ETag 做條件式讀取，將原始 bytes 寫到獨立歷史容器。一般 session 與鄰近 skill 儲存都帶入已驗證登入者；首次建立與只能建立的改名目的地不備份。正式覆寫仍使用舊 `SKILL.md` 的 ETag 作條件，來源變更回 409；備份讀寫失敗回 503，不寫正式內容。未設定時維持一般儲存流程。
-- **歷史格式與範圍**：路徑為 `<skill-name>/<source-key>/<revision-id>/files/<relative-path>`，其中 `source-key` 是來源 store ID 與實際 Blob 路徑的 SHA256，`revision-id` 是系統產生的 UUID。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者、自然語言 `change_summary`，以及各檔案路徑、長度與 SHA256；不推定歷史作者。`change_summary` 描述此次嘗試儲存相對於快照舊套件的修改，不是快照內容摘要或儲存成功證明。Agent 在提案中以使用者語言說明實際變更，有對話依據時才融合修改原因，不附文字 diff。主 session 累積已接受而尚未儲存成功的說明，成功後清空；手動替換正文或 undo 清除可能失效的說明。鄰近 skill 沿選定版本到已儲存版本的來源鏈收集說明，切回其他分支時記錄版本切換。手動儲存 API 可帶 `change_summary`；沒有可信說明時留空，不額外呼叫模型推測。manifest 是稽核資料，不加入 skill 指令。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈，刪除或改名不移除歷史，也不額外建立快照。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
+- **歷史格式與範圍**：路徑為 `<skill-name>/<UTC-timestamp>_<revision-id>/files/<relative-path>`，時間取自 manifest 的 `captured_at`，格式為 `YYYYMMDDTHHMMSSZ`，例如 `20261014T010954Z`；`revision-id` 是系統產生的完整 UUID，同一秒的多次備份仍各有獨立目錄。來源 store ID 與實際 Blob 路徑保存在 manifest，供追查來源；歷史容器可按環境分開設定。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者、自然語言 `change_summary`，以及各檔案路徑、長度與 SHA256；不推定歷史作者。`change_summary` 描述此次嘗試儲存相對於快照舊套件的修改，不是快照內容摘要或儲存成功證明。Agent 在提案中以使用者語言說明實際變更，有對話依據時才融合修改原因，不附文字 diff。主 session 累積已接受而尚未儲存成功的說明，成功後清空；手動替換正文或 undo 清除可能失效的說明。鄰近 skill 沿選定版本到已儲存版本的來源鏈收集說明，切回其他分支時記錄版本切換。手動儲存 API 可帶 `change_summary`；沒有可信說明時留空，不額外呼叫模型推測。manifest 是稽核資料，不加入 skill 指令。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈，刪除或改名不移除歷史，也不額外建立快照。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
 - **new vs modify**：new skill 首次儲存是 INSERT（同時寫 `created_by` / `created_at` / `updated_at`）；modify 既有 skill 是覆寫內容的 UPDATE。新建與改名目的地的 Blob 使用只能建立、不可覆寫的條件式寫入，名稱被其他寫入占用時回 409；只有 Blob、沒有 SQL metadata 的名稱也不能被認領。
 - **upsert 行為**：`upsert_skill` 是 `MERGE dbo.skills`，比對鍵是 `skill_key`：不存在 -> INSERT `(skill_name, owner_upn, created_by, is_public, enabled, is_internal)`；已存在 -> UPDATE `is_public` / `enabled` / 指定的 `is_internal`，並**設 `updated_at = SYSUTCDATETIME()`**。`created_by` 只在 INSERT 填入，UPDATE 不修改，包括空白值；改名的新列沿用來源建立者。
 - **絕不寫入計算欄位**：`skill_key` / `blob_path` / `blob_prefix` 都是 PERSISTED computed column，由 SQL 自行產生；應用程式若嘗試寫入會直接被 SQL Server 拒絕。
@@ -158,8 +146,9 @@ flowchart LR
 - `warnings` 不擋儲存，儲存後寫成一則 system message 交給 Agent 轉述。其中 `metadata.mi_scopes: <資源> is not in MI_SCOPE_ALLOWLIST` 會改寫成部署說明（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-平台規則d4d8a15)）。本機 lint 的 D7 INFO 只比對平台預設白名單；ACA 上的實際值由 EAA lint 在儲存時檢核。
 - `ruleset_version` 記在 session 的 `eaa_ruleset_version` 與 `skill.save.done` / `mcp.lint.done` log。
 - 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
+- 本機 **N1 具名引用檢查**以完整已登錄 catalog 為字彙，包含未授權、內部與停用的 skill；名稱只留在伺服器，不回傳 catalog 或命中的名稱。`description` 與整份內文不得引用其他 skill 的名稱，自身名稱不受限。結構化依賴宣告及 scenario 已宣告依賴的實際 `fetch_skill(skill_name=...)` 參數保留；description、停止條件與一般依賴說明不享有例外。草稿提案與 SKILL.md patch 在修改內容、版號雜湊與 patch history 前先檢查，拒絕時不寫入；直接儲存也檢查，catalog 無法取得時回 HTTP 503 並停止。
 - pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
-- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）不走 `save_skill_dual_write()`，目前不跑此 lint。
+- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）在寫入前執行 N1，但不走 `save_skill_dual_write()` 的完整本機與 EAA package lint。
 
 ### 2.4 呼叫 EAA MCP 的身分
 
@@ -230,7 +219,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `material_patch.py` | `propose_material_patch` 的防線：以 AST 取出素材的外部呼叫（非 stdlib 或 I/O stdlib 的 import 起點 + 屬性鏈，不看變數名），patch 不得刪改任何一個，且邊界語句（import、只呼叫 print / json.dumps / argparse / exit 的語句、輸入綁定）以外的原始行改動（忽略縮排）不得超過 `MAX_CHANGED_RATIO`。patch 後仍有 script-form 問題的檢查在 `main._checked_material_patch()`；機械式 stdout 修正（`stdout_fix=true`）由 `skill_lint.stdout_to_stderr()` 計算、`main._checked_stdout_fix()` 把關 |
 | `mcp_jsonrpc.py` | MCP JSON-RPC client（讀取 ACA 環境變數等）。以 `MICROSOFT_*` App Registration 對自己做 client credentials 取得 app-only token（audience 預設從 `MICROSOFT_OBO_SCOPE` 推導），並快取至過期前 60 秒；audience 推導不出來則退回匿名呼叫 |
 | `db.py` | Azure SQL 連線輔助（`mssql-python`，AAD 驗證策略）；同一執行緒的巢狀查詢共用外層交易，避免通知處理中的建立者查詢提前 commit，暫時性失敗重試整筆交易 |
-| `diagnostics.py` | 結構化記錄輔助（`log_event` / `log_exception`）、追蹤上下文（`log_context`）與分段計時（`log_timing`），會遮罩疑似機密的值 |
+| `diagnostics.py` | 結構化記錄輔助（`log_event` / `log_exception`），會把疑似機密的值遮罩成 `***` |
 | `e2e.py` | 本機 E2E 測試掛鉤（搭配 `SGV2_E2E_MODE`）：fake agent、fake 路由測試（script 型會附上 `requested_scripts`）、fake ACA 查詢（scenario `script_flags_on` 與 `material_patch` 才開啟 script 旗標；`material_patch` 在 PREPARE 對 code 素材提出固定的 `propose_material_patch`） |
 
 ---

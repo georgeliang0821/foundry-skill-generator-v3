@@ -9,7 +9,9 @@ prompt above or with the Skill Format Spec, this addendum wins.
 
 Write the body with these sections, in this order:
 
-1. `## When NOT to Use This Skill` -- one line per neighbor, as for any skill.
+1. `## When NOT to Use This Skill` -- out-of-scope stopping conditions: state
+  the situation and instruct the model not to use this skill for it. Never
+  name a destination skill.
 2. `## How to Run` -- the skill is script-based: the host always executes its
    script with `run_skill_script` and never writes its own code for the task.
    Arguments are passed as a list of strings built from Required Inputs, with
@@ -32,8 +34,9 @@ Write the body with these sections, in this order:
    `status`, naming every key the script prints. Introduce each table with a
    plain line such as ``Output fields (`status` = `ok`):``, not a `###`
    heading.
-5. `## Composability` -- which skills depend on this one's result, and which
-   are independent of it.
+5. `## Composability` -- how this result can be consumed by subsequent work,
+  without naming other skills. For mixed requests, specify that only the
+  in-scope portion is completed.
 6. `## Prerequisites` -- one top-level bullet per environment variable the
    script reads: `` - `NAME` — what it is ``. Write "optional" on the bullet of
    a variable the script runs without; for a required one, say which exit code
@@ -47,6 +50,8 @@ What they would say is covered by Reading the Result and Prerequisites.
 
 ## Writing rules
 
+- Do not name other skills in the description or any body section. Describe
+  only this skill's scope, exclusions and output contract.
 - **No Python code fence anywhere in SKILL.md** (S2). The script is shipped
   next to it; a copy in the body would drift from it.
 - **Never mention where the script is stored**: no `scripts/` path and no script

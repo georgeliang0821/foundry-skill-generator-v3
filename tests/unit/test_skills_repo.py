@@ -68,6 +68,21 @@ def local_repo(monkeypatch):
     skills_repo.make_skills_repo()
 
 
+def test_catalog_skill_names_sql_is_not_acl_filtered(fake_db) -> None:
+    seen = []
+    fake_db["execute"] = lambda sql, params: seen.append((sql, params)) or [("hidden-skill",), ("disabled-skill",)]
+    assert skills_repo.catalog_skill_names() == {"hidden-skill", "disabled-skill"}
+    assert seen == [("SELECT DISTINCT skill_name FROM dbo.skills", ())]
+
+
+def test_catalog_skill_names_local_includes_hidden_disabled_and_deduplicates(local_repo) -> None:
+    local_repo.upsert_skill("hidden-skill")
+    local_repo.upsert_skill("hidden-skill", owner_upn="other@example.com")
+    local_repo.upsert_skill("disabled-skill", enabled=False)
+    assert skills_repo.catalog_skill_names() == {"hidden-skill", "disabled-skill"}
+    assert not local_repo.list_skills_for_user("test@example.com")
+
+
 def _row(*values):
     """Return a tuple-like row."""
     return tuple(values)

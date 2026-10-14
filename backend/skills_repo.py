@@ -130,6 +130,10 @@ class LocalSkillsRepo:
                 ),
             )
 
+    def catalog_skill_names(self) -> set[str]:
+        with self._lock:
+            return {row.skill_name for row in self._skills.values()}
+
     def get_skill(self, skill_name: str, owner_upn: str | None = None) -> SkillRow | None:
         with self._lock:
             return self._skills.get(skill_key_of(skill_name, owner_upn))
@@ -276,6 +280,13 @@ _SKILL_COLUMNS = """
         s.skill_name, s.skill_key, s.owner_upn, s.is_public, s.is_internal,
     s.enabled, s.created_at, s.updated_at, s.created_by
 """
+
+
+def catalog_skill_names() -> set[str]:
+    """Server-only vocabulary for artifact lint, including hidden and disabled skills."""
+    if _local_repo is not None:
+        return _local_repo.catalog_skill_names()
+    return {row[0] for row in db.fetchall("SELECT DISTINCT skill_name FROM dbo.skills")}
 
 
 def list_skills_for_user(user_upn: str) -> list[SkillRow]:

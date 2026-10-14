@@ -5,6 +5,32 @@ import pytest
 from backend.models import IterationReflection, PendingToolCall
 
 
+def test_named_reference_refine_patch_is_rejected_atomically(client, backend_main, fake_sql, monkeypatch) -> None:
+    fake_sql.upsert_skill("hidden-calendar")
+    session = backend_main.Session(current_stage="refine", remote_skill_id="demo")
+    session.current_skill.skill_md = "---\nname: demo\ndescription: Filter rooms.\n---\n## Ground Rules\nOnly filter rooms."
+    before = session.current_skill.model_dump()
+    writes = []
+    monkeypatch.setattr(backend_main, "save_skill_dual_write", lambda *args, **kwargs: writes.append(args))
+    session.pending_tool_calls.append(PendingToolCall(
+        call_id="named_patch", tool="propose_patch", args={
+            "target_file": "SKILL.md",
+            "patch": "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-Only filter rooms.\n+Use hidden-calendar.\n*** End Patch",
+        },
+    ))
+    backend_main.sessions[session.id] = session
+    response = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "named_patch", "result": {"action": "accept"},
+    })
+    assert response.status_code == 400, response.text
+    assert "N1:" in response.text
+    assert "hidden-calendar" not in response.text
+    assert session.current_skill.model_dump() == before
+    assert not session.patch_history
+    assert not session.pending_change_summaries
+    assert not writes
+
+
 def test_accept_propose_patch_updates_content_and_patch_history(client, backend_main) -> None:
     session = backend_main.Session()
     session.current_skill.skill_md = "hello"

@@ -8,10 +8,9 @@ import re
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
-from contextvars import copy_context
 from typing import Any
 
-from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, log_timing, now_ms
+from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
 from .models import InputBinding, PendingToolCall, Session
 from .state_machine import build_system_prompt, load_prompt, session_materials_prompt_chars
 
@@ -343,33 +342,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "select_neighbor_skill",
-        "description": "Register a user-selected existing neighbor and load its current SKILL.md for editing. PREPARE/DRAFT/REFINE only. Preserves other selected neighbors and their routing evidence. This is a passive action; return it alone before proposing any edits and the UI continues automatically with refreshed context. Read Neighbor Edit Policy on the next turn: only editable neighbors have full text; other creators use relationship notifications. If full text is absent, use this tool rather than asking the user to paste it.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "skill_name": {"type": "string", "description": "Exact accessible neighbor skill name confirmed by the user."},
-            },
-            "required": ["skill_name"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "confirm_neighbor_notification",
-        "description": "Persist the user's explicit decision about notifying the creator of a SELECTED existing neighbor. PREPARE/DRAFT/REFINE only. notify=true queues a relationship-only notification; notify=false records the user's decision not to notify. This does not write SQL or save either skill. Return this passive tool alone; the UI continues with backend Notification Outcomes. Only a successful source save sends queued notifications. Never claim sent unless the outcome has status sent and a notice_id. Own neighbors use edits instead.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "skill_name": {"type": "string", "description": "Exact selected neighbor whose creator notification the user confirmed or declined."},
-                "notify": {"type": "boolean", "description": "true to queue after user confirmation; false only when the user explicitly declines notification."},
-            },
-            "required": ["skill_name", "notify"],
-            "additionalProperties": False,
-        },
-    },
-    {
         "name": "propose_neighbor_edit",
-        "description": "Propose an edit to an EXISTING neighbor skill (e.g. tightening its description or adding a 'When NOT to Use -> use <new skill>' backlink) so the new skill and the neighbor stay mutually exclusive. Only edit neighbors whose Neighbor Edit Policy is editable. Read the neighbor's CURRENT SKILL.md under '## Neighbor Skills (full SKILL.md for editing)', between the <<<BEGIN ...>>> / <<<END ...>>> markers. If it is missing, call select_neighbor_skill alone first; do NOT ask the user for the file or infer it from a peer digest. Send a V4A `patch` against that current text: a single hunk with a few unchanged CONTEXT lines copied from the file plus your `-`/`+` edits (indentation is matched leniently, so you do not need to reproduce YAML indent perfectly). Keep the hunk SMALL and target a UNIQUE spot (e.g. the description lines, or the exact bullet under '## When NOT to Use This Skill'). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW, uniquely-versioned entry (the original and every prior version are always kept, never overwritten); NOTHING is written to Blob until the user Saves. If the patch does not apply, copy the surrounding CONTEXT lines more exactly from the current text and retry.",
+        "description": "Propose an edit to an EXISTING neighbor skill (e.g. tightening its description or adding a 'When NOT to Use -> use <new skill>' backlink) so the new skill and the neighbor stay mutually exclusive. The neighbor's CURRENT SKILL.md (the exact version the edit is applied to) is provided in the system prompt under '## Neighbor Skills (full SKILL.md for editing)', between the <<<BEGIN ...>>> / <<<END ...>>> markers -- read it there, do NOT ask the user. Send a V4A `patch` against that current text: a single hunk with a few unchanged CONTEXT lines copied from the file plus your `-`/`+` edits (indentation is matched leniently, so you do not need to reproduce YAML indent perfectly). Keep the hunk SMALL and target a UNIQUE spot (e.g. the description lines, or the exact bullet under '## When NOT to Use This Skill'). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW, uniquely-versioned entry (the original and every prior version are always kept, never overwritten); NOTHING is written to Blob until the user Saves. If the patch does not apply, copy the surrounding CONTEXT lines more exactly from the current text and retry.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -868,9 +842,8 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     project_endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
     agent_name = (os.getenv("FOUNDRY_AGENT_NAME") or "skill-generator-agent").strip()
     agent_version = (os.getenv("FOUNDRY_AGENT_VERSION") or "2").strip()
-    with log_timing("llm.prompt_build", session_id=session.id):
-        system_prompt = _escape_handlebars(build_system_prompt(session))
-        query = _build_foundry_user_prompt(session, user_message)
+    system_prompt = _escape_handlebars(build_system_prompt(session))
+    query = _build_foundry_user_prompt(session, user_message)
 
     started = now_ms()
     log_event(
@@ -890,28 +863,20 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     )
 
     def _invoke() -> str:
-        with log_timing("llm.client_init", session_id=session.id):
-            project = AIProjectClient(project_endpoint, DefaultAzureCredential())
-            openai_client = project.get_openai_client()
-        with log_timing("llm.responses_create", session_id=session.id):
-            resp = openai_client.responses.create(
-                input=[
-                    {"type": "message", "role": "system", "content": system_prompt},
-                    {"type": "message", "role": "user", "content": query},
-                ],
-                extra_body={
-                    "agent_reference": {
-                        "name": agent_name,
-                        "version": agent_version,
-                        "type": "agent_reference",
-                    }
-                },
-            )
-        log_event(
-            "llm.response.received",
-            session_id=session.id,
-            foundry_response_id=getattr(resp, "id", None),
-            foundry_request_id=getattr(resp, "_request_id", None),
+        project = AIProjectClient(project_endpoint, DefaultAzureCredential())
+        openai_client = project.get_openai_client()
+        resp = openai_client.responses.create(
+            input=[
+                {"type": "message", "role": "system", "content": system_prompt},
+                {"type": "message", "role": "user", "content": query},
+            ],
+            extra_body={
+                "agent_reference": {
+                    "name": agent_name,
+                    "version": agent_version,
+                    "type": "agent_reference",
+                }
+            },
         )
         return (getattr(resp, "output_text", "") or "").strip()
 
@@ -929,6 +894,5 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
 
 
 def _run_foundry_turn_sync(session: Session, user_message: str) -> str:
-    context = copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(context.run, asyncio.run, _run_foundry_turn(session, user_message)).result()
+        return pool.submit(asyncio.run, _run_foundry_turn(session, user_message)).result()

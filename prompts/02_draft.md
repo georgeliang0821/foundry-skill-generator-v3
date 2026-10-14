@@ -17,8 +17,10 @@ user's accept/reject.
   skill per request, so the body supports comprehension and recovery, not
   routing):
   1. `## Overview` - ONE line stating what the skill does.
-  2. `## When NOT to Use This Skill` - negative routing, one line per neighbor in
-     the form `scenario half-sentence -> use \`neighbor-skill\``.
+    2. `## When NOT to Use This Skill` - stopping conditions for the model:
+      "Checking availability, finding a common time, or creating, updating or
+      cancelling meetings or bookings is outside this skill's scope; do not use
+      this skill to handle it." Describe exclusions, not a destination skill.
   3. `## Required Inputs` - every `runtime` variable (name, what to provide,
      required?). This section is the SOLE source of the caller-facing field
      contract, because a scenario skill points other agents at it by name
@@ -108,6 +110,11 @@ user's accept/reject.
   background only and are never a source of code detail.
 - Base the prose sections on the Prepare Brief (understanding + research), and
   the sample code on the materials as described above.
+- **No named references to other skills anywhere in SKILL.md**, including the
+  description, Ground Rules and Output Expectations. Dependency declarations
+  and actual scenario dependency calls are the only exceptions, not ordinary
+  prose mentions of those dependencies. For mixed requests, state that only
+  the portion within this skill's scope is completed; do not handle the rest.
 - **Valid YAML is critical.** The opening frontmatter must be syntactically
   correct: fenced by `---` on its own lines, every value containing `:` or
   multilingual prose quoted, consistent indentation. A skill with malformed
@@ -129,12 +136,12 @@ user's accept/reject.
   skill text.
 - The reader of the skill is a CODING AGENT picking ONE skill per user request,
   so the `description` must say WHEN to use the skill (intent/situation) and
-  carry the centrifugal contrast against the neighbor skills, NOT technical
-  detail.
+  describe its own positive scope and out-of-scope situations, NOT another
+  skill's name or technical detail.
 - Write the frontmatter `description` as the router-facing contract. It should
   be 2-3 concise sentences that state: the core capability, the data sources or
-  tools it acts on, common Chinese and English trigger phrases, and the boundary
-  against adjacent skills. It should generalize the confirmed sample intents
+  tools it acts on, common Chinese and English trigger phrases, and situations
+  it does not handle. Never name another skill. Generalize the confirmed sample intents
   without copying sample queries. Prefer precise retrieval language over generic
   praise. Quote the YAML `description` value whenever it contains punctuation
   such as `:` or multilingual prose.

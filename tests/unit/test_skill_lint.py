@@ -19,6 +19,78 @@ CAPABILITY = REPO / "skills" / "hr-leave-requests" / "SKILL.md"
 SCENARIO = REPO / "skills" / "leave-request-orchestration" / "SKILL.md"
 
 
+@pytest.mark.parametrize("location", ["description", "When NOT to Use This Skill", "Ground Rules", "Output Expectations", "preamble", "code"])
+@pytest.mark.parametrize("reference", ["ms-graph-calendar", "`ms-graph-calendar`", "MS-GRAPH-CALENDAR"])
+def test_named_reference_is_error(location: str, reference: str) -> None:
+    description = reference if location == "description" else "Find rooms by their attributes."
+    body = f"## {location}\nDo not use {reference}."
+    if location == "preamble":
+        body = reference + "\n## Overview\nFind rooms."
+    if location == "code":
+        body = f'```python\nprint("{reference}")\n```'
+    md = f'---\nname: room-finder\ndescription: "{description}"\n---\n{body}'
+    issues = lint_skill(md, SkillKind.CAPABILITY, catalog_skill_names=["ms-graph-calendar"])
+    findings = [issue for issue in issues if issue.rule == "N1"]
+    assert findings and all(issue.severity == "error" for issue in findings)
+    assert all("ms-graph-calendar" not in issue.message + issue.detail for issue in findings)
+
+
+def test_named_reference_stopping_conditions_and_own_name_pass() -> None:
+    md = '''---
+name: room-finder
+description: "room-finder filters rooms; it does not check free/busy or book meetings."
+---
+## When NOT to Use This Skill
+Calendar availability and booking are out of scope. Do not use this skill for them.
+## Ground Rules
+For mixed requests, only complete attribute filtering.
+room-finder-extra is not an exact catalog name.
+'''
+    assert not [issue for issue in lint_skill(md, SkillKind.CAPABILITY, catalog_skill_names=["room-finder", "ms-graph-calendar"])
+                if issue.rule == "N1"]
+
+
+def test_named_reference_own_name_without_trailing_newline_passes() -> None:
+    md = '---\nname: room-finder\ndescription: "room-finder filters rooms."\n---'
+    assert not [issue for issue in lint_skill(md, SkillKind.CAPABILITY, catalog_skill_names=["room-finder"])
+                if issue.rule == "N1"]
+
+
+@pytest.mark.parametrize("description", [
+    '"Use calendar-child."',
+    '>\n  Coordinate booking;\n  use calendar-child.',
+    '"Use \\u0063alendar-child."',
+])
+def test_named_reference_declared_child_is_not_exempt_in_description(description: str) -> None:
+    md = f'---\nname: booking-flow\ndescription: {description}\nmetadata:\n  children: [calendar-child]\n---\n## Step 1\nfetch_skill(skill_name="calendar-child")'
+    assert any(issue.rule == "N1" for issue in lint_skill(md, SkillKind.SCENARIO, catalog_skill_names=["calendar-child"]))
+
+
+@pytest.mark.parametrize("body, forbidden", [
+    ('fetch_skill(skill_name="calendar-child", sections="Required Inputs")', False),
+    ('fetch_skill(\n    skill_name="calendar-child",\n    sections="Required Inputs"\n)', False),
+    ('Use calendar-child for booking.', True),
+    ('## When NOT to Use This Skill\nfetch_skill(skill_name="calendar-child")', True),
+    ('fetch_skill(skill_name="undeclared-child")', True),
+    ('fetch_skill(skill_name="calendar-child", sections="calendar-child")', True),
+    ('## Not applicable\nfetch_skill(skill_name="calendar-child")', True),
+    ('fetch_skill(skill_name="calendar-child", sections="Required Inputs")\nUse calendar-child.', True),
+])
+def test_named_reference_dependency_exception_is_call_only(body: str, forbidden: bool) -> None:
+    md = f'''---
+name: booking-flow
+description: "Coordinate booking."
+metadata:
+  children: [calendar-child]
+  skill_type: scenario-orchestration
+---
+## Step 1
+{body}
+'''
+    issues = lint_skill(md, SkillKind.SCENARIO, catalog_skill_names=["calendar-child", "undeclared-child"])
+    assert bool([issue for issue in issues if issue.rule == "N1"]) is forbidden
+
+
 def test_input_bindings_preserve_legacy_and_parse_mixed_sources() -> None:
     from backend.input_contract import parse_input_bindings
     from backend.models import SkillVariable

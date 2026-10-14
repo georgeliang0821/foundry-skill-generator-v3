@@ -43,7 +43,7 @@ from .blob_store import (
     safe_skill_name,
     script_relpath_of,
 )
-from .diagnostics import elapsed_ms, env_flag, log_context, log_event, log_exception, log_timing, now_ms
+from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
 from .e2e import (
     FakeE2EAgent,
     e2e_enabled,
@@ -70,7 +70,7 @@ from .eaa_platform import (
     script_flags_off,
     split_eaa_allowlist_warnings,
 )
-from .skill_lint import lint_skill, lint_warning_count, stdout_to_stderr
+from .skill_lint import check_named_skill_references, lint_skill, lint_warning_count, stdout_to_stderr
 from .skill_assets import MAX_ASSET_BYTES, AssetRejected, assets_blocked_reason, check_asset, check_asset_set
 from .input_contract import input_contract_errors
 from .models import (
@@ -322,13 +322,11 @@ def _load_selected_neighbor_full_md(session) -> None:
     loaded: dict[str, str] = {}
     session.neighbor_edit_policy = {}
     for name in names:
-        with log_timing("neighbor_full_md.sql", session_id=session.id, skill_name=name):
-            row = skills_repo.get_skill(name)
+        row = skills_repo.get_skill(name)
         session.neighbor_edit_policy[name] = "editable" if row and (row.created_by or "").strip().lower() == session.owner_upn else "notify_creator" if row and row.created_by else "skip_missing_creator"
         if row is None or (row.created_by or "").strip().lower() != session.owner_upn:
             continue
         if len(loaded) >= 5:
-            session.neighbor_edit_policy[name] = "load_limit"
             continue
         ne = edits_by_name.get(name)
         if ne and ne.versions:
@@ -338,10 +336,8 @@ def _load_selected_neighbor_full_md(session) -> None:
                 loaded[name] = md
                 continue
         try:
-            with log_timing("neighbor_full_md.blob", session_id=session.id, skill_name=name):
-                files = store.load_skill(name)
+            files = store.load_skill(name)
         except Exception as exc:  # noqa: BLE001 - one missing neighbor must not fail the batch.
-            session.neighbor_edit_policy[name] = "load_failed"
             log_event(
                 "neighbor_full_md.load_missing",
                 level="warning",
@@ -352,8 +348,6 @@ def _load_selected_neighbor_full_md(session) -> None:
             continue
         if files.skill_md.strip():
             loaded[name] = files.skill_md
-        else:
-            session.neighbor_edit_policy[name] = "empty_content"
     session.neighbor_full_md = loaded
     log_event("neighbor_full_md.loaded", session_id=session.id, requested=len(names), loaded=len(loaded))
 
@@ -688,8 +682,6 @@ log_event("app.ready", session_count=len(sessions), session_root=_session_store_
 
 PASSIVE_TOOL_CALLS = {
     "stage_transition",
-    "select_neighbor_skill",
-    "confirm_neighbor_notification",
     "record_understanding",
     "record_research",
     "record_reflection",
@@ -2068,6 +2060,25 @@ def _assert_topology_preserved(session: Session, skill_md: str, *, tool: str) ->
         )
 
 
+def _catalog_skill_names() -> set[str]:
+    try:
+        return skills_repo.catalog_skill_names()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The skill catalog is unavailable; named-reference validation could not complete.",
+        ) from exc
+
+
+def _assert_no_named_skill_references(skill_md: str, kind: SkillKind) -> None:
+    issues = check_named_skill_references(skill_md, kind, _catalog_skill_names())
+    if issues:
+        raise _lint_failure(
+            "skill_lint_failed", "Skill lint failed",
+            [f"{issue.rule}: {issue.message} {issue.detail}" for issue in issues],
+        )
+
+
 def _session_lint(session: Session, skill_md: str) -> list:
     """Run the artifact content lint with whatever cross-file context the session has."""
     return lint_skill(
@@ -2082,14 +2093,15 @@ def _session_lint(session: Session, skill_md: str) -> list:
         obo_registry_keys=obo_registry_keys(session.aca_env_result),
         script=session.current_skill.script,
         asset_paths=[asset.path for asset in session.assets],
+        catalog_skill_names=_catalog_skill_names(),
     )
 
 
 def _note_skill_lint(session: Session, skill_md: str, *, tool: str) -> None:
     """Surface content defects the topology rules cannot see.
 
-    Advisory for the same reason as the fidelity scan, with one exception: A1
-    (the sample code does not parse) is enforced at save time instead.
+    Findings are surfaced here; error-severity rules are enforced at save time.
+    N1 also runs before draft and patch content is applied.
     """
     try:
         issues = _session_lint(session, skill_md)
@@ -2262,6 +2274,7 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             raise ValueError("propose_skill_draft cannot replace a saved skill; use propose_patch in REFINE instead")
         proposed = args.get("skill_md", "")
         _assert_topology_preserved(session, proposed, tool="propose_skill_draft")
+        _assert_no_named_skill_references(proposed, SkillKind(session.skill_kind))
         session.current_skill.skill_md = proposed
         session.current_skill.version_hash = compute_hash(session.current_skill.skill_md)
         # A redraft supersedes the earlier unsaved card; only the newest can be accepted.
@@ -2310,46 +2323,6 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         current_name, _ = parse_frontmatter(session.current_skill.skill_md)
         if safe_skill_name(current_name) == new_name:
             raise ValueError(f"This skill is already named `{new_name}`; there is nothing to rename.")
-        return
-
-    if tool == "confirm_neighbor_notification":
-        if session.current_stage not in {"prepare", "draft", "refine"}:
-            raise ValueError("confirm_neighbor_notification is only available in PREPARE, DRAFT or REFINE.")
-        name = str(args.get("skill_name", "")).strip()
-        if not name or safe_skill_name(name) != name:
-            raise ValueError("confirm_neighbor_notification requires an exact skill name.")
-        row = skills_repo.get_skill(name)
-        if row and (row.created_by or "").strip().lower() == session.owner_upn:
-            raise ValueError("Your own neighbor uses the edit workflow, not a notification.")
-        try:
-            _queue_neighbor_notice(session, name, notify=args.get("notify", True))
-        except HTTPException as exc:
-            raise ValueError(str(exc.detail)) from exc
-        session.touch()
-        return
-
-    if tool == "select_neighbor_skill":
-        from backend.models import NeighborSkill
-
-        if session.current_stage not in {"prepare", "draft", "refine"}:
-            raise ValueError("select_neighbor_skill is only available in PREPARE, DRAFT or REFINE.")
-        name = str(args.get("skill_name", "")).strip()
-        if not name or safe_skill_name(name) != name:
-            raise ValueError("select_neighbor_skill requires an exact skill name.")
-        try:
-            acl_mod.assert_can_access(session.owner_upn, name)
-        except HTTPException as exc:
-            raise ValueError("The selected neighbor is not accessible.") from exc
-        if skills_repo.get_skill(name) is None:
-            raise ValueError("The selected neighbor no longer exists.")
-        understanding = session.prepare_brief.understanding
-        selected = next((nb for nb in understanding.neighbor_skills if nb.skill == name), None)
-        understanding.neighbor_skills = [selected or NeighborSkill(skill=name)] + [
-            nb for nb in understanding.neighbor_skills if nb.skill != name
-        ]
-        session.prepare_brief.last_updated = now_ms()
-        _load_selected_neighbor_full_md(session)
-        session.touch()
         return
 
     if tool == "record_understanding":
@@ -2599,7 +2572,7 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
             options = "(none -- this is a terminal stage)"
             tail = "Call ask_user_input to ask the user how they want to proceed."
         return (
-            f"Stage transition rejected: {exc}. You are in '{cur_name}' and cannot move directly to "
+            f"Stage transition rejected: you are in '{cur_name}' and cannot move directly to "
             f"'{requested}'. Valid transitions from '{cur_name}': {options}. {tail}"
         )
     if tool == "update_prepare_checklist" and not session.children:
@@ -3337,22 +3310,18 @@ def auth_logout(request: Request):
 
 @app.post("/api/sessions/{session_id}/chat")
 async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn)) -> dict[str, Any]:
-    with log_context(request_id=secrets.token_hex(8), session_id=session_id):
-        return await _chat_turn(session_id, req, upn)
-
-
-async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, Any]:
     # Non-streaming: collect every agent event into a list and return JSON.
     # The frontend replays the batch through the same onEvent dispatcher it
     # would otherwise use for SSE.
     started = now_ms()
+    session = get_session_for_user(session_id, upn)
     log_event(
         "chat.start",
+        session_id=session.id,
+        stage=session.current_stage,
         message_chars=len(req.message or ""),
         material_count=len(req.materials),
     )
-    with log_timing("chat.phase", phase="session_load"):
-        session = get_session_for_user(session_id, upn)
     if req.materials:
         codes_before = code_material_contents(session)
         session.materials.extend(req.materials)
@@ -3366,25 +3335,17 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
             ChatMessage(role=MessageRole.USER, content=req.message, metadata=msg_meta)
         )
     session.touch()
-    with log_timing("chat.phase", phase="initial_persist"):
-        persist_session(session)
+    persist_session(session)
 
     # Refresh the full SKILL.md of the selected neighbor skills so the agent can
     # edit them with a patch this turn without asking the user for the text.
-    with log_timing("chat.phase", phase="neighbor_load"):
-        _load_selected_neighbor_full_md(session)
+    _load_selected_neighbor_full_md(session)
 
     events: list[dict[str, Any]] = []
     assistant_chunks: list[str] = []
     event_counts: dict[str, int] = {}
     try:
-        agent_events = iter(agent.stream(session, req.message))
-        end_of_events = object()
-        while True:
-            with log_timing("chat.phase", phase="agent_next_event"):
-                event = next(agent_events, end_of_events)
-            if event is end_of_events:
-                break
+        for event in agent.stream(session, req.message):
             if not isinstance(event, dict):
                 log_event("chat.event.non_dict", level="warning", session_id=session.id, event_type=type(event).__name__)
                 assistant_chunks.append(str(event))
@@ -3408,8 +3369,7 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                 try:
                     if data.get("tool") == "propose_material_patch" and (data.get("args") or {}).get("stdout_fix"):
                         _fill_stdout_fix_patch(session, data)
-                    with log_timing("chat.phase", phase="tool_effect", tool=data.get("tool"), call_id=data.get("call_id")):
-                        apply_tool_effect(session, data["tool"], data.get("args", {}))
+                    apply_tool_effect(session, data["tool"], data.get("args", {}))
                 except QualityGateError as qge:
                     log_event(
                         "chat.quality_gate_failed",
@@ -3459,25 +3419,20 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                         "guidance": guidance,
                         "recovery_action": getattr(rejected, "recovery_action", "ask_user"),
                     }})
-                    with log_timing("chat.phase", phase="rejected_tool_persist", call_id=call_id):
-                        persist_session(session)
+                    persist_session(session)
                     continue
                 if data["tool"] in PASSIVE_TOOL_CALLS:
                     call_id = data.get("call_id")
                     session.pending_tool_calls = [
                         call for call in session.pending_tool_calls if call.call_id != call_id
                     ]
-                with log_timing("chat.phase", phase="tool_persist", call_id=data.get("call_id")):
-                    persist_session(session)
+                persist_session(session)
             events.append({"event": event_name, "data": data})
         assistant_text = "".join(assistant_chunks).strip()
         if assistant_text:
             session.conversation.append(ChatMessage(role=MessageRole.ASSISTANT, content=assistant_text))
             session.touch()
-        with log_timing("chat.phase", phase="final_persist"):
-            persist_session(session)
-        with log_timing("chat.phase", phase="state_snapshot"):
-            state_snapshot = session.model_dump(mode="json")
+        persist_session(session)
         log_event(
             "chat.done",
             session_id=session.id,
@@ -3487,11 +3442,10 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
             event_counts=event_counts,
             duration_ms=elapsed_ms(started),
         )
-        events.append({"event": "state_update", "data": state_snapshot})
+        events.append({"event": "state_update", "data": session.model_dump(mode="json")})
         events.append({"event": "done", "data": {}})
     except Exception as exc:
-        with log_timing("chat.phase", phase="failure_persist"):
-            persist_session(session)
+        persist_session(session)
         log_exception("chat.failed", exc, session_id=session.id, stage=session.current_stage, duration_ms=elapsed_ms(started))
         events.append({"event": "error", "data": {"message": str(exc)}})
     return {"events": events}
@@ -3544,6 +3498,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             # layer, so anything that drops that declaration is refused BEFORE
             # it reaches the session or Blob.
             _assert_topology_preserved(session, updated, tool="propose_patch")
+            if target == "SKILL.md":
+                _assert_no_named_skill_references(updated, SkillKind(session.skill_kind))
             set_current_content(session, target, updated, new_hash)
             # REFINE is exactly where material-aligned code gets rewritten back
             # into invented code, so the check runs here too.
@@ -4094,7 +4050,7 @@ def update_session_neighbors(session_id: str, req: NeighborsUpdateRequest, upn: 
     return session
 
 
-def _queue_neighbor_notice(session: Session, name: str, *, notify: bool | None = None) -> None:
+def _queue_neighbor_notice(session: Session, name: str) -> None:
     name = safe_skill_name(name)
     row = skills_repo.get_skill(name)
     if row is None:
@@ -4114,12 +4070,6 @@ def _queue_neighbor_notice(session: Session, name: str, *, notify: bool | None =
         existing = NeighborNoticeOutcome(skill_key=key, skill_name=name)
         session.neighbor_notice_outcomes.append(existing)
     existing.target_user = creator
-    if notify is not None:
-        existing.user_declined = not notify
-    if existing.user_declined:
-        existing.status = "skipped"
-        existing.message = "未通知：使用者選擇不通知。"
-        return
     existing.status = "pending" if creator and row.enabled else "skipped"
     existing.message = f"來源 Skill 儲存成功後通知 {creator} 進行相鄰 Skill 修改確認。" if existing.status == "pending" else "未通知：鄰居沒有建立者或已停用。"
 
@@ -4434,6 +4384,8 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
         raise HTTPException(status_code=400, detail="No selected version to save")
     if not _user_can_modify_skill(upn, ne.skill_name):
         raise HTTPException(status_code=403, detail=f"You cannot modify the skill: {ne.skill_name}")
+    kind = SkillKind.SCENARIO if parse_frontmatter_meta(version.skill_md).get("children") else SkillKind.CAPABILITY
+    _assert_no_named_skill_references(version.skill_md, kind)
     previous = store.load_skill(ne.skill_name)
     try:
         versioned_md = prepare_skill_version(version.skill_md, previous.skill_md)

@@ -421,7 +421,8 @@ def _azure_store(container: _FakeBlobContainer) -> AzureBlobSkillStore:
     return store
 
 
-def test_azure_backup_preserves_complete_old_package() -> None:
+@pytest.mark.parametrize("summary", ["Remove obsolete script and assets.", "\u79fb\u9664\u904e\u6642\u8173\u672c\u8207\u8cc7\u7522\u3002"])
+def test_azure_backup_preserves_complete_old_package(summary) -> None:
     original = {
         "skills/demo/SKILL.md": b"old",
         "skills/demo/scripts/demo.py": b"old script",
@@ -432,14 +433,21 @@ def test_azure_backup_preserves_complete_old_package() -> None:
     store = _azure_store(live)
     store.history_container = "skill-history"
     store.service = type("_Service", (), {"get_container_client": lambda self, name: history if name == "skill-history" else live})()
-    store.save_skill(SkillFiles(name="demo", skill_md="new", remove_script=True, assets={}), captured_by="User@Example.com", change_summary=" Remove obsolete script and assets. ")
+    store.save_skill(SkillFiles(name="demo", skill_md="new", remove_script=True, assets={}), captured_by="User@Example.com", change_summary=f" {summary} ")
     manifests = [name for name in history.blobs if name.endswith("/manifest.json")]
     assert len(manifests) == 1
-    manifest = json.loads(history.blobs[manifests[0]])
+    manifest_text = history.blobs[manifests[0]].decode("utf-8")
+    assert f'  "change_summary": {json.dumps(summary, ensure_ascii=False)}' in manifest_text
+    assert manifest_text.startswith("{\n") and manifest_text.endswith("\n")
+    manifest = json.loads(manifest_text)
     assert manifest["captured_by"] == "user@example.com"
-    assert manifest["change_summary"] == "Remove obsolete script and assets."
+    assert manifest["change_summary"] == summary
     assert manifest["source_etag"] == hashlib.sha256(b"old").hexdigest()
+    assert manifest["source_store"] == "azure:test"
+    assert manifest["source_blob_path"] == "skills/demo/SKILL.md"
     assert datetime.fromisoformat(manifest["captured_at"]).utcoffset().total_seconds() == 0
+    timestamp = datetime.fromisoformat(manifest["captured_at"]).strftime("%Y%m%dT%H%M%SZ")
+    assert manifests[0] == f"demo/{timestamp}_{manifest['revision_id']}/manifest.json"
     for entry in manifest["files"]:
         data = original[f"skills/demo/{entry['path']}"]
         assert entry["size_bytes"] == len(data)
@@ -562,13 +570,29 @@ def test_history_cas_protects_live_after_manifest(monkeypatch) -> None:
     assert any(name.endswith("/manifest.json") for name in history.blobs)
 
 
-def test_history_repeated_saves_and_delete_preserve_isolated_revisions() -> None:
-    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer({})
+def test_history_repeated_saves_and_delete_preserve_isolated_revisions(monkeypatch) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 14, 1, 9, 54, tzinfo=tz)
+
+    monkeypatch.setattr("backend.blob_store.datetime", FixedDatetime)
+    legacy = {
+        "demo/source-key/old-revision/manifest.json": b"legacy manifest",
+        "demo/source-key/old-revision/files/SKILL.md": b"legacy content",
+    }
+    live, history = _FakeBlobContainer({"skills/demo/SKILL.md": b"old"}), _FakeBlobContainer(legacy)
     store = _history_store(live, history)
     store.save_skill(SkillFiles(name="demo", skill_md="new"))
     store.save_skill(SkillFiles(name="demo", skill_md="new"))
     store.delete_skill("demo")
-    assert len([name for name in history.blobs if name.endswith("/manifest.json")]) == 2
+    manifests = [name for name in history.blobs if name.endswith("/manifest.json") and name not in legacy]
+    assert len(manifests) == 2
+    for name in manifests:
+        manifest = json.loads(history.blobs[name])
+        assert name == f"demo/20261014T010954Z_{manifest['revision_id']}/manifest.json"
+    for name, data in legacy.items():
+        assert history.blobs[name] == data
     assert not live.blobs
 
 

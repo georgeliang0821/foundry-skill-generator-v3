@@ -28,6 +28,18 @@ from backend.state_machine import (
 )
 
 
+@pytest.mark.parametrize("kind", [SkillKind.CAPABILITY, SkillKind.SCENARIO])
+@pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT, Stage.REFINE])
+def test_prompt_contract_uses_unnamed_stopping_conditions(kind: SkillKind, stage: Stage) -> None:
+    text = build_system_prompt(Session(skill_kind=kind, current_stage=stage))
+    assert "never name another skill there" in text
+    assert "stopping conditions" in text
+    assert "in-scope portion" in text or "portion within this skill's scope" in text
+    assert "-> use `neighbor-skill`" not in text
+    assert "-> use `<new-skill-name>`" not in text
+    assert "Skills named here are alternatives" not in text
+
+
 def _fully_prepared_session() -> Session:
     """Helper: build a session that passes all PREPARE -> DRAFT quality gates."""
     s = Session(current_stage=Stage.PREPARE)

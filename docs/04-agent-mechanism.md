@@ -179,11 +179,13 @@ Agent 透過 `record_understanding` 將定義寫入 Brief：
 以相似鄰居 `neighbor_skills` 為軸心，採 Strict Mode：
 
 1. **選鄰居 (與使用者互動)**：藉 `ask_user_input` 讓使用者自 heavy overlaps 中挑選 1-3 個最像的，確認後寫入 `neighbor_skills`。
-2. **描述對比 (Agent 自行推理)**：將「我是 X，不是 Y」的 centrifugal 對稱邊界寫進 `description` frontmatter。
+2. **描述邊界 (Agent 自行推理)**：依內部鄰居比較，將本 skill 的正面範圍與不處理的情境寫進 `description` frontmatter，不寫其他 skill 的名稱。
 3. **互斥檢視 (Agent 自行推理)**：將自薦 description 與鄰居 metadata 做交叉干擾診斷，視需要調整文字精度。
-4. **When NOT to Use (Agent 自行推理)**：在內文為各鄰近 Skill 匹配 `व्हे情境 ➔ 推薦轉移至鄰居`。
+4. **When NOT to Use (Agent 自行推理)**：列出超出本 skill 範圍的停止條件，指示不要用本 skill 處理，不指定具名替代者；混合需求只完成本 skill 範圍內的部分。
 5. **備置範例 (與使用者互動)**：使用者藉 `request_positive_samples` 開箱正面用例，存檔後系統自動推理出負面盲測 Query，共同更新成 `test_samples`。
 6. **鄰近處理 (依建立者分流)**：自己的鄰居由 Agent 提出 description／When NOT to Use Patch，作者確認後沿用版本與儲存流程。他人的鄰居不產生修改稿，只在路由確認後記錄關係、來源儲存成功後通知 creator；建立者空白則跳過並提示。creator 選「開始修改確認」時以最新目標全文及來源 name／description 開啟完整 PREPARE MODIFY，由 [17_neighbor_notice_review.md](../prompts/17_neighbor_notice_review.md) 引導當下建議與確認，不預套 description。通知在 session 建立成功或選「不修改」時立即結案，不等待後續存檔。
+
+這項邊界寫作規則適用於 SKILL.md 的 description 與所有內文章節，也適用於後續 DRAFT、REFINE 與鄰居內容修改。結構化依賴宣告與 scenario 的實際依賴呼叫可保留名稱，一般敘述不享有依賴例外；後端以 N1 阻擋 catalog 中其他 skill 的具名引用，詳見 [03-architecture.md 第 2.3 節](03-architecture.md#23-eaa-skill-lint)。
 
 #### 3.1.3 variables_ok 細部子任務
 

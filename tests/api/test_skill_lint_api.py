@@ -162,6 +162,89 @@ def test_save_is_not_blocked_by_advisory_lint_findings(client) -> None:
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize("location", ["description", "When NOT to Use This Skill", "Ground Rules", "Output Expectations"])
+def test_named_reference_hidden_catalog_blocks_direct_save(client, backend_main, fake_sql, location) -> None:
+    fake_sql.upsert_skill("hidden-calendar", created_by="other@example.com", enabled=False)
+    md = RAISING_SKILL
+    if location == "description":
+        md = md.replace("A skill that misfiles a caller error as an exception.", "Use hidden-calendar.")
+    else:
+        md += f"\n## {location}\nUse hidden-calendar.\n"
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    assert client.put(f"/api/sessions/{sid}/draft", json={"skill_md": md}).status_code == 200
+    response = client.post(f"/api/sessions/{sid}/save", json={"name": "raising-skill"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["kind"] == "skill_lint_failed"
+    assert "N1:" in response.json()["detail"]["message"]
+    assert "hidden-calendar" not in response.text
+    assert not backend_main.store.list_skills()
+    assert "raising-skill" not in fake_sql.skills
+
+
+def test_named_reference_draft_proposal_is_rejected_before_mutation(backend_main, fake_sql) -> None:
+    fake_sql.upsert_skill("hidden-calendar")
+    session = backend_main.Session(current_stage="draft")
+    before = session.current_skill.model_dump()
+    with pytest.raises(backend_main.HTTPException) as caught:
+        backend_main.apply_tool_effect(session, "propose_skill_draft", {"skill_md": RAISING_SKILL + "\nUse hidden-calendar."})
+    assert caught.value.status_code == 400
+    assert session.current_skill.model_dump() == before
+
+
+def test_named_reference_catalog_failure_blocks_draft_and_save(client, backend_main, monkeypatch) -> None:
+    def unavailable():
+        raise RuntimeError("SQL unavailable")
+    monkeypatch.setattr(backend_main.skills_repo, "catalog_skill_names", unavailable)
+    session = backend_main.Session(current_stage="draft")
+    with pytest.raises(backend_main.HTTPException) as caught:
+        backend_main.apply_tool_effect(session, "propose_skill_draft", {"skill_md": RAISING_SKILL})
+    assert caught.value.status_code == 503
+    assert not session.current_skill.skill_md
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": RAISING_SKILL})
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "raising-skill"}).status_code == 503
+    assert not backend_main.store.list_skills()
+
+
+def test_named_reference_stopping_conditions_save_and_session_is_isolated(client, backend_main, fake_sql, tmp_path) -> None:
+    fake_sql.upsert_skill("hidden-calendar")
+    md = RAISING_SKILL + "\n## When NOT to Use This Skill\nBooking is outside this skill's scope; do not use it for booking.\n## Ground Rules\nFor mixed requests, complete only the in-scope portion."
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    assert backend_main.session_store.root.resolve() == (tmp_path / "sessions").resolve()
+    client.put(f"/api/sessions/{sid}/draft", json={"skill_md": md})
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "raising-skill"}).status_code == 200
+
+
+def test_named_reference_declared_scenario_call_proposes_and_saves(client, backend_main, grant_skill) -> None:
+    child_md = "---\nname: calendar-child\ndescription: Discover rooms.\n---\n## Required Inputs\nNone.\n"
+    backend_main.store.save_skill(backend_main.SkillFiles(name="calendar-child", skill_md=child_md))
+    grant_skill("calendar-child")
+    md = '''---
+name: room-flow
+description: "Coordinate room discovery."
+metadata:
+  children: [calendar-child]
+  skill_type: scenario-orchestration
+---
+## Scenario-layer notice
+The host coordinates this flow; the backend does not execute this scenario.
+## Fetch authorization
+Dependencies are absent from list_skills; fetch their contract through the call below.
+## Not applicable
+Booking is out of scope; do not use this skill for booking.
+## Step 1
+fetch_skill(skill_name="calendar-child", sections="Required Inputs")
+'''
+    sid = client.post("/api/sessions", json={"mode": "new", "skill_kind": "scenario", "materials": []}).json()["id"]
+    session = backend_main.sessions[sid]
+    session.current_stage = "draft"
+    session.children = ["calendar-child"]
+    backend_main.apply_tool_effect(session, "propose_skill_draft", {"skill_md": md})
+    response = client.post(f"/api/sessions/{sid}/save", json={"name": "room-flow"})
+    assert response.status_code == 200, response.text
+    assert backend_main.store.load_skill("room-flow").skill_md == md
+
+
 def _lint_result(backend_main, *, valid=True, errors=(), warnings=(), ruleset_version="1.0"):
     return backend_main.EaaLintResult(
         valid=valid, errors=list(errors), warnings=list(warnings), ruleset_version=ruleset_version

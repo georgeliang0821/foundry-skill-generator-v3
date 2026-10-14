@@ -49,11 +49,16 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    run as steps A-F: [A] pick 1-3 most similar Peer Skills by
    (skill_goal + key_capabilities); for each record `{skill, axis, scenario}`
    via `record_understanding(neighbor_skills=[...])`. [B] derive the description
-   contrast ("I am X, not Y") into the frontmatter description. [C] MUTUAL-
+  boundary into the frontmatter description: only this skill's positive scope
+  and the situations it does not handle, never another skill's name. [C] MUTUAL-
    EXCLUSION CHECK: evaluate the new description with each neighbor's existing
    description and, if selection could jitter, strengthen the distinguishing
-   words until mutually exclusive. [D] derive one When NOT to Use line per
-   neighbor ("scenario -> use `neighbor`"). [E] ROUTING SAMPLES IN STRICT ORDER:
+  words until mutually exclusive. [D] derive stopping conditions from the
+  out-of-scope situations: "This situation is outside this skill's scope;
+  do not use this skill to handle it." Do not name a destination skill.
+  For mixed requests, specify that only the in-scope portion is completed.
+  Neighbor names remain internal research/test data, not artifact prose.
+  [E] ROUTING SAMPLES IN STRICT ORDER:
    E.1 FIRST ask the user to fill the POSITIVE samples table card (user-authored,
    "cover different real intents -- the more the better") and do NOT generate any
    negatives yet -- wait for Save. E.2 ONLY AFTER the user saves their positives,
@@ -61,9 +66,7 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    from the neighbor_skills (`{query, route_to_peer, why_not_this}`), without
    overwriting negatives the user already edited. Persist via
    `update_test_samples`. [F] NEIGHBOR EDITS -- raise this PROACTIVELY right after
-   E.2 and never silently skip it. PRECONDITION: the When NOT to Use backlink
-   names the NEW skill, so if it has no confirmed name yet, FIRST ask the user to
-   confirm the new skill's name before editing neighbors. Then evaluate EVERY
+  E.2 and never silently skip it. Evaluate EVERY
   neighbor using the server's Neighbor Edit Policy. Only `editable` neighbors
   may receive modification proposals. For `notify_creator`, do not generate
   descriptions, patches, or edit-confirmation cards: the routing checkpoint
@@ -77,8 +80,10 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    "## Neighbor Skills (full SKILL.md for editing)"; read it there, do not ask
    the user). DESCRIPTION style: do NOT just append a "not <new skill>" clause --
    instead clarify the NEIGHBOR'S OWN purpose/meaning/usage so its boundary is
-   self-evidently distinct (conceptual but precise). When NOT to Use: add/tighten
-   a "scenario -> use `<new-skill-name>`" line. PHASE 1: send ONE chat message
+  self-evidently distinct (conceptual but precise), without naming another skill.
+  When NOT to Use: add/tighten an out-of-scope stopping condition, never a
+  named backlink. Internal relationship records still identify the neighbors.
+  PHASE 1: send ONE chat message
    summarizing ALL edits (each neighbor: BOTH the description and When NOT to Use
    change, one-line what/why) and ask the user to confirm the set. PHASE 2: after
    they confirm, call `propose_neighbor_edit(skill_name, patch, label)` for ONE

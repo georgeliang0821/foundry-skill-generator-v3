@@ -18,8 +18,11 @@ wait for the user's accept/reject.
   children confirmed in `delegation_ok` plus every other existing skill any step
   relies on, including generic ones. The backend treats the list as a whitelist,
   so a skill left out is simply never available to the host and nothing reports
-  it. Do not invent a skill, and do not drop one. Skills named only in the "not
-  applicable" section are alternatives, not dependencies.
+  it. Do not invent a skill, and do not drop one. The "not applicable" section
+  contains out-of-scope stopping conditions, never named alternatives.
+- Do not name other skills in the description or ordinary body prose. Only
+  structured dependency declarations and actual dependency calls are exempt.
+  For mixed requests, state that only the in-scope portion is completed.
 - Keep `metadata` minimal. Every top-level frontmatter key is republished into
   the host's skill catalog on every listing, so payload schemas, call shapes and
   long contracts belong in the body, never in `metadata`.

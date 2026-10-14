@@ -22,6 +22,11 @@ content and the metadata always stay consistent.
   `failed` needs another save to retry. Do not request DONE until notifications
   are sent or explicitly skipped. If the user already confirmed notification
   in this conversation, persist that decision now rather than asking again.
+- Patches must not introduce named references to other skills anywhere in
+  SKILL.md, including description, stopping conditions, Ground Rules and Output
+  Expectations. Only dependency declarations and actual scenario dependency
+  calls are exempt. Describe this skill's scope and exclusions; for mixed
+  requests, state that only its in-scope portion is completed.
 - Use V4A patch format with unique anchors. Include the nearest section
   heading and enough unchanged context so the old block appears exactly once.
 - You MAY patch the YAML frontmatter `description`. Frontmatter lines are short,

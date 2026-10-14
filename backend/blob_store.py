@@ -619,8 +619,9 @@ class AzureBlobSkillStore:
             raise VersionConflict("Skill files changed during backup; reload before saving.") from exc
 
         manifest = _backup_manifest(self.id, skill_path, safe, source_etag, captured_by, contents, change_summary)
-        source_key = hashlib.sha256(f"{self.id}\0{skill_path}".encode("utf-8")).hexdigest()
-        revision_prefix = f"{safe}/{source_key}/{manifest['revision_id']}/"
+        captured_at = datetime.fromisoformat(manifest["captured_at"])
+        timestamp = captured_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        revision_prefix = f"{safe}/{timestamp}_{manifest['revision_id']}/"
         history = self.service.get_container_client(self.history_container)
         for path, data in sorted(contents.items()):
             history.get_blob_client(f"{revision_prefix}files/{path}").upload_blob(data, overwrite=False)
@@ -633,7 +634,7 @@ class AzureBlobSkillStore:
         except ResourceNotFoundError as exc:
             raise VersionConflict("Skill files disappeared during backup.") from exc
         history.get_blob_client(f"{revision_prefix}manifest.json").upload_blob(
-            json.dumps(manifest, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+            (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
             overwrite=False,
             content_settings=ContentSettings(content_type="application/json; charset=utf-8"),
         )

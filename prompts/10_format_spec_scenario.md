@@ -29,8 +29,8 @@ violation is rejected at save time.
   consequence of leaving one out is **silent** -- there is no error message and
   no failed step, the capability is simply absent. **When in doubt, list it.**
 
-  Skills named in S3 as routing alternatives are NOT part of this flow and must
-  not be listed.
+  Out-of-scope alternatives are not dependencies and must not be listed or
+  named in S3.
 - **T5** -- A capability skill must not declare `children`. Only a scenario
   skill does.
 - **T6** -- The frontmatter `name` must be identical to the name the skill is
@@ -66,8 +66,10 @@ save time.
   scenario body itself, not only here.
 - **P4** -- When the body contains at least one pointer, it must also contain
   the S0 authorization block below.
-- **P5** -- Every real skill the body names must appear in `metadata.children`.
-  The S3 routing-alternatives section is exempt.
+- **P5** -- Every actual dependency call in the body must name a skill in
+  `metadata.children`. The N1 content rule additionally forbids skill names in
+  ordinary prose, including S3; the dependency-call exception is not a prose
+  exemption.
 - **P6** -- The body must not restate field names declared in a child's
   `## Required Inputs`.
 
@@ -121,13 +123,18 @@ describe the SCENARIO the user is in, list the concrete request types the skill
 covers, and carry both Chinese and English trigger phrases when the users are
 bilingual.
 
+Describe only this scenario's positive scope and situations it does not handle.
+Never name another skill in the description or ordinary body prose; names are
+allowed only in structured dependency declarations and actual dependency calls.
+
 ## Body Sections (in this order)
 
 Each section is a numbered rule so it can be cited directly in review.
 
 1. **S1 -- Scenario-layer notice** -- a short block stating that this skill is
    not executed by the backend, that it describes what the host must do, and
-   that the actual work is delegated to the named child skill. Open it with a
+  that the actual work is delegated through the dependency calls below, without
+  naming a child in this notice. Open it with a
    warning line to that effect.
 2. **S0 -- Fetch authorization** -- immediately after S1. The child skills do
    NOT appear in the host's `list_skills` catalog, so a model reading this body
@@ -147,11 +154,11 @@ Each section is a numbered rule so it can be cited directly in review.
    accounted for: either it has a row here, or S3 says why this scenario does
    not do it. An operation named in neither is a child capability the host can
    never reach through this scenario, and nothing at runtime reports it.
-4. **S3 -- Not applicable** -- what this scenario does NOT cover and where to go
-   instead. This is the negative routing section; keep every line
-   discriminative. Skills named here are alternatives, not dependencies: they
-   must NOT be added to `metadata.children`. Name here, with its reason, every
-   child operation you deliberately left out of S2.
+4. **S3 -- Not applicable** -- stopping conditions: list what this scenario does
+  NOT cover and instruct the model not to use this skill for those situations.
+  Do not name alternatives or dependency skills here. List, with its reason,
+  every child operation deliberately left out of S2. For mixed requests,
+  complete only the portion covered by this scenario.
 5. **S4 -- Step overview table** -- the whole flow as a numbered list of steps,
    each labelled with its actor (host or backend) and marked when it needs a
    host capability. This column must agree with the rest of the file: if a
@@ -169,8 +176,9 @@ Each section is a numbered rule so it can be cited directly in review.
    - **Section pointer**: instead of a field table, write all three parts --
      omitting any one of them invites the next maintainer to inline the table
      again:
-     1. A sentence stating that the field contract is whatever `<child>`'s body
-        says, and that this section does not repeat it.
+      1. A sentence stating that the field contract is in the dependency body
+        retrieved by the following call, and is not repeated here. Do not name
+        the dependency outside the call.
      2. The `fetch_skill` call itself, with every section name this step needs.
      3. One line per section name saying what that section provides ("the
         per-operation required fields and the `credentials` key names", "every

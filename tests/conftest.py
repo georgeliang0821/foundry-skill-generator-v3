@@ -163,6 +163,7 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
             state.grants.pop(grant_key, None)
 
     monkeypatch.setattr(skills_repo, "list_skills_for_user", _list_skills_for_user)
+    monkeypatch.setattr(skills_repo, "catalog_skill_names", lambda: {meta["skill_name"] for meta in state.skills.values()})
     monkeypatch.setattr(
         skills_repo, "list_skills_created_by",
         lambda upn: [

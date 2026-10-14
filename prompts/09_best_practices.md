@@ -3,7 +3,19 @@
 - Write descriptions for retrieval: intent verbs first, implementation details later.
 - Include both what the skill does and when the agent should select it.
 - Include Chinese and English trigger phrases when the expected users are bilingual.
-- Make When NOT to Use entries discriminative and point to adjacent skills when known.
+- Describe only this skill's positive scope and situations it does not handle
+  in the frontmatter description; never name another skill there.
+- Do not name other skills anywhere in the body, including Ground Rules and
+  Output Expectations. Only structured dependency declarations and actual
+  scenario dependency calls (such as `fetch_skill` arguments) are exempt;
+  declaring a dependency does not allow its name in ordinary prose.
+- Write When NOT to Use entries as stopping conditions: list the out-of-scope
+  situation and instruct the model not to use this skill for it, without naming
+  an alternative. The model selects from the descriptions of skills currently
+  available to the user, not from destinations written in this artifact.
+- For mixed requests, state that only the portion within this skill's scope is
+  completed. For example, if a request combines room attribute filtering with
+  availability or booking, complete only the attribute filtering.
 - Keep environment variable instructions explicit and actionable.
 - Preserve user-provided constraints and avoid inventing unsupported capabilities.
 - On the success path, make the sample code's final primary output a natural-language summary a general end user can read, not a raw dict/list/JSON dump; use structured/JSON output only when the user explicitly asks for it.

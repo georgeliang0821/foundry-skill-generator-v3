@@ -28,13 +28,23 @@ The frontmatter `description` is the single source of truth for the skill's
 description. It is stored only in `SKILL.md` on Blob; the database keeps no
 copy, so there is no second place to update.
 
+The description states only this skill's positive scope and situations it does
+not handle. Do not name other skills in the description or anywhere in the
+body, including Ground Rules and Output Expectations. Only structured
+dependency declarations and actual scenario dependency calls are exempt.
+Declaring a dependency does not exempt prose mentions of its name.
+
 Required body sections, in this order (the reader is a coding agent that selects
 ONE skill per request, so the body is for comprehension and recovery, not
 routing -- routing is the frontmatter `description`):
 
 - `## Overview` -- one line stating what the skill does.
-- `## When NOT to Use This Skill` -- negative routing, one line per neighbor:
-  `scenario half-sentence -> use \`neighbor-skill\``.
+- `## When NOT to Use This Skill` -- stopping conditions for the model:
+  "Checking availability, finding a common time, or creating, updating or
+  cancelling meetings or bookings is outside this skill's scope; do not use
+  this skill to handle it." Adapt the exclusions to the confirmed scope, and
+  never name a destination skill. For mixed requests, specify in the body that
+  only the portion within this skill's scope is completed.
 - `## Required Inputs` -- the `runtime` variables. This section is the SOLE
   source of the caller-facing field contract, not a summary: a scenario skill
   points other agents at it by name instead of copying it. Document every field

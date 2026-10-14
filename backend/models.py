@@ -660,7 +660,6 @@ class NeighborNoticeOutcome(BaseModel):
     status: Literal["pending", "sent", "skipped", "failed"] = "pending"
     message: str = ""
     notice_id: int | None = None
-    user_declined: bool = False
 
 
 class Session(BaseModel):
