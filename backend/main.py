@@ -689,6 +689,7 @@ log_event("app.ready", session_count=len(sessions), session_root=_session_store_
 PASSIVE_TOOL_CALLS = {
     "stage_transition",
     "select_neighbor_skill",
+    "confirm_neighbor_notification",
     "record_understanding",
     "record_research",
     "record_reflection",
@@ -2311,6 +2312,22 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             raise ValueError(f"This skill is already named `{new_name}`; there is nothing to rename.")
         return
 
+    if tool == "confirm_neighbor_notification":
+        if session.current_stage not in {"prepare", "draft", "refine"}:
+            raise ValueError("confirm_neighbor_notification is only available in PREPARE, DRAFT or REFINE.")
+        name = str(args.get("skill_name", "")).strip()
+        if not name or safe_skill_name(name) != name:
+            raise ValueError("confirm_neighbor_notification requires an exact skill name.")
+        row = skills_repo.get_skill(name)
+        if row and (row.created_by or "").strip().lower() == session.owner_upn:
+            raise ValueError("Your own neighbor uses the edit workflow, not a notification.")
+        try:
+            _queue_neighbor_notice(session, name, notify=args.get("notify", True))
+        except HTTPException as exc:
+            raise ValueError(str(exc.detail)) from exc
+        session.touch()
+        return
+
     if tool == "select_neighbor_skill":
         from backend.models import NeighborSkill
 
@@ -2582,7 +2599,7 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
             options = "(none -- this is a terminal stage)"
             tail = "Call ask_user_input to ask the user how they want to proceed."
         return (
-            f"Stage transition rejected: you are in '{cur_name}' and cannot move directly to "
+            f"Stage transition rejected: {exc}. You are in '{cur_name}' and cannot move directly to "
             f"'{requested}'. Valid transitions from '{cur_name}': {options}. {tail}"
         )
     if tool == "update_prepare_checklist" and not session.children:
@@ -4077,7 +4094,7 @@ def update_session_neighbors(session_id: str, req: NeighborsUpdateRequest, upn: 
     return session
 
 
-def _queue_neighbor_notice(session: Session, name: str) -> None:
+def _queue_neighbor_notice(session: Session, name: str, *, notify: bool | None = None) -> None:
     name = safe_skill_name(name)
     row = skills_repo.get_skill(name)
     if row is None:
@@ -4097,6 +4114,12 @@ def _queue_neighbor_notice(session: Session, name: str) -> None:
         existing = NeighborNoticeOutcome(skill_key=key, skill_name=name)
         session.neighbor_notice_outcomes.append(existing)
     existing.target_user = creator
+    if notify is not None:
+        existing.user_declined = not notify
+    if existing.user_declined:
+        existing.status = "skipped"
+        existing.message = "未通知：使用者選擇不通知。"
+        return
     existing.status = "pending" if creator and row.enabled else "skipped"
     existing.message = f"來源 Skill 儲存成功後通知 {creator} 進行相鄰 Skill 修改確認。" if existing.status == "pending" else "未通知：鄰居沒有建立者或已停用。"
 

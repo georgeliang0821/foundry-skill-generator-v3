@@ -4409,6 +4409,7 @@ const ACTIVITY_TOOL_META = {
   record_research: { icon: "i-bolt", title: "Research recorded" },
   record_understanding: { icon: "i-bolt", title: "Understanding updated" },
   select_neighbor_skill: { icon: "i-bolt", title: "Neighbor selected" },
+  confirm_neighbor_notification: { icon: "i-bolt", title: "Notification decision recorded" },
   record_reflection: { icon: "i-bolt", title: "Reflection recorded" },
   request_stage_transition: { icon: "i-bolt", title: "Stage transition requested" },
 };
@@ -4841,7 +4842,7 @@ function renderInspectSessionState() {
 
 function renderPassiveToolCall(call) {
   const args = call.args || {};
-  if (call.tool === "select_neighbor_skill") {
+  if (["select_neighbor_skill", "confirm_neighbor_notification"].includes(call.tool)) {
     appendActivityRow(call);
     return true;
   }
@@ -5800,6 +5801,7 @@ async function sendChatPayload(message, materials, options = {}) {
   let responseHasInteractiveTool = false;
   let autoContinueTarget = null;
   let neighborSelected = false;
+  let notificationConfirmed = false;
   let responseStarted = false;
   let recoverableRejection = false;
   let failure = "";
@@ -5845,6 +5847,7 @@ async function sendChatPayload(message, materials, options = {}) {
           autoContinueTarget = target ? String(target).toUpperCase() : null;
         }
         if (data.tool === "select_neighbor_skill") neighborSelected = true;
+        if (data.tool === "confirm_neighbor_notification") notificationConfirmed = true;
         // Emit any assistant prose that preceded this tool first, then render the
         // tool inline so the chat reflects the real chronological order.
         flushAssistantMessage();
@@ -5906,7 +5909,7 @@ async function sendChatPayload(message, materials, options = {}) {
               : "Request finished without a response or proposed changes. Skill content unchanged.";
     activity.finish(outcome, Boolean(failure));
     const continuing = !failure && (options.autoDepth || 0) < 4 && !responseHasInteractiveTool
-      && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection || neighborSelected);
+      && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection || neighborSelected || notificationConfirmed);
     if (!continuing) setInputBusy(false);
   }
   await refreshSessions();
@@ -5946,10 +5949,12 @@ async function sendChatPayload(message, materials, options = {}) {
     );
   }
 
-  if (!failure && neighborSelected && !shouldRecover && !shouldAutoContinue
+  if (!failure && (neighborSelected || notificationConfirmed) && !shouldRecover && !shouldAutoContinue
       && !responseHasInteractiveTool && (options.autoDepth || 0) < 4) {
     await sendChatPayload(
-      "Continue from the selected neighbor's refreshed context. Check Neighbor Edit Policy and the full current SKILL.md. Follow the user's confirmed direction; ask only for decisions not already confirmed.",
+      notificationConfirmed
+        ? "Continue from the backend Neighbor Notification Outcomes. Report queued, failed, skipped or sent accurately. Pending notifications need the source saved; do not claim notification delivery or finalize before a sent outcome with notice_id."
+        : "Continue from the selected neighbor's refreshed context. Check Neighbor Edit Policy and the full current SKILL.md. Follow the user's confirmed direction; ask only for decisions not already confirmed.",
       [],
       { autoDepth: (options.autoDepth || 0) + 1, autoContinue: true },
     );
@@ -6028,10 +6033,13 @@ function updateActionButtons() {
   }
   if (el("saveDraftBtn")) {
     const upToDate = binding.hasRemote && !binding.unsaved && !binding.unknown && !localEditorDirty;
-    el("saveDraftBtn").disabled = isSending || !hasDraft || upToDate;
+    const noticesPending = (session?.neighbor_notice_outcomes || []).some((outcome) => ["pending", "failed"].includes(outcome.status));
+    el("saveDraftBtn").disabled = isSending || !hasDraft || (upToDate && !noticesPending);
     el("saveDraftBtn").title = !hasDraft
       ? "Generate a skill draft first."
-      : upToDate
+      : noticesPending
+        ? "Save the source skill and send pending neighbor notifications."
+        : upToDate
         ? "Skill already saved to Blob (latest version)."
         : "Save this skill to Blob + database and sync.";
   }
@@ -6711,6 +6719,9 @@ bind("saveDraftBtn", "click", async () => {
     if (makePublic) await publishAfterDraftAccept(name);
     return;
   }
+  const pendingNoticeKeys = new Set((session.neighbor_notice_outcomes || [])
+    .filter((outcome) => ["pending", "failed"].includes(outcome.status))
+    .map((outcome) => outcome.skill_key));
   setInputBusy(true);
   try {
     const name = session.target_skill_id || inferCurrentName();
@@ -6739,6 +6750,11 @@ bind("saveDraftBtn", "click", async () => {
     renderSession();
     await refreshSessions();
     appendConversationStatus(`Saved ${name} to the skill store.`);
+    for (const outcome of session.neighbor_notice_outcomes || []) {
+      if (pendingNoticeKeys.has(outcome.skill_key)) {
+        appendConversationStatus(outcome.message, { failed: outcome.status === "failed" });
+      }
+    }
   } catch (err) {
     appendConversationStatus(`Save failed: ${err.message}`, { failed: true });
     throw err;

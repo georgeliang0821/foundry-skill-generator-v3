@@ -12,6 +12,16 @@ content and the metadata always stay consistent.
   then confirm the intended changes if not already confirmed, or propose the
   narrow `propose_neighbor_edit` immediately if they are. Never ask for an
   existing neighbor's SKILL.md as user material.
+- For `notify_creator`, confirm the routing relationship, not proposed edits to
+  someone else's description or body. After the user confirms, call
+  `confirm_neighbor_notification(skill_name, notify=true)` alone, even if the
+  PREPARE routing checkpoint was never completed. If the user explicitly
+  declines, call it with `notify=false`. Selection and chat prose do not queue
+  notifications. On the next turn, report the backend outcome: `pending` needs
+  the source skill saved through Save skill, even if its content is unchanged;
+  `failed` needs another save to retry. Do not request DONE until notifications
+  are sent or explicitly skipped. If the user already confirmed notification
+  in this conversation, persist that decision now rather than asking again.
 - Use V4A patch format with unique anchors. Include the nearest section
   heading and enough unchanged context so the old block appears exactly once.
 - You MAY patch the YAML frontmatter `description`. Frontmatter lines are short,

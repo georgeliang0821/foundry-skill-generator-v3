@@ -85,3 +85,58 @@ test("continues automatically after selecting a neighbor", async ({ page, reques
   await expect(page.getByTestId("activity-card")).toContainText("peer-selected");
   await expect(page.getByTestId("send-button")).toBeEnabled();
 });
+
+test("notification confirmation continues and enables saving an unchanged source", async ({ page, request }) => {
+  await openApp(page);
+  await startNewSession(page);
+  await expect(page.getByTestId("send-button")).toBeEnabled();
+  const payloads: Array<{ auto_continue?: boolean; message: string }> = [];
+  let saved = false;
+  let queuedSession: Record<string, any>;
+  await page.route("**/api/sessions/*/chat", async (route) => {
+    payloads.push(route.request().postDataJSON());
+    const sessionId = new URL(route.request().url()).pathname.split("/")[3];
+    queuedSession = await readSession(request, sessionId);
+    queuedSession.current_stage = "refine";
+    queuedSession.remote_skill_id = "source";
+    queuedSession.remote_version_hash = "saved-version";
+    queuedSession.current_skill = { skill_md: "---\nname: source\ndescription: Source\n---\nBody", version_hash: "saved-version", script: null };
+    queuedSession.neighbor_notice_outcomes = [{
+      skill_key: "target", skill_name: "target", target_user: "owner@example.com",
+      status: "pending", notice_id: null, message: "Notification queued; source save required.",
+    }];
+    const call = payloads.length === 1
+      ? { call_id: "queue-notice", tool: "confirm_neighbor_notification", args: { skill_name: "target", notify: true } }
+      : { call_id: "wait-save", tool: "ask_user_input", args: { question: "The notification is queued, not sent.", options: ["Save the source", "Do not notify"] } };
+    queuedSession.pending_tool_calls = payloads.length === 1 ? [] : [call];
+    await route.fulfill({ json: { events: [
+      { event: "tool_call", data: call },
+      { event: "state_update", data: queuedSession },
+      { event: "done", data: {} },
+    ] } });
+  });
+  await page.route("**/api/sessions/*/draft", async (route) => {
+    await route.fulfill({ json: queuedSession });
+  });
+  await page.route("**/api/sessions/*/save", async (route) => {
+    saved = true;
+    queuedSession.neighbor_notice_outcomes[0] = {
+      ...queuedSession.neighbor_notice_outcomes[0], status: "sent", notice_id: 42,
+      message: "Notification sent to owner@example.com.",
+    };
+    await route.fulfill({ json: queuedSession });
+  });
+
+  await sendChat(page, "Notify the selected neighbor creator.");
+
+  await expect(page.getByTestId("question-card")).toContainText("queued, not sent");
+  expect(payloads).toHaveLength(2);
+  expect(payloads[1].auto_continue).toBe(true);
+  expect(payloads[1].message).toContain("Neighbor Notification Outcomes");
+  const saveButton = page.getByTestId("accept-draft-button");
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+  await expect(page.getByText("Notification sent to owner@example.com.", { exact: true })).toBeVisible();
+  expect(saved).toBe(true);
+  await expect(saveButton).toBeDisabled();
+});

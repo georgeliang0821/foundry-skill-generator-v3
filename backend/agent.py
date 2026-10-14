@@ -355,6 +355,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "confirm_neighbor_notification",
+        "description": "Persist the user's explicit decision about notifying the creator of a SELECTED existing neighbor. PREPARE/DRAFT/REFINE only. notify=true queues a relationship-only notification; notify=false records the user's decision not to notify. This does not write SQL or save either skill. Return this passive tool alone; the UI continues with backend Notification Outcomes. Only a successful source save sends queued notifications. Never claim sent unless the outcome has status sent and a notice_id. Own neighbors use edits instead.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "Exact selected neighbor whose creator notification the user confirmed or declined."},
+                "notify": {"type": "boolean", "description": "true to queue after user confirmation; false only when the user explicitly declines notification."},
+            },
+            "required": ["skill_name", "notify"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_neighbor_edit",
         "description": "Propose an edit to an EXISTING neighbor skill (e.g. tightening its description or adding a 'When NOT to Use -> use <new skill>' backlink) so the new skill and the neighbor stay mutually exclusive. Only edit neighbors whose Neighbor Edit Policy is editable. Read the neighbor's CURRENT SKILL.md under '## Neighbor Skills (full SKILL.md for editing)', between the <<<BEGIN ...>>> / <<<END ...>>> markers. If it is missing, call select_neighbor_skill alone first; do NOT ask the user for the file or infer it from a peer digest. Send a V4A `patch` against that current text: a single hunk with a few unchanged CONTEXT lines copied from the file plus your `-`/`+` edits (indentation is matched leniently, so you do not need to reproduce YAML indent perfectly). Keep the hunk SMALL and target a UNIQUE spot (e.g. the description lines, or the exact bullet under '## When NOT to Use This Skill'). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW, uniquely-versioned entry (the original and every prior version are always kept, never overwritten); NOTHING is written to Blob until the user Saves. If the patch does not apply, copy the surrounding CONTEXT lines more exactly from the current text and retry.",
         "parameters": {

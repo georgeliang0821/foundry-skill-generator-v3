@@ -36,6 +36,155 @@ def test_queue_waits_for_save_and_never_edits_target(client, backend_main, fake_
     assert session.neighbor_edits == []
 
 
+def test_refine_notification_confirmation_queues_then_save_sends(client, backend_main, fake_sql):
+    seed(backend_main, fake_sql, "target", OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "target"})
+
+    backend_main.apply_tool_effect(session, "confirm_neighbor_notification", {"skill_name": "target"})
+
+    assert session.neighbor_notice_outcomes[0].status == "pending"
+    assert session.neighbor_notice_outcomes[0].notice_id is None
+    assert repo.list_open_notices(OWNER) == []
+    with pytest.raises(ValueError, match="notification"):
+        backend_main.apply_tool_effect(session, "request_stage_transition", {"target_stage": "done"})
+    assert session.current_stage == "refine"
+    draft = client.put(f"/api/sessions/{session.id}/draft", json={"skill_md": session.current_skill.skill_md})
+    assert draft.status_code == 200
+    assert draft.json()["neighbor_notice_outcomes"][0]["status"] == "pending"
+    assert client.post(f"/api/sessions/{session.id}/save", json={}).status_code == 200
+    outcome = session.neighbor_notice_outcomes[0]
+    assert outcome.status == "sent"
+    assert outcome.notice_id == repo.list_open_notices(OWNER)[0].id
+    backend_main.apply_tool_effect(session, "request_stage_transition", {"target_stage": "done"})
+    assert session.current_stage == "done"
+
+
+def test_chat_confirmation_persists_notice_and_done_rejection_reason(client, backend_main, fake_sql, monkeypatch):
+    from backend.models import PendingToolCall
+
+    seed(backend_main, fake_sql, "target", OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+
+    class Agent:
+        def stream(self, session, message):
+            call = PendingToolCall(
+                tool="confirm_neighbor_notification" if message == "Confirm notification" else "request_stage_transition",
+                args={"skill_name": "target", "notify": True} if message == "Confirm notification" else {"target_stage": "done"},
+            )
+            session.pending_tool_calls.append(call)
+            yield {"event": "tool_call", "data": call.model_dump()}
+
+    monkeypatch.setattr(backend_main, "agent", Agent())
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "Confirm notification"})
+    assert response.status_code == 200
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in response.json()["events"])
+    assert session.pending_tool_calls == []
+    restored = backend_main.session_store.load_all()[session.id]
+    assert restored.neighbor_notice_outcomes[0].status == "pending"
+    assert "pending" in build_system_prompt(restored)
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "Finish"})
+    rejected = next(event for event in response.json()["events"] if event["event"] == "tool_effect_rejected")
+    assert "unresolved neighbor notifications" in rejected["data"]["guidance"]
+    assert session.current_stage == "refine"
+    assert repo.list_open_notices(OWNER) == []
+
+
+def test_selected_other_creator_requires_explicit_notification_decision(backend_main, fake_sql):
+    seed(backend_main, fake_sql, "target", OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "target"})
+    with pytest.raises(ValueError, match="unresolved neighbor notifications"):
+        backend_main.apply_tool_effect(session, "request_stage_transition", {"target_stage": "done"})
+    assert not session.neighbor_notice_outcomes
+
+
+def test_declined_notification_is_persisted_and_not_requeued(client, backend_main, fake_sql):
+    seed(backend_main, fake_sql, "target", OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+    backend_main.apply_tool_effect(session, "confirm_neighbor_notification", {"skill_name": "target", "notify": False})
+    backend_main.persist_session(session)
+    restored = backend_main.session_store.load_all()[session.id]
+    backend_main._queue_confirmed_neighbor_notices(restored)
+    assert restored.neighbor_notice_outcomes[0].status == "skipped"
+    assert restored.neighbor_notice_outcomes[0].user_declined is True
+    assert client.post(f"/api/sessions/{session.id}/save", json={}).status_code == 200
+    assert repo.list_open_notices(OWNER) == []
+    backend_main.apply_tool_effect(restored, "request_stage_transition", {"target_stage": "done"})
+    restored.current_stage = "refine"
+    backend_main.apply_tool_effect(restored, "confirm_neighbor_notification", {"skill_name": "target", "notify": True})
+    assert restored.neighbor_notice_outcomes[0].status == "pending"
+    assert restored.neighbor_notice_outcomes[0].user_declined is False
+
+
+@pytest.mark.parametrize("stage", ["test", "done"])
+def test_notification_confirmation_rejects_invalid_stage(backend_main, stage):
+    session = Session(current_stage=stage, owner_upn=AUTHOR)
+    with pytest.raises(ValueError, match="only available"):
+        backend_main.apply_tool_effect(session, "confirm_neighbor_notification", {"skill_name": "target", "notify": True})
+    assert not session.neighbor_notice_outcomes
+
+
+@pytest.mark.parametrize("invalid", ["unselected", "inaccessible", "own", "child"])
+def test_notification_confirmation_validates_relationship_and_access(backend_main, fake_sql, invalid):
+    seed(backend_main, fake_sql, "target", AUTHOR if invalid == "own" else OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+    if invalid == "unselected":
+        session.prepare_brief.understanding.neighbor_skills = []
+    elif invalid == "inaccessible":
+        fake_sql.skills["target"]["is_public"] = False
+    elif invalid == "child":
+        session.children = ["target"]
+    with pytest.raises(ValueError):
+        backend_main.apply_tool_effect(session, "confirm_neighbor_notification", {"skill_name": "target", "notify": True})
+    assert not session.neighbor_notice_outcomes
+
+
+@pytest.mark.parametrize("commit_fails", [False, True])
+def test_refine_notification_save_reaches_sql_and_only_marks_sent_after_commit(client, backend_main, fake_sql, monkeypatch, commit_fails):
+    seed(backend_main, fake_sql, "target", OWNER)
+    session = source_session(backend_main)
+    session.current_stage = "refine"
+    backend_main.apply_tool_effect(session, "confirm_neighbor_notification", {"skill_name": "target", "notify": True})
+    monkeypatch.setattr(repo, "_local_repo", None)
+
+    class Cursor:
+        def __init__(self):
+            self.statements = []
+            self.results = iter([None, (42,)])
+
+        def execute(self, sql, params):
+            self.statements.append((sql, params))
+
+        def fetchone(self):
+            return next(self.results)
+
+    cursor = Cursor()
+
+    def transaction(operation):
+        result = operation(cursor)
+        if commit_fails:
+            raise RuntimeError("SQL commit failed")
+        return result
+
+    monkeypatch.setattr(repo.db, "run", transaction)
+    assert client.post(f"/api/sessions/{session.id}/save", json={}).status_code == 200
+    insert_sql, insert_params = cursor.statements[-1]
+    assert "INSERT INTO dbo.skill_neighbor_notice" in insert_sql
+    assert insert_params == ("target", OWNER, AUTHOR, '["source"]')
+    outcome = session.neighbor_notice_outcomes[0]
+    assert outcome.status == ("failed" if commit_fails else "sent")
+    assert outcome.notice_id == (None if commit_fails else 42)
+    if commit_fails:
+        with pytest.raises(ValueError, match="unresolved neighbor notifications"):
+            backend_main.apply_tool_effect(session, "request_stage_transition", {"target_stage": "done"})
+
+
 def test_missing_creator_skips_and_noncreator_patch_is_rejected(backend_main, fake_sql):
     seed(backend_main, fake_sql, "target", None)
     session = source_session(backend_main)

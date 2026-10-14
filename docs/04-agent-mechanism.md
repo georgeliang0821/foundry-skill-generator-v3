@@ -106,6 +106,7 @@ E5（產出檔必須是 work_dir 第一層的一般檔案）無法靜態判斷�
 | `record_variables` | PREPARE | 寫入三類歸口變數（現有 ACA 變數、OBO registry scopes、執行期 Runtime）。 |
 | `update_prepare_checklist` | PREPARE | 更新準備期 Checklist 子項 (definition_clear 等)，附帶實質佐證文字。 |
 | `select_neighbor_skill` | PREPARE / DRAFT / REFINE | 登記使用者選定的可讀鄰近 Skill，檢查建立者政策並載入目前選定版本的全文；工具單獨送出後，前端自動續跑取得更新上下文。 |
+| `confirm_neighbor_notification` | PREPARE / DRAFT / REFINE | 記錄使用者通知其他建立者的決定：`notify=true` 排入待送關係，`notify=false` 明確略過。來源儲存成功才寫入通知 SQL；只排隊不代表已送出。 |
 | `propose_neighbor_edit` | PREPARE / REFINE | 對鄰近 Peer Skill 提交 V4A 補丁，修剪 description 或補 When NOT to Use。 |
 | `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script；`stdout_fix=true` 時由後端計算機械式 stdout 修正。見 7.5 節。 |
 | `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter）。儲存前被 lint 擋下時可再送一次完整修正版；儲存後不可再用。 |
@@ -248,7 +249,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 > **零修改路徑：** PREPARE 的資訊完整、DRAFT 初版正確且接受後檢查沒有待辦時，REFINE 只負責確認下一步，不會重寫 `SKILL.md`。正常路徑可以是 `PREPARE → DRAFT → REFINE → TEST`，也可以是 `PREPARE → DRAFT → REFINE → DONE`。
 
-修改鄰近 Skill 時，peer 摘要與對話中的選擇不等於全文。Agent 若尚未取得完整內容或編輯政策，先單獨呼叫 `select_neighbor_skill`；後端保留其他鄰居的區分證據，優先載入本次選取的 Skill，前端自動續跑下一輪。只有目前使用者建立的鄰居可取得編輯全文；有編輯版本時載入目前選定版，否則讀取 Skill store，最多載入五份。其他建立者走 routing checkpoint 確認與儲存後通知；沒有建立者則說明跳過原因。讀取失敗、空白內容或超出載入上限會分別標為 `load_failed`、`empty_content`、`load_limit`，Agent 應說明阻礙並提供重試，不要求使用者貼上全文，也不根據摘要猜測 patch。
+修改鄰近 Skill 時，peer 摘要與對話中的選擇不等於全文。Agent 若尚未取得完整內容或編輯政策，先單獨呼叫 `select_neighbor_skill`；後端保留其他鄰居的區分證據，優先載入本次選取的 Skill，前端自動續跑下一輪。只有目前使用者建立的鄰居可取得編輯全文；有編輯版本時載入目前選定版，否則讀取 Skill store，最多載入五份。其他建立者只確認相鄰路由關係，不產生對方的 description 或修改建議：使用者確認後，Agent 單獨呼叫 `confirm_neighbor_notification(..., notify=true)` 排隊，前端續跑取得後端結果；不通知則以 `notify=false` 記錄略過，後續 routing checkpoint 不會覆蓋此決定。沒有建立者則說明跳過原因。`pending`／`failed` 通知仍需來源儲存，即使內容已是最新版，Save skill 也可觸發送出或重試；SQL transaction 成功後才回報 `sent` 與通知 ID，儲存失敗不送出。未記錄決定、待送、失敗或缺少通知 ID 的 `sent` 都不能完成 DONE；明確略過則可完成。讀取失敗、空白內容或超出載入上限會分別標為 `load_failed`、`empty_content`、`load_limit`，Agent 應說明阻礙並提供重試，不要求使用者貼上全文，也不根據摘要猜測 patch。
 
 > 💾 **接受即雙寫機制：**
 > 在 REFINE 階段，使用者每一個被接受的 Patch 或手動點擊的存檔，後端均會直接自動觸發 **雙寫 (Dual-Write)** 機制：將變更推入 Azure Blob ＋ 寫入 Microsoft Azure SQL 的 metadata (`updated_at` 自動刷新、同步 ACL)。雙寫完成即生效，**不需要任何 sync / publish 步驟**——runtime 每次請求都直接從 SQL + Blob 動態解析 skill。

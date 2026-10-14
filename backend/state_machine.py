@@ -621,6 +621,18 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         return
     if not can_transition(current, target):
         raise ValueError(f"Invalid stage transition: {current.value} -> {target.value}")
+    if target == Stage.DONE:
+        outcomes = {outcome.skill_name: outcome for outcome in session.neighbor_notice_outcomes}
+        unresolved = {
+            outcome.skill_name for outcome in session.neighbor_notice_outcomes
+            if outcome.status in {"pending", "failed"} or (outcome.status == "sent" and outcome.notice_id is None)
+        }
+        unresolved.update(
+            name for name, policy in session.neighbor_edit_policy.items()
+            if policy == "notify_creator" and name not in outcomes
+        )
+        if unresolved:
+            raise ValueError("Cannot finalize with unresolved neighbor notifications: " + ", ".join(sorted(unresolved)))
     if current == Stage.PREPARE and target == Stage.DRAFT:
         missing = check_quality_gates(session)
         if missing:
