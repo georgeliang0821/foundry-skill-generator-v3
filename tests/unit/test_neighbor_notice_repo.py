@@ -15,6 +15,8 @@ def test_merge_concurrent_sources_and_recipient_isolation():
         list(executor.map(lambda number: repo.upsert_open_notice("target", "OWNER@example.com", "AUTHOR@example.com", [f"source-{number}"]), range(20)))
     notices = repo.list_open_notices("owner@example.com")
     assert len(notices) == 1
+    assert repo.count_open_notices("OWNER@example.com") == 1
+    assert repo.count_open_notices("author@example.com") == 0
     assert len(notices[0].source_skill_keys) == 20
     assert repo.list_open_notices("author@example.com") == []
     assert repo.upsert_open_notice("target", "owner@example.com", "author@example.com", ["source-0"]).id == notices[0].id
@@ -103,3 +105,19 @@ def test_sql_failed_session_creation_never_closes_notice(monkeypatch):
         repo.resolve_notice(7, "owner@example.com", "accepted", fail)
     assert len(cursor.executed) == 1
     assert "target_user = ?" in cursor.executed[0][0]
+
+
+def test_sql_count_uses_open_recipient_index_without_loading_rows(monkeypatch):
+    monkeypatch.setattr(repo, "_local_repo", None)
+    captured = {}
+
+    def fetchone(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return (3,)
+
+    monkeypatch.setattr(repo.db, "fetchone", fetchone)
+    assert repo.count_open_notices("OWNER@example.com") == 3
+    assert "COUNT_BIG(*)" in captured["sql"]
+    assert "target_user = ? AND status = 'open'" in captured["sql"]
+    assert captured["params"] == ("owner@example.com",)

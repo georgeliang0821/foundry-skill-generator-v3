@@ -38,6 +38,7 @@ import {
   proposeNeighborEdit,
   selectNeighborEdit,
   saveNeighborEditApi,
+  summarizeNeighborNotices,
   listNeighborNotices,
   actOnNeighborNotice,
   updateVariables,
@@ -324,6 +325,10 @@ let availableSkills = [];
 let neighborNotices = [];
 let neighborNoticesState = "idle";
 let neighborNoticesRequest = 0;
+let neighborNoticeCount = 0;
+let neighborNoticeSummaryState = "idle";
+let neighborNoticeSummaryRequest = 0;
+let neighborNoticeBannerAcknowledged = false;
 let neighborNoticeActionBusy = false;
 let modifiableSkills = [];
 let skillsLoaded = false;
@@ -6979,27 +6984,42 @@ async function refreshAuthStatus() {
   // v7: auto-refresh skill list once signed in so the modify-mode dropdown
   // populates even if the page loaded before the cookie was valid.
   if (authStatus && authStatus.authenticated) {
-    try { await refreshSkills(); } catch {}
-    await refreshNeighborNotices();
+    el("neighborNoticesBtn").classList.remove("hidden");
+    await Promise.all([refreshSkills(), refreshNeighborNoticeSummary()]);
   } else {
     neighborNoticesRequest += 1;
+    neighborNoticeSummaryRequest += 1;
     neighborNotices = [];
     neighborNoticesState = "idle";
+    neighborNoticeCount = 0;
+    neighborNoticeSummaryState = "idle";
+    neighborNoticeBannerAcknowledged = false;
     renderNeighborNotices();
     el("neighborNoticesBtn").classList.add("hidden");
     el("neighborNoticesDialog").close();
   }
 }
 
+function renderNeighborNoticeSummary() {
+  const ready = neighborNoticeSummaryState === "ready";
+  const loading = neighborNoticeSummaryState === "loading";
+  const signedOut = neighborNoticeSummaryState === "unauthenticated";
+  const button = el("neighborNoticesBtn");
+  button.classList.toggle("has-notices", ready && neighborNoticeCount > 0);
+  button.dataset.state = neighborNoticeSummaryState;
+  el("neighborNoticesCount").textContent = ready ? String(neighborNoticeCount) : "-";
+  const stateLabel = loading ? "檢查中" : signedOut ? "請重新登入" : neighborNoticeSummaryState === "error" ? "載入失敗，開啟重試" : "尚未載入";
+  button.setAttribute("aria-label", ready ? `相鄰 Skill 通知 (${neighborNoticeCount})` : `相鄰 Skill 通知 (${stateLabel})`);
+  const showBanner = ready && neighborNoticeCount > 0 && !neighborNoticeBannerAcknowledged;
+  el("neighborNoticeBanner").classList.toggle("hidden", !showBanner);
+  el("neighborNoticeBannerCount").textContent = String(neighborNoticeCount);
+}
+
 function renderNeighborNotices() {
+  renderNeighborNoticeSummary();
   const ready = neighborNoticesState === "ready";
   const loading = neighborNoticesState === "loading";
   const signedOut = neighborNoticesState === "unauthenticated";
-  const button = el("neighborNoticesBtn");
-  button.classList.toggle("has-notices", ready && neighborNotices.length > 0);
-  button.dataset.state = neighborNoticesState;
-  el("neighborNoticesCount").textContent = ready ? String(neighborNotices.length) : "-";
-  button.setAttribute("aria-label", ready ? `相鄰 Skill 通知 (${neighborNotices.length})` : `相鄰 Skill 通知 (${loading ? "載入中" : signedOut ? "請重新登入" : "尚未載入"})`);
   el("neighborNoticesList").setAttribute("aria-busy", String(loading || neighborNoticeActionBusy));
   el("neighborNoticesRetry").classList.toggle("hidden", !(neighborNoticesState === "error" || (ready && el("neighborNoticesError").textContent)));
   el("neighborNoticesSignIn").classList.toggle("hidden", !signedOut);
@@ -7033,8 +7053,12 @@ function showNeighborNoticeFailure(err, action = false) {
   appLog(`Neighbor notice ${action ? "action" : "load"} failed: ${err.message}`);
   if (err.status === 401) {
     neighborNoticesRequest += 1;
+    neighborNoticeSummaryRequest += 1;
     neighborNotices = [];
     neighborNoticesState = "unauthenticated";
+    neighborNoticeCount = 0;
+    neighborNoticeSummaryState = "unauthenticated";
+    neighborNoticeBannerAcknowledged = true;
     authStatus = { authenticated: false };
     renderAuthStatus();
     try { window.__sgv7?.v7UpdateLoginGate?.(authStatus); } catch {}
@@ -7051,6 +7075,33 @@ function showNeighborNoticeFailure(err, action = false) {
   renderNeighborNotices();
 }
 
+async function refreshNeighborNoticeSummary() {
+  if (neighborNoticeSummaryState === "loading" || !authStatus?.authenticated) return;
+  const request = ++neighborNoticeSummaryRequest;
+  neighborNoticeSummaryState = "loading";
+  renderNeighborNoticeSummary();
+  try {
+    const summary = await summarizeNeighborNotices();
+    if (request !== neighborNoticeSummaryRequest) return;
+    const count = Number(summary?.count);
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error("Invalid notification summary.");
+    if (count > neighborNoticeCount) neighborNoticeBannerAcknowledged = false;
+    neighborNoticeCount = count;
+    neighborNoticeSummaryState = "ready";
+    renderNeighborNoticeSummary();
+  } catch (err) {
+    if (request !== neighborNoticeSummaryRequest) return;
+    if (err.status === 401) {
+      showNeighborNoticeFailure(err);
+      return;
+    }
+    appLog(`Neighbor notice summary load failed: ${err.message}`);
+    neighborNoticeCount = 0;
+    neighborNoticeSummaryState = "error";
+    renderNeighborNoticeSummary();
+  }
+}
+
 async function refreshNeighborNotices() {
   if (neighborNoticesState === "loading" || !authStatus?.authenticated) return;
   const request = ++neighborNoticesRequest;
@@ -7064,6 +7115,8 @@ async function refreshNeighborNotices() {
     if (request !== neighborNoticesRequest) return;
     neighborNotices = notices;
     neighborNoticesState = "ready";
+    neighborNoticeCount = notices.length;
+    neighborNoticeSummaryState = "ready";
     renderNeighborNotices();
   } catch (err) {
     if (request !== neighborNoticesRequest) return;
@@ -7072,7 +7125,9 @@ async function refreshNeighborNotices() {
 }
 
 document.addEventListener("click", async (event) => {
-  if (event.target.closest("#neighborNoticesBtn")) {
+  if (event.target.closest("#neighborNoticesBtn, [data-notice-open]")) {
+    neighborNoticeBannerAcknowledged = true;
+    renderNeighborNoticeSummary();
     el("neighborNoticesDialog").showModal();
     if (!neighborNoticeActionBusy) await refreshNeighborNotices();
     return;
@@ -7104,6 +7159,10 @@ document.addEventListener("click", async (event) => {
   try {
     const result = await actOnNeighborNotice(id, start ? "start-modify" : "dismiss");
     if (request !== neighborNoticesRequest || !authStatus?.authenticated) return;
+    neighborNotices = neighborNotices.filter((notice) => String(notice.id) !== String(id));
+    neighborNoticeCount = neighborNotices.length;
+    neighborNoticeSummaryState = "ready";
+    renderNeighborNotices();
     await refreshNeighborNotices();
     if (start && authStatus?.authenticated) {
       el("neighborNoticesDialog").close();

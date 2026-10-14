@@ -263,6 +263,16 @@ def test_recipient_loads_latest_content_projection_and_closes_immediately(client
     assert "do not skip to REFINE" not in prompt
 
 
+def test_summary_counts_open_notices_without_loading_skill_projection(client, backend_main, monkeypatch):
+    assert client.get("/api/neighbor-notices/summary").json() == {"count": 0}
+    notice = repo.upsert_open_notice("target", OWNER, AUTHOR, ["source"])
+    client.headers["X-Test-UPN"] = OWNER
+    monkeypatch.setattr(backend_main, "_notice_skill_projection", lambda key: (_ for _ in ()).throw(AssertionError(key)))
+    assert client.get("/api/neighbor-notices/summary").json() == {"count": 1}
+    assert client.post(f"/api/neighbor-notices/{notice.id}/dismiss").status_code == 200
+    assert client.get("/api/neighbor-notices/summary").json() == {"count": 0}
+
+
 @pytest.mark.parametrize("persisted", [False, True])
 def test_open_notice_does_not_reuse_legacy_prepare_session(client, backend_main, fake_sql, persisted):
     seed(backend_main, fake_sql, "target", AUTHOR, "Latest target")
@@ -402,6 +412,10 @@ def test_notice_cookie_auth_matches_status_without_unauthorized_mutations(
         anon_client.cookies.set("sgv2_auth", "notice-auth")
     valid = cookie_state == "valid"
     assert anon_client.get("/api/auth/status").json()["authenticated"] is valid
+    summary = anon_client.get("/api/neighbor-notices/summary")
+    assert summary.status_code == (200 if valid else 401)
+    if valid:
+        assert summary.json() == {"count": 1}
     listing = anon_client.get("/api/neighbor-notices")
     assert listing.status_code == (200 if valid else 401)
     if valid:

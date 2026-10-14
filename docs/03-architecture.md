@@ -115,7 +115,7 @@ sequenceDiagram
 - **授權**：私有 skill 儲存後會補一筆作者自己的 grant；`is_public = 1` 的 skill 不需要任何 grant。
 - **updated_at 規則**：只要已存在 DB 的 skill 被再次修改並覆寫，`updated_at` 就更新為最新時間。
 - **相鄰關係通知**：相鄰搜尋仍只使用作者可讀的候選清單與作者確認。確認路由 checkpoint 後，自己的鄰居沿用編輯／儲存流程；他人的鄰居只排入 session 待送關係，不產生對方的 description 或 patch。建立者空白時跳過並顯示原因。來源 Blob、SQL metadata 與授權儲存成功後才寫入 `dbo.skill_neighbor_notice`，以未結案的 `(skill_key, proposer_upn)` 去重並合併來源 key 清單；失敗保留待送狀態，來源保存成果不回滾，再次儲存可重試。
-- **收件處理**：登入通知清單只給收件人；卡片標示待審閱目標與通知提出者，來源 name／description 以可展開的相關 Skill 呈現。「略過並結案」直接結案。「開啟審閱」重新驗證目標精確 key 與建立者，載入目標最新套件及來源最新 name／description，建立 REFINE MODIFY（Quick Edit），session 保存成功就結案並記錄 session ID。第一輪 Agent 比較 description／When NOT to Use 的路由邊界，說明可能重疊或已清楚區分之處，需要調整才在 creator 確認方向後提出 patch；只有核心用途需變更且 creator 同意時才進 PREPARE。不預先替換 description，不授予來源使用權，也不提供來源正文、script 或資產；後續不儲存也不會重新開啟通知。建立 session 失敗保留未結案，重試沿用同一 session ID；重開已建立的 session 保留其當前階段，不重設為 REFINE。刪除、改名、停用或建立者異動不會 fallback 同名 Skill；來源不可用會明確標示。現有 MODIFY 只處理全域 Blob 路徑，私有 scope 目標保持未結案並回報不支援，不開啟同名全域 Skill。
+- **收件處理**：登入確認後，前端以 `GET /api/neighbor-notices/summary` 只查索引支援的 SQL 未結案數量，並與兩份 `/api/skills` 清單並行載入，不讀 Skill metadata 或 Blob；數量大於零時立即顯示右上角 badge 與固定待審閱提示列。使用者開啟通知後才呼叫 `GET /api/neighbor-notices` 載入完整 target／source frontmatter，提示列隱藏但 badge 保留到通知結案。通知清單只給收件人；卡片標示待審閱目標與通知提出者，來源 name／description 以可展開的相關 Skill 呈現。「略過並結案」直接結案。「開啟審閱」重新驗證目標精確 key 與建立者，載入目標最新套件及來源最新 name／description，建立 REFINE MODIFY（Quick Edit），session 保存成功就結案並記錄 session ID。第一輪 Agent 比較 description／When NOT to Use 的路由邊界，說明可能重疊或已清楚區分之處，需要調整才在 creator 確認方向後提出 patch；只有核心用途需變更且 creator 同意時才進 PREPARE。不預先替換 description，不授予來源使用權，也不提供來源正文、script 或資產；後續不儲存也不會重新開啟通知。建立 session 失敗保留未結案，重試沿用同一 session ID；重開已建立的 session 保留其當前階段，不重設為 REFINE。刪除、改名、停用或建立者異動不會 fallback 同名 Skill；來源不可用會明確標示。現有 MODIFY 只處理全域 Blob 路徑，私有 scope 目標保持未結案並回報不支援，不開啟同名全域 Skill。
 
 ```mermaid
 flowchart LR
@@ -211,7 +211,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `form_conversion.py` | MODIFY session 的 inline ↔ script 機械轉換（`convert_session_form`）：只搬程式碼，不改寫 `SKILL.md` |
 | `skill_assets.py` | Skill 資產的檢查（`check_asset`、`check_asset_set`、`assets_blocked_reason`）：只接受或拒收，不轉換 |
 | `skills_repo.py` | Azure SQL 的 DAO：`dbo.skills` 與 `dbo.user_skill_grants` 的查詢 / upsert / 授權 / 可見性 / 刪除（一律以 `skill_key` 為鍵） |
-| `neighbor_notice_repo.py` | 相鄰關係通知 DAO：未結案去重、來源 key 合併、收件隔離與立即結案；本機使用記憶體 store，Azure 使用 SQL 交易 |
+| `neighbor_notice_repo.py` | 相鄰關係通知 DAO：未結案去重、來源 key 合併、SQL-only 未結案計數、收件隔離與立即結案；本機使用記憶體 store，Azure 使用 SQL 交易 |
 | `skills_index.py` | 以 DB + Blob 組「既有 Skill 索引」，供 PREPARE 階段做重複偵測 |
 | `testing.py` | 路由測試：把正負範例送到 Router endpoint，評估是否路由到本 Skill。端點可經 APIM 對外提供，也可直接連到相容 runtime；以 `mode=route_only` 送出（不執行腳本），驗證 runtime 的 `mode` 回顯（不符即中止整批），使用者 token 只送在 header、HTTP 401 中止整批（`RunAuthError`），並在持久化前遮蔽機密形狀；帶資產的 skill 另比對資源標示與 runtime 回報的讀取紀錄（`_check_resource_reads`） |
 | `eaa_platform.py` | EAA runtime 對 skill 執行環境的規則：平台 secret denylist、caller `credentials` 保留鍵名、從 MCP 結果解析 `OBO_SCOPE_REGISTRY`；以及呼叫 EAA MCP `lint_skill_package` 並把結果對應成儲存判定的 fail-closed client |

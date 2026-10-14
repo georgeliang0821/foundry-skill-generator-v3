@@ -26,6 +26,47 @@ async function seedNeighborNotice(request: APIRequestContext) {
   expect((await saved.json()).neighbor_notice_outcomes[0].status).toBe("sent");
 }
 
+test("neighbor notification summary appears before slow skills and loads details on demand", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  let releaseSkills!: () => void;
+  let releaseDetails!: () => void;
+  const skillsPending = new Promise<void>((resolve) => { releaseSkills = resolve; });
+  const detailsPending = new Promise<void>((resolve) => { releaseDetails = resolve; });
+  let detailRequests = 0;
+  await page.route("**/api/skills?*", async (route) => {
+    await skillsPending;
+    await route.continue();
+  });
+  await page.route("**/api/neighbor-notices", async (route) => {
+    detailRequests += 1;
+    await detailsPending;
+    await route.continue();
+  });
+
+  await openApp(page);
+  const banner = page.locator("#neighborNoticeBanner");
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  await expect(banner).toContainText("你有 1 個相鄰 Skill 待審閱");
+  await expect(banner).toBeVisible();
+  expect(detailRequests).toBe(0);
+  await page.screenshot({ path: "test-results/neighbor-notice-summary-desktop.png" });
+
+  await banner.getByRole("button", { name: "查看通知" }).click();
+  await expect(banner).toBeHidden();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("正在載入通知");
+  expect(detailRequests).toBe(1);
+  releaseDetails();
+  await expect(dialog.getByRole("heading", { name: "notice-target" })).toBeVisible();
+  const skillResponses = Promise.all([
+    page.waitForResponse((response) => response.url().includes("/api/skills?") && new URL(response.url()).searchParams.get("purpose") === "read"),
+    page.waitForResponse((response) => response.url().includes("/api/skills?") && new URL(response.url()).searchParams.get("purpose") === "modify"),
+  ]);
+  releaseSkills();
+  await skillResponses;
+});
+
 test("neighbor notification opens focused Quick Edit review and closes immediately", async ({ page, request }) => {
   await seedNeighborNotice(request);
   await openApp(page);
@@ -70,12 +111,15 @@ test("neighbor notification can be dismissed on mobile without opening MODIFY", 
   await page.setViewportSize({ width: 390, height: 844 });
   await openApp(page);
   await expect(page.getByTestId("send-button")).toHaveText("Send");
+  await expect(page.locator("#neighborNoticeBanner")).toBeInViewport();
   await expect(page.locator("#neighborNoticesBtn")).toBeInViewport();
   expect(await page.locator(".app-header").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await page.locator("#neighborNoticeBanner").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
   await page.screenshot({ path: "test-results/neighbor-notice-header-mobile.png" });
   const before = await currentSessionId(page);
   await page.locator("#neighborNoticesBtn").click();
   const dialog = page.locator("#neighborNoticesDialog");
+  await expect(page.locator("#neighborNoticeBanner")).toBeHidden();
   await expect(dialog.getByRole("button", { name: "略過並結案" })).toBeInViewport();
   expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
   await page.screenshot({ path: "test-results/neighbor-notice-mobile.png" });
@@ -230,18 +274,22 @@ test("neighbor notice action failure keeps unavailable target disabled", async (
 test("neighbor notice two-digit badge fits desktop and mobile headers", async ({ page, request }) => {
   await seedNeighborNotice(request);
   const notices = await (await request.get("/api/neighbor-notices")).json();
+  await page.route("**/api/neighbor-notices/summary", (route) => route.fulfill({ json: { count: 12 } }));
   await page.route("**/api/neighbor-notices", (route) => route.fulfill({
     json: Array.from({ length: 12 }, (_, index) => ({ ...notices[0], id: `notice-${index}` })),
   }));
   await openApp(page);
   const button = page.locator("#neighborNoticesBtn");
+  const banner = page.locator("#neighborNoticeBanner");
   await expect(button).toHaveAccessibleName("相鄰 Skill 通知 (12)");
   await expect(page.locator("#neighborNoticesCount")).toHaveText("12");
+  await expect(banner).toContainText("你有 12 個相鄰 Skill 待審閱");
   for (const width of [1504, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(button).toBeInViewport();
     expect(await page.locator(".app-header").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
     expect(await button.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    expect(await banner.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
     await page.screenshot({ path: `test-results/neighbor-notice-header-${width}-12.png` });
   }
 });

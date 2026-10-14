@@ -4132,6 +4132,14 @@ def _notice_skill_projection(key: str) -> dict[str, Any]:
     return {"skill_key": key, "available": True, "name": name, "description": description}
 
 
+@app.get("/api/neighbor-notices/summary")
+def summarize_neighbor_notices(upn: str = Depends(require_upn)) -> dict[str, int]:
+    started = now_ms()
+    count = neighbor_notice_repo.count_open_notices(upn)
+    log_event("neighbor_notice.summary.done", user_upn=upn, count=count, duration_ms=elapsed_ms(started))
+    return {"count": count}
+
+
 @app.get("/api/neighbor-notices")
 def list_neighbor_notices(upn: str = Depends(require_upn)) -> list[dict[str, Any]]:
     return [{"id": notice.id, "skill_key": notice.skill_key, "proposer_upn": notice.proposer_upn,

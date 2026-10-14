@@ -61,6 +61,10 @@ class LocalNeighborNoticeRepo:
         with self._lock:
             return [replace(row, source_skill_keys=list(row.source_skill_keys)) for row in reversed(list(self._rows.values())) if row.target_user == user and row.status == "open"]
 
+    def count_open(self, user: str) -> int:
+        with self._lock:
+            return sum(row.target_user == user and row.status == "open" for row in self._rows.values())
+
     def resolve(self, notice_id: int, user: str, status: str, create_session: Callable[[NeighborNotice], str] | None) -> NeighborNotice:
         with self._lock:
             row = self._rows.get(notice_id)
@@ -112,6 +116,14 @@ def list_open_notices(user: str) -> list[NeighborNotice]:
     if _local_repo is not None:
         return _local_repo.list_open(user)
     return [_notice(row) for row in db.fetchall(f"SELECT {_COLUMNS} FROM dbo.skill_neighbor_notice WHERE target_user = ? AND status = 'open' ORDER BY created_at DESC, id DESC", (user,))]
+
+
+def count_open_notices(user: str) -> int:
+    user = _identity(user)
+    if _local_repo is not None:
+        return _local_repo.count_open(user)
+    row = db.fetchone("SELECT COUNT_BIG(*) FROM dbo.skill_neighbor_notice WHERE target_user = ? AND status = 'open'", (user,))
+    return int(row[0]) if row else 0
 
 
 def resolve_notice(notice_id: int, user: str, status: str, create_session: Callable[[NeighborNotice], str] | None = None) -> NeighborNotice:

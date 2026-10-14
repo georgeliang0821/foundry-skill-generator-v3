@@ -292,6 +292,12 @@ export async function saveNeighborEditApi(sessionId, skill) {
   return res.json();
 }
 
+export async function summarizeNeighborNotices() {
+  const res = await apiFetch("/api/neighbor-notices/summary");
+  if (!res.ok) throw await responseError(res);
+  return res.json();
+}
+
 export async function listNeighborNotices() {
   const res = await apiFetch("/api/neighbor-notices");
   if (!res.ok) throw await responseError(res);

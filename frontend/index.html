@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Skill Generator V3</title>
     <link rel="stylesheet" href="/vendor/@highlightjs/cdn-assets/styles/github.min.css" />
-    <link rel="stylesheet" href="/assets/css/style.css?v=20260527-warm-refresh" />
+    <link rel="stylesheet" href="/assets/css/style.css?v=20261014-neighbor-summary" />
   </head>
   <body>
     <div id="permissionBanner" class="permission-banner hidden" role="alert">
@@ -216,6 +216,17 @@
           </div>
         </div>
       </header>
+
+      <section id="neighborNoticeBanner" class="neighbor-notice-banner hidden" role="status" aria-live="polite">
+        <div class="neighbor-notice-banner-copy">
+          <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>
+          <span>你有 <strong id="neighborNoticeBannerCount">0</strong> 個相鄰 Skill 待審閱</span>
+        </div>
+        <button type="button" class="icon-button" data-notice-open>
+          <svg class="icon" aria-hidden="true"><use href="#i-arrow-up-right"/></svg>
+          <span>查看通知</span>
+        </button>
+      </section>
 
       <main class="workspace" role="main">
         <section class="panel chat-panel" aria-label="Conversation and workflow">
