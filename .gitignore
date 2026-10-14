@@ -190,6 +190,7 @@ playwright-report/
 e2e-run*.txt
 playwright-*.txt
 log.txt
+tmp/
 
 
 deploy-funcapp-flex.zip
