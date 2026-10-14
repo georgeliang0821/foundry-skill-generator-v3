@@ -218,8 +218,10 @@ def test_neighbor_save_denies_noncreator_without_writing(client, backend_main, f
     fake_sql.upsert_skill("shared", created_by=creator, is_public=True)
     fake_sql.add_grant("shared", TEST_UPN)
     sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    client.post(f"/api/sessions/{sid}/neighbors", json={"neighbor_skills": [{"skill": "shared"}]})
     response = client.post(f"/api/sessions/{sid}/neighbor-edits/shared/propose", json={"skill_md": "Changed"})
     assert response.status_code == 200
+    assert response.json()["neighbor_edits"] == []
 
     def no_write(*args, **kwargs):
         pytest.fail("An unauthorized modification attempted a write")

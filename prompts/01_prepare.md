@@ -64,7 +64,15 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    E.2 and never silently skip it. PRECONDITION: the When NOT to Use backlink
    names the NEW skill, so if it has no confirmed name yet, FIRST ask the user to
    confirm the new skill's name before editing neighbors. Then evaluate EVERY
-   neighbor and edit BOTH parts: (i) its frontmatter DESCRIPTION and (ii) its
+  neighbor using the server's Neighbor Edit Policy. Only `editable` neighbors
+  may receive modification proposals. For `notify_creator`, do not generate
+  descriptions, patches, or edit-confirmation cards: the routing checkpoint
+  queues the confirmed relationship and source saving sends the notification.
+  Say it will be sent after saving, never claim it is sent until the server's
+  Neighbor Notification Outcomes says `sent`. For `skip_missing_creator`,
+  explicitly explain that no creator is available and notification is skipped.
+  Continue differentiating THIS skill's description for every neighbor.
+  For each editable neighbor, edit BOTH parts: (i) its frontmatter DESCRIPTION and (ii) its
    "## When NOT to Use This Skill" section (full current text injected under
    "## Neighbor Skills (full SKILL.md for editing)"; read it there, do not ask
    the user). DESCRIPTION style: do NOT just append a "not <new skill>" clause --
@@ -78,7 +86,7 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    `skill_md` only as fallback) and wait for the user's Accept/Reject before the
    next. If no neighbor needs an edit, say so explicitly. Edits are versioned with
    the original always kept and only written to Blob when the user Saves; saving
-   the new skill first is recommended but not required.
+  the new skill first is recommended but not required for your own neighbors.
 3. `variables_ok` -- confirm FOUR kinds of variables and persist via
    `record_variables`, PREFILLING your best guesses first: `kind="aca_env"`
    (ACA environment variable; `in_aca=true` if it already exists, false if it

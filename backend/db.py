@@ -105,16 +105,21 @@ def get_cursor() -> Iterator[Any]:
     """
     cn = _thread_connection()
     cursor = cn.cursor()
+    depth = getattr(_thread_local, "transaction_depth", 0)
+    _thread_local.transaction_depth = depth + 1
     try:
         yield cursor
-        cn.commit()
+        if depth == 0:
+            cn.commit()
     except Exception:  # noqa: BLE001
-        try:
-            cn.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        if depth == 0:
+            try:
+                cn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
         raise
     finally:
+        _thread_local.transaction_depth = depth
         try:
             cursor.close()
         except Exception:  # noqa: BLE001
@@ -123,6 +128,9 @@ def get_cursor() -> Iterator[Any]:
 
 def run(fn: Callable[[Any], T]) -> T:
     """Run ``fn(cursor)`` inside a transaction, retrying transient failures."""
+    if getattr(_thread_local, "transaction_depth", 0):
+        with get_cursor() as cursor:
+            return fn(cursor)
     for attempt in range(3):
         try:
             with get_cursor() as cur:

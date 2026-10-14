@@ -312,6 +312,16 @@ def get_skill(skill_name: str, owner_upn: str | None = None) -> SkillRow | None:
     return SkillRow(*row) if row else None
 
 
+def get_skill_by_key(skill_key: str) -> SkillRow | None:
+    if _local_repo is not None:
+        with _local_repo._lock:
+            return _local_repo._skills.get(skill_key)
+    row = db.fetchone(
+        f"SELECT {_SKILL_COLUMNS} FROM dbo.skills s WHERE s.skill_key = ?", (skill_key,)
+    )
+    return SkillRow(*row) if row else None
+
+
 def list_skills_created_by(user_upn: str) -> list[SkillRow]:
     creator = user_upn.strip().lower()
     if not creator:

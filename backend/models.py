@@ -651,6 +651,15 @@ class PendingToolCall(BaseModel):
     created_at: str = Field(default_factory=utc_now_iso)
 
 
+class NeighborNoticeOutcome(BaseModel):
+    skill_key: str
+    skill_name: str
+    target_user: str = ""
+    status: Literal["pending", "sent", "skipped", "failed"] = "pending"
+    message: str = ""
+    notice_id: int | None = None
+
+
 class Session(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -685,6 +694,9 @@ class Session(BaseModel):
     iteration_reflections: list[IterationReflection] = Field(default_factory=list)
     patch_history: list[PatchRecord] = Field(default_factory=list)
     neighbor_edits: list[NeighborEdit] = Field(default_factory=list)
+    neighbor_notice_outcomes: list[NeighborNoticeOutcome] = Field(default_factory=list)
+    neighbor_notice_review: dict[str, Any] | None = None
+    neighbor_edit_policy: dict[str, str] = Field(default_factory=dict, exclude=True)
     # Transient: full current SKILL.md of the SELECTED neighbor skills, loaded
     # best-effort so the agent can edit them without asking the user for the
     # text. Excluded from persistence (re-derived from the store each turn).

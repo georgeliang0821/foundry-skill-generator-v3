@@ -38,6 +38,8 @@ import {
   proposeNeighborEdit,
   selectNeighborEdit,
   saveNeighborEditApi,
+  listNeighborNotices,
+  actOnNeighborNotice,
   updateVariables,
   updateSessionDraft,
 } from "./api.js";
@@ -319,6 +321,7 @@ let activeContextTab = "materials";
 let userPickedContextTab = false;
 let isSending = false;
 let availableSkills = [];
+let neighborNotices = [];
 let modifiableSkills = [];
 let skillsLoaded = false;
 let savedSessions = [];
@@ -1962,6 +1965,15 @@ function editableNeighborNames() {
 }
 
 function neighborEditCardHtml(skill, ne) {
+  const outcome = (session?.neighbor_notice_outcomes || []).find((item) => item.skill_name === skill);
+  const metadata = availableSkills.find((item) => item.name === skill || item.skill_name === skill);
+  const owned = modifiableSkills.some((item) => item.name === skill || item.skill_name === skill);
+  if (outcome || (metadata && !owned)) {
+    const message = outcome?.message || (metadata.created_by
+      ? `路由確認及來源 Skill 儲存成功後通知 ${metadata.created_by} 進行相鄰 Skill 修改確認。`
+      : "未通知：鄰居沒有建立者。");
+    return `<div class="nbedit-card" data-neighbor-notice-outcome="${escapeHtml(outcome?.status || "pending")}"><strong>${escapeHtml(skill)}</strong><p>${escapeHtml(message)}</p></div>`;
+  }
   if (!ne) {
     // No edit started yet -- offer to open the editor (loads current SKILL.md).
     return `<div class="nbedit-card" data-nbedit="${escapeHtml(skill)}">
@@ -5662,6 +5674,31 @@ function nextTestPrompt() {
   ].join("\n");
 }
 
+async function activateCreatedSession(created, activity) {
+  session = created;
+  el("modeSelect").value = session.mode;
+  if (session.neighbor_notice_review) el("editScopeSelect").value = "prepare";
+  localEditorDirty = false;
+  topologyData = null;
+  persistSessionState();
+  await refreshSessions();
+  attachedMaterials = [];
+  userPickedContextTab = false;
+  el("chatStream").innerHTML = session.mode === "modify" ? "" : `<div class="empty-state chat-empty">${svgIcon("i-sparkles")}<strong>Tell me what skill to build</strong><em>Paste API specs, sample code, an existing SKILL.md, or a few user examples.</em></div>`;
+  el("toolCalls").innerHTML = "";
+  pendingQuestionCalls.clear();
+  pendingChoiceAnswers.clear();
+  renderQuestionQueueStatus();
+  renderSession();
+  el("chatStream").appendChild(activity.node);
+  activity.update("Reading ACA environment settings");
+  const environment = await refreshCurrentAcaEnv();
+  const loaded = session.current_skill?.skill_md
+    ? `Loaded skill: ${session.target_skill_id || inferCurrentName()}. Skill content unchanged.`
+    : "Session ready.";
+  activity.finish(`${loaded} ${environment.message}`, environment.failed);
+}
+
 async function startSession() {
   appLog("Starting session");
   setInputBusy(true, "Loading...");
@@ -5672,7 +5709,7 @@ async function startSession() {
   }
   const activity = beginConversationActivity("Loading session and skill");
   try {
-    session = await createSession({
+    const created = await createSession({
       mode: el("modeSelect").value,
       // modify infers the kind from the target SKILL.md; sending the disabled
       // select's stale value would trip the backend's mismatch check.
@@ -5682,26 +5719,7 @@ async function startSession() {
       start_stage: el("modeSelect").value === "modify" ? el("editScopeSelect").value : null,
       materials: [],
     });
-    localEditorDirty = false;
-    topologyData = null;
-    appLog(`Session started: ${session.id}`);
-    persistSessionState();
-    await refreshSessions();
-    attachedMaterials = [];
-    userPickedContextTab = false;
-    el("chatStream").innerHTML = session.mode === "modify" ? "" : `<div class="empty-state chat-empty">${svgIcon("i-sparkles")}<strong>Tell me what skill to build</strong><em>Paste API specs, sample code, an existing SKILL.md, or a few user examples.</em></div>`;
-    el("toolCalls").innerHTML = "";
-    pendingQuestionCalls.clear();
-    pendingChoiceAnswers.clear();
-    renderQuestionQueueStatus();
-    renderSession();
-    el("chatStream").appendChild(activity.node);
-    activity.update("Reading ACA environment settings");
-    const environment = await refreshCurrentAcaEnv();
-    const loaded = session.current_skill?.skill_md
-      ? `Loaded skill: ${session.target_skill_id || inferCurrentName()}. Skill content unchanged.`
-      : "Session ready.";
-    activity.finish(`${loaded} ${environment.message}`, environment.failed);
+    await activateCreatedSession(created, activity);
   } catch (err) {
     appLog(`Start session failed: ${err.message}`);
     activity.finish(`Could not start session: ${err.message}`, true);
@@ -6899,8 +6917,86 @@ async function refreshAuthStatus() {
   // populates even if the page loaded before the cookie was valid.
   if (authStatus && authStatus.authenticated) {
     try { await refreshSkills(); } catch {}
+    await refreshNeighborNotices();
+  } else {
+    neighborNotices = [];
+    el("neighborNoticesBtn").classList.add("hidden");
+    el("neighborNoticesDialog").close();
   }
 }
+
+function renderNeighborNotices() {
+  el("neighborNoticesCount").textContent = String(neighborNotices.length);
+  el("neighborNoticesBtn").setAttribute("aria-label", `相鄰 Skill 通知 (${neighborNotices.length})`);
+  el("neighborNoticesList").innerHTML = neighborNotices.length ? neighborNotices.map((notice) => {
+    const target = notice.target || {};
+    const sources = (notice.sources || []).map((source) => `<p><strong>${escapeHtml(source.name || source.skill_key)}</strong>: ${escapeHtml(source.available ? source.description : "來源已不存在或無法載入")}</p>`).join("");
+    return `<section class="neighbor-notice-row" data-notice-id="${notice.id}">
+      <strong>${escapeHtml(target.name || notice.skill_key)}</strong>
+      <p>${escapeHtml(notice.proposer_upn)}</p>${sources}
+      ${target.available ? "" : "<p>目標已不存在或無法載入。</p>"}
+      <div class="neighbor-notice-actions">
+        <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available ? "" : " disabled"}>${svgIcon("i-adjustments")}<span>開始修改確認</span></button>
+        <button type="button" class="icon-button" data-notice-dismiss="${notice.id}">${svgIcon("i-x")}<span>不修改</span></button>
+      </div>
+    </section>`;
+  }).join("") : "<p>沒有待處理通知。</p>";
+}
+
+async function refreshNeighborNotices() {
+  el("neighborNoticesBtn").classList.remove("hidden");
+  try {
+    neighborNotices = await listNeighborNotices();
+    el("neighborNoticesError").textContent = "";
+    renderNeighborNotices();
+  } catch (err) {
+    el("neighborNoticesCount").textContent = "!";
+    el("neighborNoticesError").textContent = `無法載入通知：${err.message}`;
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  if (event.target.closest("#neighborNoticesBtn")) {
+    el("neighborNoticesDialog").showModal();
+    await refreshNeighborNotices();
+    return;
+  }
+  if (event.target.closest("[data-notice-close]")) {
+    el("neighborNoticesDialog").close();
+    return;
+  }
+  const button = event.target.closest("[data-notice-start], [data-notice-dismiss]");
+  if (!button || button.disabled) return;
+  const start = button.hasAttribute("data-notice-start");
+  if (start && (isSending || localEditorDirty)) {
+    el("neighborNoticesError").textContent = "請先完成目前請求或儲存編輯內容。";
+    return;
+  }
+  const id = button.getAttribute(start ? "data-notice-start" : "data-notice-dismiss");
+  const row = button.closest("[data-notice-id]");
+  row.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+  try {
+    const result = await actOnNeighborNotice(id, start ? "start-modify" : "dismiss");
+    await refreshNeighborNotices();
+    if (start) {
+      el("neighborNoticesDialog").close();
+      setInputBusy(true, "Loading...");
+      const activity = beginConversationActivity("Loading neighbor review");
+      try {
+        await activateCreatedSession(result, activity);
+        appendMessage("assistant", "已開啟相鄰 Skill 修改確認；通知已結案，Skill 內容尚未修改。");
+        await sendChatPayload("請開始相鄰 Skill 的修改確認。", []);
+      } catch (err) {
+        activity.finish(`通知已結案，Session ${result.id} 已建立，但畫面載入失敗：${err.message}`, true);
+      } finally {
+        setInputBusy(false);
+      }
+    }
+  } catch (err) {
+    el("neighborNoticesError").textContent = err.message;
+    row.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+  }
+});
 
 async function initializePage() {
   restoreUiState();

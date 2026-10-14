@@ -181,7 +181,7 @@ Agent 透過 `record_understanding` 將定義寫入 Brief：
 3. **互斥檢視 (Agent 自行推理)**：將自薦 description 與鄰居 metadata 做交叉干擾診斷，視需要調整文字精度。
 4. **When NOT to Use (Agent 自行推理)**：在內文為各鄰近 Skill 匹配 `व्हे情境 ➔ 推薦轉移至鄰居`。
 5. **備置範例 (與使用者互動)**：使用者藉 `request_positive_samples` 開箱正面用例，存檔後系統自動推理出負面盲測 Query，共同更新成 `test_samples`。
-6. **鄰近編輯 (兩者合作)**：Agent 開發 Patch 送給鄰近 Skill 寫入 When NOT to Use 反向指標，以達雙向保護。
+6. **鄰近處理 (依建立者分流)**：自己的鄰居由 Agent 提出 description／When NOT to Use Patch，作者確認後沿用版本與儲存流程。他人的鄰居不產生修改稿，只在路由確認後記錄關係、來源儲存成功後通知 creator；建立者空白則跳過並提示。creator 選「開始修改確認」時以最新目標全文及來源 name／description 開啟完整 PREPARE MODIFY，由 [17_neighbor_notice_review.md](../prompts/17_neighbor_notice_review.md) 引導當下建議與確認，不預套 description。通知在 session 建立成功或選「不修改」時立即結案，不等待後續存檔。
 
 #### 3.1.3 variables_ok 細部子任務
 

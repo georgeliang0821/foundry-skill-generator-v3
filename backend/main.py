@@ -12,6 +12,7 @@ import os
 import base64
 import hashlib
 import secrets
+from uuid import NAMESPACE_URL, uuid5
 import time
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,7 @@ from .models import (
     Mode,
     PatchRecord,
     NeighborEdit,
+    NeighborNoticeOutcome,
     NeighborProposeRequest,
     NeighborSelectRequest,
     NeighborsUpdateRequest,
@@ -120,6 +122,7 @@ from .topology import (
 from .topology import declared_children as declared_children_of
 from . import acl as acl_mod
 from . import skills_repo
+from . import neighbor_notice_repo
 from . import db
 from .state_machine import (
     TRANSITION_TABLE,
@@ -316,7 +319,14 @@ def _load_selected_neighbor_full_md(session) -> None:
     # edited fall back to the Blob original.
     edits_by_name = {ne.skill_name: ne for ne in (session.neighbor_edits or [])}
     loaded: dict[str, str] = {}
-    for name in names[:5]:
+    session.neighbor_edit_policy = {}
+    for name in names:
+        row = skills_repo.get_skill(name)
+        session.neighbor_edit_policy[name] = "editable" if row and (row.created_by or "").strip().lower() == session.owner_upn else "notify_creator" if row and row.created_by else "skip_missing_creator"
+        if row is None or (row.created_by or "").strip().lower() != session.owner_upn:
+            continue
+        if len(loaded) >= 5:
+            continue
         ne = edits_by_name.get(name)
         if ne and ne.versions:
             sel = next((v for v in ne.versions if v.version_id == ne.selected_version_id), None)
@@ -637,6 +647,7 @@ log_event(
 )
 store = make_skill_store()
 skills_repo.make_skills_repo()
+neighbor_notice_repo.make_notice_repo(local=isinstance(store, CachedSkillStore) and isinstance(store.store, LocalSkillStore))
 
 def _active_store_id() -> str:
     """Stable id of the currently configured blob store (account/container/prefix)."""
@@ -1285,6 +1296,7 @@ def save_skill_dual_write(
     session.children = declared_children
     session.blob_store_id = _active_store_id()
     session.eaa_ruleset_version = eaa_lint.ruleset_version
+    _flush_neighbor_notices(session, saved.name)
     if eaa_lint.warnings:
         _note_eaa_warnings(session, eaa_lint.warnings, eaa_lint.ruleset_version)
     session.touch()
@@ -2186,6 +2198,8 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
                 if contract_errors:
                     raise ValueError("\n".join(contract_errors))
             _assert_children_before_routing(session, item, confirmed)
+            if item == _ROUTING_CHECKPOINT and confirmed:
+                _queue_confirmed_neighbor_notices(session)
             session.prepare_brief.verify_checklist[item] = confirmed
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             session.prepare_brief.verify_updated_at[item] = ts
@@ -2443,7 +2457,14 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         session.touch()
         return
 
-    if tool in {"propose_neighbor_edit", "propose_child_edit"}:
+    if tool == "propose_neighbor_edit":
+        name = safe_skill_name(str(args.get("skill_name", "")))
+        row = skills_repo.get_skill(name)
+        if row is None or (row.created_by or "").strip().lower() != session.owner_upn:
+            raise ValueError("This neighbor is not yours to edit. Confirm the routing checkpoint to queue a relationship notification; do not generate its description or patch.")
+        return
+
+    if tool == "propose_child_edit":
         # INTERACTIVE: do NOT apply here. The proposal stays a pending tool call
         # so the user accepts/rejects it on a chat card (like propose_patch). The
         # apply happens in tool_result on accept via _apply_neighbor_edit_proposal.
@@ -2518,6 +2539,10 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
 
 @app.post("/api/sessions")
 def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -> Session:
+    return _create_session(req, upn)
+
+
+def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | None = None, review: dict | None = None) -> Session:
     started = now_ms()
     if req.mode == "modify" and not req.target_skill_id:
         raise HTTPException(status_code=400, detail="Select a skill you created before starting MODIFY.")
@@ -2531,11 +2556,13 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
     if req.mode != "modify" and req.target_skill_id:
         log_event("session.create.target_ignored", level="warning", mode=req.mode, target_skill_id=req.target_skill_id)
     session = Session(
+        **({"id": session_id} if session_id else {}),
         mode=req.mode,
         skill_kind=req.skill_kind or SkillKind.CAPABILITY,
         target_skill_id=req.target_skill_id if req.mode == "modify" else None,
         materials=req.materials,
         owner_upn=upn,
+        neighbor_notice_review=review,
     )
     if req.mode == "modify" and req.target_skill_id and req.start_stage == "refine":
         session.current_stage = Stage.REFINE
@@ -2602,8 +2629,8 @@ def create_session(req: CreateSessionRequest, upn: str = Depends(require_upn)) -
             version_hash=files.version_hash,
             asset_count=len(session.assets),
         )
-    sessions[session.id] = session
     persist_session(session)
+    sessions[session.id] = session
     # New sessions start in PREPARE without a stage transition, so the
     # post-transition hook never fires. Kick off the same background load
     # (ACA env + peer-skill boundaries + overlaps) here so the catalog of the
@@ -2810,6 +2837,7 @@ def e2e_reset() -> dict[str, Any]:
     store = CachedSkillStore(LocalSkillStore())
     if os.getenv("SGV2_SKILL_STORE", "azure").strip().lower() == "local":
         skills_repo.make_skills_repo()
+        neighbor_notice_repo.make_notice_repo(local=True)
     acl_mod.get_cache().invalidate()
     session_store = LocalSessionStore()
     for path in session_store.root.glob("*.json"):
@@ -3728,6 +3756,8 @@ def update_session_checklist(session_id: str, req: ChecklistUpdateRequest, upn: 
             _assert_children_before_routing(session, req.item, confirmed)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if req.item == _ROUTING_CHECKPOINT and confirmed:
+            _queue_confirmed_neighbor_notices(session)
         brief.verify_checklist[req.item] = confirmed
         brief.verify_updated_at[req.item] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         affected = _cascade_prepare_pending(session, req.item) if not confirmed else []
@@ -3945,6 +3975,139 @@ def update_session_neighbors(session_id: str, req: NeighborsUpdateRequest, upn: 
     return session
 
 
+def _queue_neighbor_notice(session: Session, name: str) -> None:
+    name = safe_skill_name(name)
+    row = skills_repo.get_skill(name)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Neighbor skill not found.")
+    creator = (row.created_by or "").strip().lower()
+    if creator == session.owner_upn:
+        return
+    confirmed = {safe_skill_name(neighbor.skill) for neighbor in session.prepare_brief.understanding.neighbor_skills}
+    if name not in confirmed or name in session.children:
+        raise HTTPException(status_code=400, detail="Confirm this skill as a routing neighbor first.")
+    acl_mod.assert_can_access(session.owner_upn, name)
+    key = row.skill_key if row else name
+    existing = next((outcome for outcome in session.neighbor_notice_outcomes if outcome.skill_key == key), None)
+    if existing is not None and existing.status == "sent":
+        return
+    if existing is None:
+        existing = NeighborNoticeOutcome(skill_key=key, skill_name=name)
+        session.neighbor_notice_outcomes.append(existing)
+    existing.target_user = creator
+    existing.status = "pending" if creator and row.enabled else "skipped"
+    existing.message = f"來源 Skill 儲存成功後通知 {creator} 進行相鄰 Skill 修改確認。" if existing.status == "pending" else "未通知：鄰居沒有建立者或已停用。"
+
+
+def _queue_confirmed_neighbor_notices(session: Session) -> None:
+    names = {safe_skill_name(neighbor.skill) for neighbor in session.prepare_brief.understanding.neighbor_skills}
+    session.neighbor_notice_outcomes = [outcome for outcome in session.neighbor_notice_outcomes if outcome.status == "sent" or outcome.skill_name in names]
+    for name in names - set(session.children):
+        try:
+            _queue_neighbor_notice(session, name)
+        except HTTPException as exc:
+            if exc.status_code not in {403, 404}:
+                raise
+            outcome = next((item for item in session.neighbor_notice_outcomes if item.skill_name == name), None)
+            if outcome is None:
+                outcome = NeighborNoticeOutcome(skill_key=name, skill_name=name)
+                session.neighbor_notice_outcomes.append(outcome)
+            outcome.status = "skipped"
+            outcome.message = "未通知：鄰居已不存在或您已無讀取權限。"
+
+
+def _flush_neighbor_notices(session: Session, source_name: str) -> None:
+    for outcome in session.neighbor_notice_outcomes:
+        if outcome.status not in {"pending", "failed"}:
+            continue
+        confirmed = {safe_skill_name(neighbor.skill) for neighbor in session.prepare_brief.understanding.neighbor_skills}
+        if outcome.skill_name not in confirmed or outcome.skill_name in session.children:
+            outcome.status = "skipped"
+            outcome.message = "未通知：此 Skill 已不在確認的鄰居清單。"
+            continue
+        try:
+            target = skills_repo.get_skill_by_key(outcome.skill_key)
+            creator = (target.created_by or "").strip().lower() if target else ""
+            if not target or not target.enabled or not creator or creator == session.owner_upn:
+                outcome.status = "skipped"
+                outcome.message = "未通知：鄰居已不存在、停用、沒有建立者或已由您建立。"
+                continue
+            source = skills_repo.get_skill(source_name)
+            if source is None:
+                raise RuntimeError("Saved source metadata is unavailable.")
+            notice = neighbor_notice_repo.upsert_open_notice(target.skill_key, creator, session.owner_upn, [source.skill_key])
+            outcome.status = "sent"
+            outcome.target_user = creator
+            outcome.notice_id = notice.id
+            outcome.message = f"已通知 {creator} 進行相鄰 Skill 修改確認。"
+        except Exception as exc:
+            log_exception("neighbor_notice.send_failed", exc, session_id=session.id, skill_key=outcome.skill_key)
+            outcome.status = "failed"
+            outcome.message = "來源 Skill 已儲存，通知尚未送達；再次儲存可重試。"
+
+
+def _notice_skill_projection(key: str) -> dict[str, Any]:
+    row = skills_repo.get_skill_by_key(key)
+    if not row or not row.enabled:
+        return {"skill_key": key, "available": False, "name": "", "description": ""}
+    try:
+        name, description = store.load_frontmatter(row.skill_name, row.owner_upn)
+    except Exception:
+        return {"skill_key": key, "available": False, "name": row.skill_name, "description": ""}
+    return {"skill_key": key, "available": True, "name": name, "description": description}
+
+
+@app.get("/api/neighbor-notices")
+def list_neighbor_notices(upn: str = Depends(require_upn)) -> list[dict[str, Any]]:
+    return [{"id": notice.id, "skill_key": notice.skill_key, "proposer_upn": notice.proposer_upn,
+             "target": _notice_skill_projection(notice.skill_key),
+             "sources": [_notice_skill_projection(key) for key in notice.source_skill_keys]}
+            for notice in neighbor_notice_repo.list_open_notices(upn)]
+
+
+@app.post("/api/neighbor-notices/{notice_id}/dismiss")
+def dismiss_neighbor_notice(notice_id: int, upn: str = Depends(require_upn)) -> dict:
+    try:
+        notice = neighbor_notice_repo.resolve_notice(notice_id, upn, "dismissed")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"id": notice.id, "status": notice.status}
+
+
+@app.post("/api/neighbor-notices/{notice_id}/start-modify")
+def start_neighbor_notice_modify(notice_id: int, upn: str = Depends(require_upn)) -> Session:
+    def create(notice):
+        target = skills_repo.get_skill_by_key(notice.skill_key)
+        if not target or not target.enabled or (target.created_by or "").strip().lower() != upn:
+            raise HTTPException(status_code=409, detail="此通知目標已不存在、停用或不再由您建立。")
+        if target.owner_upn:
+            raise HTTPException(status_code=409, detail="此目標使用私有範圍路徑，目前 MODIFY 不支援；未開啟其他同名 Skill。")
+        sid = uuid5(NAMESPACE_URL, f"neighbor-notice:{notice.id}:{upn}").hex
+        stored = session_store.load(sid)
+        if stored is not None and stored.owner_upn == upn:
+            sessions[sid] = stored
+            return sid
+        if sid in sessions:
+            return sid
+        review = {"notice_id": notice.id, "target_skill_key": target.skill_key,
+                  "proposer_upn": notice.proposer_upn,
+                  "sources": [_notice_skill_projection(key) for key in notice.source_skill_keys]}
+        _create_session(CreateSessionRequest(mode="modify", target_skill_id=target.skill_name, start_stage="prepare"), upn, session_id=sid, review=review)
+        return sid
+
+    try:
+        notice = neighbor_notice_repo.resolve_notice(notice_id, upn, "accepted", create)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    session = get_session_for_user(notice.modify_session_id, upn)
+    acl_mod.assert_can_modify(upn, session.target_skill_id)
+    return session
+
+
 def _apply_neighbor_edit_proposal(session: Session, args: dict[str, Any]) -> dict[str, Any]:
     """Apply an accepted propose_neighbor_edit to the currently SELECTED version
     and APPEND it as a new, uniquely-versioned agent_proposed entry (never
@@ -4025,6 +4188,9 @@ def _get_or_init_neighbor_edit(session: Session, skill_name: str) -> NeighborEdi
     """Return the NeighborEdit for ``skill_name``, creating it with an ``original``
     snapshot loaded from the store on first access. Raises 404 if the neighbor is
     not loadable, 403 if the user cannot modify it."""
+    if skills_repo.get_skill(safe_skill_name(skill_name)) is None:
+        raise HTTPException(status_code=404, detail="Neighbor skill not found.")
+    acl_mod.assert_can_modify(session.owner_upn, safe_skill_name(skill_name))
     for ne in session.neighbor_edits:
         if ne.skill_name == skill_name:
             return ne
@@ -4060,7 +4226,11 @@ def neighbor_edit_open(session_id: str, skill: str, upn: str = Depends(require_u
     """Open a neighbor skill for user editing: load its current Blob content as
     the immutable 'original' version so the edit card appears. No Blob write."""
     session = get_session_for_user(session_id, upn)
-    _get_or_init_neighbor_edit(session, skill)  # raises 404 if not loadable
+    row = skills_repo.get_skill(safe_skill_name(skill))
+    if row is None or (row.created_by or "").strip().lower() != upn:
+        _queue_neighbor_notice(session, skill)
+    else:
+        _get_or_init_neighbor_edit(session, skill)
     persist_session(session)
     log_event("session.neighbor_edit.open", session_id=session.id, skill=safe_skill_name(skill))
     return session
@@ -4071,6 +4241,11 @@ def neighbor_edit_propose(session_id: str, skill: str, req: NeighborProposeReque
     """Push a new version into a neighbor skill's session-scoped edit history.
     Nothing is written to Blob here -- the user must Save explicitly."""
     session = get_session_for_user(session_id, upn)
+    row = skills_repo.get_skill(safe_skill_name(skill))
+    if row is None or (row.created_by or "").strip().lower() != upn:
+        _queue_neighbor_notice(session, skill)
+        persist_session(session)
+        return session
     ne = _get_or_init_neighbor_edit(session, skill)
     version = NeighborVersion(
         label=req.label or f"Edit {len(ne.versions)}",

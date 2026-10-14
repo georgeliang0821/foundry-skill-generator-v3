@@ -292,6 +292,18 @@ export async function saveNeighborEditApi(sessionId, skill) {
   return res.json();
 }
 
+export async function listNeighborNotices() {
+  const res = await apiFetch("/api/neighbor-notices");
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
+export async function actOnNeighborNotice(id, action) {
+  const res = await apiFetch(`/api/neighbor-notices/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
 export async function runSkillTest(name, payload) {
   const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}/test`, {
     method: "POST",

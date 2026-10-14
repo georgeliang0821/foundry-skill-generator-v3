@@ -63,7 +63,7 @@
 | 身分 | 需要的設定 / 權限 | 不需要 |
 | --- | --- | --- |
 | **登入用 App Registration（`MICROSOFT_*`）** | Web 平台 Redirect URI、client secret、暴露委派 scope；委派權限 `openid`、`profile`、`offline_access` 與自己暴露的 scope；EAA 端必須接受 `aud = api://<app-id>` | 任何 Azure RBAC、Foundry、SQL、Blob 權限；Microsoft Graph 權限；app role |
-| **後端 service principal（`AZURE_*`）** | Foundry project 的 **Foundry Agent Consumer**（或 **Foundry User**）；SQL 資料庫使用者，並對 `dbo.skills`、`dbo.user_skill_grants` 具備 `SELECT` / `INSERT` / `UPDATE` / `DELETE` | Redirect URI、暴露 scope、Blob 權限、資料庫層級角色（例如 `db_datareader` / `db_datawriter`） |
+| **後端 service principal（`AZURE_*`）** | Foundry project 的 **Foundry Agent Consumer**（或 **Foundry User**）；SQL 資料庫使用者，對 `dbo.skills`、`dbo.user_skill_grants` 具備 `SELECT` / `INSERT` / `UPDATE` / `DELETE`，對 `dbo.skill_neighbor_notice` 具備 `SELECT` / `INSERT` / `UPDATE` | Redirect URI、暴露 scope、Blob 權限、資料庫層級角色（例如 `db_datareader` / `db_datawriter`）、通知表的 DELETE 或 DDL 權限 |
 | **`az login` 帳號** | 儲存體帳戶的 **Storage Blob Data Contributor** | Foundry、SQL 權限 |
 
 > 登入用與後端用可以是同一支 App Registration（兩組變數填相同的值），但那支 app 就要同時具備上表前兩列的所有設定與權限。
@@ -110,9 +110,12 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 > **資料庫的建置與授權應該已在部署 EAA 時完成，請勿重複執行。** EAA repo 的 `skill_rbac_schema v2.sql` 建立 `dbo.skills`、`dbo.user_skill_grants` 與 `dbo.v_my_skills`；`sql-database-permission.sql` 的 Case C 以最小權限把 Skill Generator 的 service principal 加入資料庫。若不確定是否已執行，請向 EAA 管理員確認。
 
 1. Azure 入口網站 → SQL database 的 Overview：**Server name** → `AZURE_SQL_SERVER`（例如 `your-server.database.windows.net`），資料庫名稱 → `AZURE_SQL_DATABASE`。
-2. 確認 `sql-database-permission.sql` Case C 中的 service principal 名稱就是 [2.2](#22-後端-service-principal) 那一支。Case C 只授予 `dbo.skills` 與 `dbo.user_skill_grants` 的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`；本專案也只需要這些。若名稱不同，請 EAA 管理員以這支 service principal 重新執行 Case C。
+2. 確認 `sql-database-permission.sql` Case C 中的 service principal 名稱就是 [2.2](#22-後端-service-principal) 那一支。Case C 授予 `dbo.skills` 與 `dbo.user_skill_grants` 的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`。若名稱不同，請 EAA 管理員以這支 service principal 執行 Case C。
 3. 確認 SQL Server 的防火牆允許你本機的 IP。
 4. 確認 `dbo.skills` 具有 `created_by VARCHAR(256) NULL` 欄位，且沒有以 SQL 連線身分填值的預設值。Generator 首次儲存時由後端填入已驗證登入者的小寫 email；內容更新與重新命名保留建立者。空白建立者不會列入 MODIFY，也不能修改；需要修改的資料由管理員確認建立者後補登，不從 grants 推定。
+5. 請 DBA 在同一資料庫執行 [scripts/create_skill_neighbor_notice.sql](../scripts/create_skill_neighbor_notice.sql)，先將 `YOUR-SKILL-GENERATOR-SP-NAME-HERE` 換成上述資料庫使用者名稱。腳本建立相鄰關係通知表與索引，只授予 runtime `SELECT` / `INSERT` / `UPDATE`；runtime 不建表，不需要 `DELETE`、`CREATE TABLE`、`ALTER` 或 `db_owner`。一般作者不需直接存取通知表，由 API 驗證收件身分。部署後請驗證通知來源合併、並行處理及服務重啟重試；本地測試不驗證 Azure SQL 的實際鎖與權限。
+
+> 通知送出失敗不回滾已儲存的來源 Skill，作者會看到「通知尚未送達」，再次儲存可重試。來源尚未儲存時不會寄出。通知只記錄 Skill key 關係，不保存 description 建議或 patch；完整流程見 [03-architecture.md](03-architecture.md#22-儲存接受-patch--按下儲存)。
 
 > 所有使用者共用這個連線身分；`dbo.skills.created_by` 與 `dbo.user_skill_grants` 記錄的是應用程式使用者，而不是 service principal。公開設定與 grants 只提供讀取、使用權，不授予內容修改權。細節見 [03-architecture.md](03-architecture.md#5-資料庫細節azure-sql)。
 

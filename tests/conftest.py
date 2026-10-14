@@ -171,6 +171,7 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
         ],
     )
     monkeypatch.setattr(skills_repo, "get_skill", _get_skill)
+    monkeypatch.setattr(skills_repo, "get_skill_by_key", lambda key: _row(key, state.skills[key]) if key in state.skills else None)
     monkeypatch.setattr(skills_repo, "upsert_skill", state.upsert_skill)
     monkeypatch.setattr(skills_repo, "set_skill_visibility", state.set_skill_visibility)
     monkeypatch.setattr(skills_repo, "delete_skill", _delete_skill)
@@ -213,6 +214,8 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     module.sessions = {}
     module.auth_tokens = {}
     module.oauth_states = {}
+    from backend import neighbor_notice_repo
+    monkeypatch.setattr(neighbor_notice_repo, "_local_repo", neighbor_notice_repo.LocalNeighborNoticeRepo())
     # Import ran load_dotenv(override=True), which restores a real MCP_ENDPOINT / ACA_* from .env.
     # The fake keeps whatever aca_env_result the session already has; tests needing flags set it.
     monkeypatch.setattr(module, "load_aca_env_for_session", lambda session, *, reason="manual": None)

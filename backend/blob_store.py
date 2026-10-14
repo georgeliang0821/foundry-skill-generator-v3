@@ -460,6 +460,11 @@ class AzureBlobSkillStore:
         )
         return files
 
+    def load_frontmatter(self, name: str, owner_upn: str | None = None) -> tuple[str, str]:
+        path = blob_path_of(name, owner_upn)
+        data = self._container().get_blob_client(path).download_blob().readall().decode("utf-8")
+        return parse_frontmatter(data)
+
     def _script_path(self, name: str) -> str:
         return self._blob_name(safe_skill_name(name), script_relpath_of(name))
 
@@ -706,6 +711,13 @@ class CachedSkillStore:
 
     def load_skill(self, name: str) -> SkillFiles:
         return self.store.load_skill(name)
+
+    def load_frontmatter(self, name: str, owner_upn: str | None = None) -> tuple[str, str]:
+        if isinstance(self.store, LocalSkillStore):
+            if owner_upn:
+                raise FileNotFoundError("Scoped local skill content is unavailable.")
+            return parse_frontmatter(self.store.load_skill(name).skill_md)
+        return self.store.load_frontmatter(name, owner_upn)
 
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "") -> SkillFiles:
         saved = self.store.save_skill(files, expected_version_hash, create_only=create_only, captured_by=captured_by)

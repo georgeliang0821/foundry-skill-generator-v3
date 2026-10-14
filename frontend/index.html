@@ -85,6 +85,17 @@
       </div>
     </div>
 
+    <dialog id="neighborNoticesDialog" class="neighbor-notices-dialog" aria-labelledby="neighborNoticesTitle">
+      <header class="modal-head">
+        <h3 id="neighborNoticesTitle">相鄰 Skill 通知</h3>
+        <button type="button" class="icon-button" data-notice-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="modal-body">
+        <p id="neighborNoticesError" role="alert"></p>
+        <div id="neighborNoticesList" aria-live="polite"></div>
+      </div>
+    </dialog>
+
     <!-- Inline Heroicons solid sprite (24x24). All path data is original / public Heroicons MIT licensed. -->
     <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
       <defs>
@@ -182,6 +193,10 @@
         </div>
 
         <div class="auth-box">
+          <button id="neighborNoticesBtn" class="icon-button hidden" type="button" title="相鄰 Skill 通知" aria-label="相鄰 Skill 通知" aria-haspopup="dialog">
+            <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg>
+            <span id="neighborNoticesCount">0</span>
+          </button>
           <div class="auth-copy">
             <span id="authStatus" class="auth-status">Checking sign-in</span>
             <span id="authProfile" class="auth-profile">Not signed in</span>

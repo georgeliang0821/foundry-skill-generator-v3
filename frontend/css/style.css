@@ -86,6 +86,24 @@
   --shadow: var(--shadow-1);
 }
 
+.neighbor-notices-dialog {
+  width: min(620px, calc(100% - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+}
+.neighbor-notices-dialog::backdrop { background: color-mix(in srgb, var(--text-1) 35%, transparent); }
+.neighbor-notice-row { padding: 16px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.neighbor-notice-row:last-child { border-bottom: 0; }
+.neighbor-notice-row p { margin: 6px 0; }
+.neighbor-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+#neighborNoticesError { color: var(--danger); overflow-wrap: anywhere; }
+#neighborNoticesCount { min-width: 2ch; font-variant-numeric: tabular-nums; }
+
 /* ─── Reset ───────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -330,12 +348,15 @@ textarea:focus, input:focus, select:focus {
   min-width: 0;
   max-width: 240px;
 }
-.auth-copy { display: grid; gap: 1px; max-width: 130px; min-width: 0; }
+.auth-copy { display: grid; flex: 1 1 130px; gap: 1px; max-width: 130px; min-width: 0; }
+.auth-button, #neighborNoticesBtn { flex-shrink: 0; }
 .auth-status {
   color: var(--text-3);
   font-size: var(--fs-xs);
   font-weight: 500;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .auth-status.signed-in { color: var(--success); }
 .auth-profile {

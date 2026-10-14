@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 import { openApp, openTab, sendChat, startNewSession } from "./helpers/app";
 import { currentSessionId, readSession, resetE2E, seedSkill, setScenario } from "./helpers/e2eApi";
 
@@ -6,6 +6,97 @@ test.use({ viewport: { width: 1504, height: 768 } });
 
 test.beforeEach(async ({ request }) => {
   await resetE2E(request);
+});
+
+async function seedNeighborNotice(request: APIRequestContext) {
+  await seedSkill(request, "notice-target");
+  expect((await request.patch("/api/skills/notice-target/visibility", { data: { is_public: true } })).ok()).toBeTruthy();
+  const headers = { "X-Test-UPN": "other@example.com" };
+  expect((await request.post("/api/e2e/seed-skill", { data: { name: "notice-source", user_upn: "other@example.com" } })).ok()).toBeTruthy();
+  const created = await request.post("/api/sessions", { headers, data: { mode: "modify", target_skill_id: "notice-source" } });
+  expect(created.ok()).toBeTruthy();
+  const session = await created.json();
+  expect((await request.post(`/api/sessions/${session.id}/neighbors`, { headers, data: { neighbor_skills: [{ skill: "notice-target" }] } })).ok()).toBeTruthy();
+  const queued = await request.post(`/api/sessions/${session.id}/checklist`, { headers, data: { item: "routing_uniqueness_confirmed", status: "confirmed" } });
+  expect(queued.ok()).toBeTruthy();
+  expect((await queued.json()).neighbor_notice_outcomes[0].status).toBe("pending");
+  expect(await (await request.get("/api/neighbor-notices")).json()).toEqual([]);
+  const saved = await request.post(`/api/sessions/${session.id}/save`, { headers, data: {} });
+  expect(saved.ok()).toBeTruthy();
+  expect((await saved.json()).neighbor_notice_outcomes[0].status).toBe("sent");
+}
+
+test("neighbor notification starts the full PREPARE modify flow and closes immediately", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await openApp(page);
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog).toContainText("notice-source");
+  await expect(dialog).toContainText("other@example.com");
+  await page.screenshot({ path: "test-results/neighbor-notice-desktop.png" });
+  await dialog.getByRole("button", { name: "開始修改確認" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("notice-target");
+  await expect(page.getByTestId("send-button")).toHaveText("Send");
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("0");
+  await expect(page.getByTestId("mode-select")).toHaveValue("modify");
+  await expect(page.getByText("Confirm the current target boundary?", { exact: true })).toBeVisible();
+  const session = await readSession(request, await currentSessionId(page));
+  expect(session.current_stage).toBe("prepare");
+  expect(session.neighbor_notice_review.sources[0].name).toBe("notice-source");
+  await openTab(page, "files");
+  await expect(page.getByTestId("file-editor")).toHaveValue(/notice-target/);
+  expect(await (await request.get("/api/neighbor-notices")).json()).toEqual([]);
+});
+
+test("neighbor notification can be dismissed on mobile without opening MODIFY", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openApp(page);
+  await expect(page.getByTestId("send-button")).toHaveText("Send");
+  const before = await currentSessionId(page);
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog.getByRole("button", { name: "不修改" })).toBeInViewport();
+  expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/neighbor-notice-mobile.png" });
+  await dialog.getByRole("button", { name: "不修改" }).click();
+  await expect(dialog).toContainText("沒有待處理通知");
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("0");
+  expect(await currentSessionId(page)).toBe(before);
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+});
+
+test("author sees pending and sent relationship status without another creator's editor", async ({ page, request }) => {
+  await seedSkill(request, "author-source");
+  const other = { "X-Test-UPN": "other@example.com" };
+  await request.post("/api/e2e/seed-skill", { data: { name: "other-target", user_upn: "other@example.com" } });
+  expect((await request.patch("/api/skills/other-target/visibility", { headers: other, data: { is_public: true } })).ok()).toBeTruthy();
+  const created = await request.post("/api/sessions", { data: { mode: "modify", target_skill_id: "author-source" } });
+  const state = await created.json();
+  await request.post(`/api/sessions/${state.id}/neighbors`, { data: { neighbor_skills: [{ skill: "other-target" }] } });
+  await request.post(`/api/sessions/${state.id}/checklist`, { data: { item: "routing_uniqueness_confirmed", status: "confirmed" } });
+  await openApp(page);
+  await page.getByTestId("session-list").selectOption(state.id);
+  await expect(page.getByTestId("send-button")).toHaveText("Send");
+  await openTab(page, "checklist");
+  const checkpoint = page.locator('[data-checkpoint="routing_uniqueness_confirmed"]');
+  if (await checkpoint.getAttribute("open") === null) await checkpoint.locator(":scope > summary").click();
+  const subpanel = checkpoint.locator(".routing-subpanel").filter({ has: page.locator("[data-neighbor-edits]") });
+  if (await subpanel.getAttribute("open") === null) await subpanel.locator(":scope > summary").click();
+  await expect(checkpoint.locator('[data-neighbor-notice-outcome="pending"]')).toContainText("儲存成功後通知");
+  await expect(checkpoint.locator("[data-nbedit-open], [data-nbedit-textarea]")).toHaveCount(0);
+  const saved = await request.post(`/api/sessions/${state.id}/save`, { data: {} });
+  expect(saved.ok()).toBeTruthy();
+  await page.reload();
+  await page.getByTestId("session-list").selectOption(state.id);
+  await expect.poll(async () => (await readSession(request, state.id)).neighbor_notice_outcomes[0].status).toBe("sent");
+  await openTab(page, "checklist");
+  if (await checkpoint.getAttribute("open") === null) await checkpoint.locator(":scope > summary").click();
+  if (await subpanel.getAttribute("open") === null) await subpanel.locator(":scope > summary").click();
+  await expect(checkpoint.locator('[data-neighbor-notice-outcome="sent"]')).toContainText("已通知 other@example.com");
 });
 
 test("modify selector excludes other creators' granted and public skills", async ({ page, request }) => {

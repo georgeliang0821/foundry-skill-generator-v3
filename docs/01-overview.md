@@ -45,7 +45,7 @@
 - **對話式產生 SKILL.md**：使用者用自然語言描述需求，AI 透過工具呼叫（tool calls）逐步產出與修改 `SKILL.md`。
 - **五階段工作流**（見下方流程圖）：PREPARE → DRAFT → REFINE → TEST → DONE，每個階段有明確產出與品質關卡（quality gate）。
 - **既有 Skill 重複偵測**：PREPARE 階段比對知識庫（SQL + Blob），協助判斷該「新增」還是「修改既有 Skill」。
-- **鄰近 Skill 差異化（Peer Skills）**：載入使用者有權限的其他 Skill，協助把 `description` 的路由邊界寫清楚（何時用、何時不要用）。
+- **鄰近 Skill 差異化（Peer Skills）**：載入使用者有權限的其他 Skill，協助把 `description` 的路由邊界寫清楚（何時用、何時不要用）。自己的鄰居可編輯；他人的鄰居在來源儲存成功後通知 creator，creator 可開始完整 MODIFY 確認或選擇不修改。通知只保存相鄰關係，建議在處理時依最新內容產生。
 - **路由測試（TEST）**：把正面/負面範例查詢送到設定的 Router runtime endpoint，驗證「該選中時有選中、不該選中時沒選中」，並把結果回饋給 AI 自動修正。端點只需實作 `/run` 契約，可直接連到 runtime，也可選擇經由 APIM 等閘道對外提供；APIM 不是必要元件。請求以 `mode="route_only"` 送出：Router 照常路由並回傳它「本來會執行」的腳本，但**不執行、不寫入任何外部系統**，因此負面樣本不會誤觸有寫入行為的 skill。
 - **Patch 審閱與版本**：AI 以 V4A patch 形式提出修改，使用者可接受/還原；接受後即時雙寫 Blob + SQL。
 - **登入與權限隔離**：以 Entra 登入後的小寫 email 作為身分，依 grants 或公開設定決定可讀取、使用的 Skill；Generator 依 `dbo.skills.created_by` 決定可修改的 Skill，開啟 MODIFY 與每次內容寫入都由後端檢查。

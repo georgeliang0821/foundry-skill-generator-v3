@@ -158,6 +158,36 @@ def test_cursor_is_closed_even_when_the_body_raises(connections):
     assert connections[0].commits == 0
 
 
+def test_nested_lookup_keeps_outer_transaction_and_locks(connections):
+    def outer(cursor):
+        cursor.execute("SELECT id WITH (UPDLOCK, HOLDLOCK)")
+        assert db.fetchone("SELECT current_creator") == (1,)
+        assert connections[0].commits == 0
+        cursor.execute("UPDATE notice SET status = 'accepted'")
+
+    db.run(outer)
+    assert len(connections) == 1
+    assert connections[0].commits == 1
+    assert connections[0].closed_cursors == 2
+
+
+def test_nested_transient_failure_retries_whole_transaction(connections):
+    attempts = []
+
+    def outer(cursor):
+        attempts.append(cursor.connection)
+        if len(attempts) == 1:
+            cursor.connection.raise_on_execute = Exception(LINK_FAILURE)
+        db.fetchone("SELECT current_creator")
+        cursor.execute("UPDATE notice")
+
+    db.run(outer)
+    assert len(connections) == 2
+    assert connections[0].rollbacks == 1
+    assert connections[0].commits == 0
+    assert connections[1].commits == 1
+
+
 @pytest.mark.parametrize(
     "call",
     [

@@ -103,6 +103,11 @@ ASSET_STAGE_ADDENDA: dict[Stage, str] = {
     Stage.TEST: "14_skill_assets.md",
 }
 
+NEIGHBOR_NOTICE_STAGE_ADDENDA: dict[Stage, str] = {
+    stage: "17_neighbor_notice_review.md"
+    for stage in (Stage.PREPARE, Stage.DRAFT, Stage.REFINE, Stage.TEST)
+}
+
 
 def stage_prompt_for(kind: SkillKind, stage: Stage) -> str:
     return KIND_PROMPT_OVERRIDES.get(kind, {}).get(stage, STAGE_PROMPT_MAP[stage])
@@ -1592,6 +1597,14 @@ def build_system_prompt(session: Session) -> str:
         parts.append(IMPORT_MODE_ADDENDUM)
     if mode == Mode.MODIFY:
         parts.append(MODIFY_MODE_ADDENDUM)
+    if session.neighbor_notice_review:
+        if stage in NEIGHBOR_NOTICE_STAGE_ADDENDA:
+            parts.append(load_prompt(NEIGHBOR_NOTICE_STAGE_ADDENDA[stage]))
+        parts.append("## Neighbor Relationship Reference Data\n\n" + json.dumps(session.neighbor_notice_review, ensure_ascii=False))
+    if session.neighbor_edit_policy:
+        parts.append("## Neighbor Edit Policy\n\n" + json.dumps(session.neighbor_edit_policy))
+    if session.neighbor_notice_outcomes:
+        parts.append("## Neighbor Notification Outcomes\n\n" + json.dumps([outcome.model_dump() for outcome in session.neighbor_notice_outcomes], ensure_ascii=False))
     if session.materials:
         materials_section = _format_materials(session)
         if materials_section:
