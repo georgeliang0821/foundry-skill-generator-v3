@@ -328,6 +328,7 @@ def _load_selected_neighbor_full_md(session) -> None:
         if row is None or (row.created_by or "").strip().lower() != session.owner_upn:
             continue
         if len(loaded) >= 5:
+            session.neighbor_edit_policy[name] = "load_limit"
             continue
         ne = edits_by_name.get(name)
         if ne and ne.versions:
@@ -340,6 +341,7 @@ def _load_selected_neighbor_full_md(session) -> None:
             with log_timing("neighbor_full_md.blob", session_id=session.id, skill_name=name):
                 files = store.load_skill(name)
         except Exception as exc:  # noqa: BLE001 - one missing neighbor must not fail the batch.
+            session.neighbor_edit_policy[name] = "load_failed"
             log_event(
                 "neighbor_full_md.load_missing",
                 level="warning",
@@ -350,6 +352,8 @@ def _load_selected_neighbor_full_md(session) -> None:
             continue
         if files.skill_md.strip():
             loaded[name] = files.skill_md
+        else:
+            session.neighbor_edit_policy[name] = "empty_content"
     session.neighbor_full_md = loaded
     log_event("neighbor_full_md.loaded", session_id=session.id, requested=len(names), loaded=len(loaded))
 
@@ -684,6 +688,7 @@ log_event("app.ready", session_count=len(sessions), session_root=_session_store_
 
 PASSIVE_TOOL_CALLS = {
     "stage_transition",
+    "select_neighbor_skill",
     "record_understanding",
     "record_research",
     "record_reflection",
@@ -2304,6 +2309,30 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         current_name, _ = parse_frontmatter(session.current_skill.skill_md)
         if safe_skill_name(current_name) == new_name:
             raise ValueError(f"This skill is already named `{new_name}`; there is nothing to rename.")
+        return
+
+    if tool == "select_neighbor_skill":
+        from backend.models import NeighborSkill
+
+        if session.current_stage not in {"prepare", "draft", "refine"}:
+            raise ValueError("select_neighbor_skill is only available in PREPARE, DRAFT or REFINE.")
+        name = str(args.get("skill_name", "")).strip()
+        if not name or safe_skill_name(name) != name:
+            raise ValueError("select_neighbor_skill requires an exact skill name.")
+        try:
+            acl_mod.assert_can_access(session.owner_upn, name)
+        except HTTPException as exc:
+            raise ValueError("The selected neighbor is not accessible.") from exc
+        if skills_repo.get_skill(name) is None:
+            raise ValueError("The selected neighbor no longer exists.")
+        understanding = session.prepare_brief.understanding
+        selected = next((nb for nb in understanding.neighbor_skills if nb.skill == name), None)
+        understanding.neighbor_skills = [selected or NeighborSkill(skill=name)] + [
+            nb for nb in understanding.neighbor_skills if nb.skill != name
+        ]
+        session.prepare_brief.last_updated = now_ms()
+        _load_selected_neighbor_full_md(session)
+        session.touch()
         return
 
     if tool == "record_understanding":

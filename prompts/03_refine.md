@@ -6,6 +6,12 @@ content and the metadata always stay consistent.
 
 ## Rules
 
+- When the user selects a neighbor to modify, use `select_neighbor_skill` alone
+  if its current full SKILL.md or edit policy is missing. The next automatic
+  turn contains the refreshed context. Respect the shared neighbor policy,
+  then confirm the intended changes if not already confirmed, or propose the
+  narrow `propose_neighbor_edit` immediately if they are. Never ask for an
+  existing neighbor's SKILL.md as user material.
 - Use V4A patch format with unique anchors. Include the nearest section
   heading and enough unchanged context so the old block appears exactly once.
 - You MAY patch the YAML frontmatter `description`. Frontmatter lines are short,

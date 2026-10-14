@@ -52,3 +52,36 @@ test("answers pending questions from the chat box", async ({ page, request }) =>
   const session = await readSession(request, await currentSessionId(page));
   expect(session.pending_tool_calls).toHaveLength(0);
 });
+
+test("continues automatically after selecting a neighbor", async ({ page, request }) => {
+  await openApp(page);
+  await startNewSession(page);
+  await expect(page.getByTestId("send-button")).toBeEnabled();
+  const payloads: Array<{ auto_continue?: boolean; message: string }> = [];
+  await page.route("**/api/sessions/*/chat", async (route) => {
+    payloads.push(route.request().postDataJSON());
+    const sessionId = new URL(route.request().url()).pathname.split("/")[3];
+    const session = await readSession(request, sessionId);
+    session.current_stage = "refine";
+    const call = payloads.length === 1
+      ? { call_id: "select-peer", tool: "select_neighbor_skill", args: { skill_name: "peer-selected" } }
+      : { call_id: "confirm-peer", tool: "ask_user_input", args: { question: "Confirm the neighbor boundary?", options: ["Apply the boundary", "Keep it unchanged"] } };
+    session.pending_tool_calls = payloads.length === 1 ? [] : [call];
+    await route.fulfill({
+      json: { events: [
+        { event: "tool_call", data: call },
+        { event: "state_update", data: session },
+        { event: "done", data: {} },
+      ] },
+    });
+  });
+
+  await sendChat(page, "Adjust the selected neighbor.");
+
+  await expect(page.getByTestId("question-card")).toContainText("Confirm the neighbor boundary?");
+  expect(payloads).toHaveLength(2);
+  expect(payloads[1].auto_continue).toBe(true);
+  expect(payloads[1].message).toContain("Neighbor Edit Policy");
+  await expect(page.getByTestId("activity-card")).toContainText("peer-selected");
+  await expect(page.getByTestId("send-button")).toBeEnabled();
+});

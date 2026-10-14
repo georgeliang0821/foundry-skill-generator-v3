@@ -505,6 +505,144 @@ def test_load_selected_neighbor_full_md(client, backend_main, grant_skill) -> No
     assert "does-not-exist" not in session.neighbor_full_md
 
 
+def test_select_neighbor_skill_in_refine_loads_full_prompt(client, backend_main, grant_skill) -> None:
+    from backend.state_machine import build_system_prompt
+
+    _seed_neighbor_for_patch(backend_main, grant_skill, "peer-selected")
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    session = backend_main.sessions[session_id]
+    session.current_stage = "refine"
+    assert not session.prepare_brief.understanding.neighbor_skills
+
+    backend_main.apply_tool_effect(
+        session, "select_neighbor_skill", {"skill_name": "peer-selected"}
+    )
+
+    assert [nb.skill for nb in session.prepare_brief.understanding.neighbor_skills] == ["peer-selected"]
+    assert session.neighbor_edit_policy["peer-selected"] == "editable"
+    assert session.neighbor_full_md["peer-selected"] in build_system_prompt(session)
+    assert "select_neighbor_skill" in backend_main.PASSIVE_TOOL_CALLS
+
+
+@pytest.mark.parametrize("creator, policy", [("other@example.com", "notify_creator"), (None, "skip_missing_creator")])
+def test_select_neighbor_skill_respects_creator_policy(backend_main, grant_skill, creator, policy) -> None:
+    from backend.models import Session
+    from backend.state_machine import build_system_prompt
+
+    grant_skill("peer-policy", created_by=creator)
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "peer-policy"})
+
+    assert session.neighbor_edit_policy["peer-policy"] == policy
+    assert not session.neighbor_full_md
+    assert policy in build_system_prompt(session)
+    with pytest.raises(ValueError, match="not yours to edit"):
+        backend_main.apply_tool_effect(session, "propose_neighbor_edit", {"skill_name": "peer-policy"})
+
+
+@pytest.mark.parametrize("stage", ["test", "done"])
+def test_select_neighbor_skill_rejects_invalid_stage(backend_main, stage) -> None:
+    from backend.models import Session
+
+    session = Session(current_stage=stage, owner_upn="test@example.com")
+    with pytest.raises(ValueError, match="only available"):
+        backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "peer"})
+    assert not session.prepare_brief.understanding.neighbor_skills
+
+
+def test_select_neighbor_skill_rejects_inaccessible_skill(backend_main, fake_sql) -> None:
+    from backend.models import Session
+
+    fake_sql.upsert_skill("private-peer", created_by="other@example.com")
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+    with pytest.raises(ValueError, match="not accessible"):
+        backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "private-peer"})
+    assert not session.prepare_brief.understanding.neighbor_skills
+    assert not session.neighbor_full_md
+
+
+@pytest.mark.parametrize("content, policy", [(None, "load_failed"), ("", "empty_content")])
+def test_select_neighbor_skill_exposes_loading_blocker(backend_main, grant_skill, monkeypatch, content, policy) -> None:
+    from backend.models import Session
+    from backend.state_machine import build_system_prompt
+
+    grant_skill("peer-unreadable")
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+
+    def load_skill(name):
+        if content is None:
+            raise RuntimeError("Blob unavailable")
+        return backend_main.SkillFiles(name=name, skill_md=content)
+
+    monkeypatch.setattr(backend_main.store, "load_skill", load_skill)
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "peer-unreadable"})
+
+    assert session.neighbor_edit_policy["peer-unreadable"] == policy
+    assert not session.neighbor_full_md
+    assert policy in build_system_prompt(session)
+
+
+def test_select_neighbor_skill_prioritizes_selected_version_and_preserves_evidence(backend_main, grant_skill) -> None:
+    from backend.models import NeighborSkill, Session
+
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+    for index in range(6):
+        name = f"peer-{index}"
+        _seed_neighbor_for_patch(backend_main, grant_skill, name)
+        session.prepare_brief.understanding.neighbor_skills.append(
+            NeighborSkill(skill=name, axis="existing axis", scenario="existing scenario")
+        )
+    backend_main._apply_neighbor_edit_proposal(session, {
+        "skill_name": "peer-5",
+        "patch": "*** Begin Patch\n*** Update File: SKILL.md\n@@ ## When NOT to Use This Skill\n- nothing yet\n+ selected version content\n*** End Patch",
+    })
+
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "peer-5"})
+    backend_main.apply_tool_effect(session, "select_neighbor_skill", {"skill_name": "peer-5"})
+
+    neighbors = session.prepare_brief.understanding.neighbor_skills
+    assert len(neighbors) == 6
+    assert neighbors[0].skill == "peer-5"
+    assert all(nb.axis == "existing axis" and nb.scenario == "existing scenario" for nb in neighbors)
+    assert "selected version content" in session.neighbor_full_md["peer-5"]
+    assert session.neighbor_edit_policy["peer-4"] == "load_limit"
+
+
+def test_chat_select_neighbor_skill_persists_and_supplies_next_turn(client, backend_main, grant_skill, monkeypatch) -> None:
+    import json
+    from backend import agent as agent_module
+    from backend.state_machine import build_system_prompt
+
+    md = _seed_neighbor_for_patch(backend_main, grant_skill, "peer-chat")
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[session_id]
+    session.current_stage = "refine"
+    prompts = []
+
+    def foundry_turn(session, message):
+        prompts.append(build_system_prompt(session))
+        if len(prompts) == 1:
+            return json.dumps({"text": "", "tool_calls": [{"tool": "select_neighbor_skill", "args": {"skill_name": "peer-chat"}}]})
+        return json.dumps({"text": "Full text received.", "tool_calls": []})
+
+    monkeypatch.setattr(agent_module, "_run_foundry_turn_sync", foundry_turn)
+    monkeypatch.setattr(backend_main, "agent", agent_module.OrchestratorAgent())
+    response = client.post(f"/api/sessions/{session_id}/chat", json={"message": "Adjust peer-chat"})
+    assert response.status_code == 200
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in response.json()["events"])
+    assert not session.pending_tool_calls
+    restored = backend_main.session_store.load_all()[session_id]
+    assert restored.prepare_brief.understanding.neighbor_skills[0].skill == "peer-chat"
+    assert "neighbor_full_md" not in restored.model_dump()
+
+    client.post(f"/api/sessions/{session_id}/chat", json={"message": "Continue", "auto_continue": True})
+    assert len(prompts) == 2
+    assert md not in prompts[0]
+    assert md in prompts[1]
+
+
 
 def test_neighbor_edit_open_loads_original_for_user_editing(client, backend_main, grant_skill) -> None:
     md = "---\nname: peer-open\ndescription: Peer\n---\n## When NOT to Use This Skill\n- nothing\n"

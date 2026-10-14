@@ -4408,6 +4408,7 @@ let activeActivityGroup = null;
 const ACTIVITY_TOOL_META = {
   record_research: { icon: "i-bolt", title: "Research recorded" },
   record_understanding: { icon: "i-bolt", title: "Understanding updated" },
+  select_neighbor_skill: { icon: "i-bolt", title: "Neighbor selected" },
   record_reflection: { icon: "i-bolt", title: "Reflection recorded" },
   request_stage_transition: { icon: "i-bolt", title: "Stage transition requested" },
 };
@@ -4840,6 +4841,10 @@ function renderInspectSessionState() {
 
 function renderPassiveToolCall(call) {
   const args = call.args || {};
+  if (call.tool === "select_neighbor_skill") {
+    appendActivityRow(call);
+    return true;
+  }
   if (call.tool === "stage_transition") {
     appendConversationStatus(formatStageTransitionMessage(args));
     return true;
@@ -4914,6 +4919,7 @@ function summarizeToolArgs(args) {
   if (args.message) return args.message;
   if (args.summary) return args.summary;
   if (args.reason) return args.reason;
+  if (args.skill_name) return args.skill_name;
   return "Updated.";
 }
 
@@ -5793,6 +5799,7 @@ async function sendChatPayload(message, materials, options = {}) {
   let assistantBuffer = "";
   let responseHasInteractiveTool = false;
   let autoContinueTarget = null;
+  let neighborSelected = false;
   let responseStarted = false;
   let recoverableRejection = false;
   let failure = "";
@@ -5837,6 +5844,7 @@ async function sendChatPayload(message, materials, options = {}) {
           const target = data.args?.target || data.args?.target_stage || null;
           autoContinueTarget = target ? String(target).toUpperCase() : null;
         }
+        if (data.tool === "select_neighbor_skill") neighborSelected = true;
         // Emit any assistant prose that preceded this tool first, then render the
         // tool inline so the chat reflects the real chronological order.
         flushAssistantMessage();
@@ -5898,7 +5906,7 @@ async function sendChatPayload(message, materials, options = {}) {
               : "Request finished without a response or proposed changes. Skill content unchanged.";
     activity.finish(outcome, Boolean(failure));
     const continuing = !failure && (options.autoDepth || 0) < 4 && !responseHasInteractiveTool
-      && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection);
+      && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection || neighborSelected);
     if (!continuing) setInputBusy(false);
   }
   await refreshSessions();
@@ -5933,6 +5941,15 @@ async function sendChatPayload(message, materials, options = {}) {
     appendConversationStatus(`-> ${targetLabel}`);
     await sendChatPayload(
       `Continue automatically after entering ${autoContinueTarget}. Start the next stage action now. If this stage requires user confirmation, ask the user with ask_user_input instead of waiting for a manual message.`,
+      [],
+      { autoDepth: (options.autoDepth || 0) + 1, autoContinue: true },
+    );
+  }
+
+  if (!failure && neighborSelected && !shouldRecover && !shouldAutoContinue
+      && !responseHasInteractiveTool && (options.autoDepth || 0) < 4) {
+    await sendChatPayload(
+      "Continue from the selected neighbor's refreshed context. Check Neighbor Edit Policy and the full current SKILL.md. Follow the user's confirmed direction; ask only for decisions not already confirmed.",
       [],
       { autoDepth: (options.autoDepth || 0) + 1, autoContinue: true },
     );

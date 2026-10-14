@@ -343,8 +343,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "select_neighbor_skill",
+        "description": "Register a user-selected existing neighbor and load its current SKILL.md for editing. PREPARE/DRAFT/REFINE only. Preserves other selected neighbors and their routing evidence. This is a passive action; return it alone before proposing any edits and the UI continues automatically with refreshed context. Read Neighbor Edit Policy on the next turn: only editable neighbors have full text; other creators use relationship notifications. If full text is absent, use this tool rather than asking the user to paste it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "Exact accessible neighbor skill name confirmed by the user."},
+            },
+            "required": ["skill_name"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_neighbor_edit",
-        "description": "Propose an edit to an EXISTING neighbor skill (e.g. tightening its description or adding a 'When NOT to Use -> use <new skill>' backlink) so the new skill and the neighbor stay mutually exclusive. The neighbor's CURRENT SKILL.md (the exact version the edit is applied to) is provided in the system prompt under '## Neighbor Skills (full SKILL.md for editing)', between the <<<BEGIN ...>>> / <<<END ...>>> markers -- read it there, do NOT ask the user. Send a V4A `patch` against that current text: a single hunk with a few unchanged CONTEXT lines copied from the file plus your `-`/`+` edits (indentation is matched leniently, so you do not need to reproduce YAML indent perfectly). Keep the hunk SMALL and target a UNIQUE spot (e.g. the description lines, or the exact bullet under '## When NOT to Use This Skill'). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW, uniquely-versioned entry (the original and every prior version are always kept, never overwritten); NOTHING is written to Blob until the user Saves. If the patch does not apply, copy the surrounding CONTEXT lines more exactly from the current text and retry.",
+        "description": "Propose an edit to an EXISTING neighbor skill (e.g. tightening its description or adding a 'When NOT to Use -> use <new skill>' backlink) so the new skill and the neighbor stay mutually exclusive. Only edit neighbors whose Neighbor Edit Policy is editable. Read the neighbor's CURRENT SKILL.md under '## Neighbor Skills (full SKILL.md for editing)', between the <<<BEGIN ...>>> / <<<END ...>>> markers. If it is missing, call select_neighbor_skill alone first; do NOT ask the user for the file or infer it from a peer digest. Send a V4A `patch` against that current text: a single hunk with a few unchanged CONTEXT lines copied from the file plus your `-`/`+` edits (indentation is matched leniently, so you do not need to reproduce YAML indent perfectly). Keep the hunk SMALL and target a UNIQUE spot (e.g. the description lines, or the exact bullet under '## When NOT to Use This Skill'). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW, uniquely-versioned entry (the original and every prior version are always kept, never overwritten); NOTHING is written to Blob until the user Saves. If the patch does not apply, copy the surrounding CONTEXT lines more exactly from the current text and retry.",
         "parameters": {
             "type": "object",
             "properties": {
