@@ -5,6 +5,42 @@ import pytest
 from backend.models import IterationReflection, PendingToolCall
 
 
+@pytest.mark.parametrize("content,patch,kind", [
+    ("hello", "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-missing anchor\n+hi\n*** End Patch", "anchor_not_found"),
+    ("hello\nhello", "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-hello\n+hi\n*** End Patch", "ambiguous_anchor"),
+    ("hello", "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-hello\n+hi\n*** Update File: SKILL.md\n@@\n-hi\n+bye\n*** End Patch", "patch_apply_failed"),
+])
+def test_failed_patch_retires_only_its_call(client, backend_main, content, patch, kind) -> None:
+    session = backend_main.Session()
+    session.current_skill.skill_md = content
+    before = session.current_skill.model_dump()
+    session.pending_tool_calls.extend([
+        PendingToolCall(call_id="bad_patch", tool="propose_patch", args={
+            "target_file": "SKILL.md",
+            "patch": patch,
+        }),
+        PendingToolCall(call_id="other_patch", tool="propose_patch", args={}),
+    ])
+    backend_main.sessions[session.id] = session
+
+    response = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "bad_patch", "result": {"action": "accept"},
+    })
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["kind"] == kind
+    assert session.current_skill.model_dump() == before
+    assert not session.patch_history
+    assert [call.call_id for call in session.pending_tool_calls] == ["other_patch"]
+    persisted = backend_main.session_store.load(session.id)
+    assert [call.call_id for call in persisted.pending_tool_calls] == ["other_patch"]
+    assert persisted.conversation[-1].metadata["patch_error"]["call_id"] == "bad_patch"
+    repeated = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "bad_patch", "result": {"action": "accept"},
+    })
+    assert repeated.status_code == 404
+
+
 def test_named_reference_refine_patch_is_rejected_atomically(client, backend_main, fake_sql, monkeypatch) -> None:
     fake_sql.upsert_skill("hidden-calendar")
     session = backend_main.Session(current_stage="refine", remote_skill_id="demo")

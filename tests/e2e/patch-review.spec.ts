@@ -71,20 +71,66 @@ test("accepts and undoes a conversation patch", async ({ page, request }) => {
   expect(session.patch_history).toHaveLength(0);
 });
 
-test("shows a recoverable error when a patch anchor is missing", async ({ page, request }) => {
-  await openApp(page);
-  await createDraftWithFakeAgent(page);
-  await page.getByTestId("accept-draft-button").click();
-  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
-  await setScenario(request, "patch_failure");
+for (const retryFails of [false, true]) {
+  test(`retires a failed patch before regeneration (${retryFails ? "request fails" : "replacement ready"})`, async ({ page, request }) => {
+    await openApp(page);
+    await createDraftWithFakeAgent(page);
+    await page.getByTestId("accept-draft-button").click();
+    await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
+    await setScenario(request, "patch_failure");
 
-  await sendChat(page, "Please propose a patch that will fail.");
-  await page.getByRole("button", { name: "Accept patch" }).click();
+    await sendChat(page, "Please propose a patch that will fail.");
+    const cards = page.getByTestId("patch-card");
+    const failedCard = cards.first();
+    const failedId = await failedCard.getAttribute("data-call-id");
+    const sessionId = await currentSessionId(page);
+    const before = (await readSession(request, sessionId)).current_skill;
+    await setScenario(request, "patch_refine");
+    if (retryFails) {
+      await page.route("**/chat", (route) => route.fulfill({
+        status: 503, json: { detail: "E2E regeneration unavailable" },
+      }));
+    }
 
-  await expect(page.getByTestId("chat-stream")).toContainText("Patch was not applied");
-  await openTab(page, "files");
-  await expect(page.getByTestId("file-editor")).not.toHaveValue(/patched text/);
-});
+    await failedCard.getByRole("button", { name: "Accept patch" }).click();
+    await expect(failedCard).toContainText("Not applied");
+    await expect(failedCard.getByRole("button", { name: "Accept patch" })).toBeDisabled();
+    await expect(failedCard.getByRole("button", { name: "Reject", exact: true })).toBeDisabled();
+    await expect(failedCard.getByRole("button", { name: "Undo", exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("chat-stream")).toContainText("Patch was not applied");
+    await expect(page.getByTestId("send-button")).toHaveText("Send");
+    if (retryFails) {
+      await expect(page.getByTestId("chat-stream")).toContainText("Model request failed");
+      await expect(cards).toHaveCount(1);
+    } else {
+      await expect(cards).toHaveCount(2);
+      await expect(cards.last().getByRole("button", { name: "Accept patch" })).toBeEnabled();
+      await expect(cards.last()).not.toContainText("Accepted");
+    }
+    let session = await readSession(request, sessionId);
+    expect(session.current_skill).toEqual(before);
+    expect(session.patch_history).toHaveLength(0);
+    expect(session.pending_tool_calls.some((call: { call_id: string }) => call.call_id === failedId)).toBe(false);
+    expect(session.pending_tool_calls.filter((call: { tool: string }) => call.tool === "propose_patch")).toHaveLength(retryFails ? 0 : 1);
+    await page.evaluate(() => {
+      const app = (window as any).__sgv2;
+      app.renderSession();
+      app.renderSession();
+    });
+    await expect(cards).toHaveCount(retryFails ? 1 : 2);
+    await expect(failedCard.getByRole("button", { name: "Accept patch" })).toBeDisabled();
+    await failedCard.locator("summary").click();
+    await expect(failedCard.locator("details")).toHaveAttribute("open", "");
+
+    await page.reload();
+    await page.getByTestId("session-list").selectOption(sessionId);
+    await expect(page.getByTestId("chat-stream")).toContainText("Patch was not applied");
+    await expect(cards).toHaveCount(retryFails ? 0 : 1);
+    if (!retryFails) await expect(cards.getByRole("button", { name: "Accept patch" })).toBeEnabled();
+    session = await readSession(request, sessionId);
+    expect(session.current_skill).toEqual(before);
+  });
+}
 
 for (const lintFailure of [true, false]) {
   test(`does not report a failed patch sync as saved (${lintFailure ? "lint" : "MCP unavailable"})`, async ({ page, request }) => {

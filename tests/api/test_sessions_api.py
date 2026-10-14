@@ -17,6 +17,66 @@ def test_e2e_reset_refuses_application_session_directory(client, backend_main, m
 import pytest
 
 
+@pytest.mark.parametrize("reader", ["api", "internal"])
+@pytest.mark.parametrize("from_disk", [False, True])
+def test_loading_session_retires_only_confirmed_failed_patches(client, backend_main, reader, from_disk) -> None:
+    from backend.models import ChatMessage, PendingToolCall, Session
+
+    session = Session(owner_upn="test@example.com")
+    session.current_skill.skill_md = "unchanged draft"
+    before = session.current_skill.model_dump()
+    session.pending_tool_calls = [
+        PendingToolCall(call_id="failed", tool="propose_patch", args={}),
+        PendingToolCall(call_id="valid", tool="propose_patch", args={}),
+        PendingToolCall(call_id="material", tool="propose_material_patch", args={}),
+    ]
+    session.conversation = [
+        ChatMessage(role="system", content="Patch apply failed", metadata={
+            "tool": "propose_patch", "call_id": "failed",
+            "patch_error": {"call_id": "failed", "kind": "anchor_not_found"},
+        }),
+        ChatMessage(role="system", content="Material patch failed", metadata={
+            "tool": "propose_material_patch", "patch_error": {"call_id": "material"},
+        }),
+        ChatMessage(role="assistant", content="Still waiting", metadata={
+            "tool": "propose_patch", "patch_error": {"call_id": "valid"},
+        }),
+    ]
+    backend_main.persist_session(session)
+    if not from_disk:
+        backend_main.sessions[session.id] = session
+
+    if reader == "api":
+        response = client.get(f"/api/sessions/{session.id}")
+        assert response.status_code == 200
+        loaded = backend_main.sessions[session.id]
+    else:
+        loaded = backend_main.get_session(session.id)
+
+    assert [call.call_id for call in loaded.pending_tool_calls] == ["valid", "material"]
+    assert loaded.current_skill.model_dump() == before
+    assert loaded.conversation == session.conversation
+    assert not loaded.patch_history
+    persisted = backend_main.session_store.load(session.id)
+    assert [call.call_id for call in persisted.pending_tool_calls] == ["valid", "material"]
+    updated_at = loaded.updated_at
+    assert backend_main.get_session(session.id).updated_at == updated_at
+
+
+def test_failed_patch_cleanup_requires_session_ownership(client, backend_main) -> None:
+    from backend.models import ChatMessage, PendingToolCall, Session
+
+    session = Session(owner_upn="other@example.com")
+    session.pending_tool_calls = [PendingToolCall(call_id="failed", tool="propose_patch", args={})]
+    session.conversation = [ChatMessage(role="system", content="Patch failed", metadata={
+        "tool": "propose_patch", "patch_error": {"call_id": "failed"},
+    })]
+    backend_main.sessions[session.id] = session
+    response = client.get(f"/api/sessions/{session.id}")
+    assert response.status_code == 404
+    assert len(session.pending_tool_calls) == 1
+
+
 def test_create_list_and_read_session(client) -> None:
     created = client.post("/api/sessions", json={"mode": "new", "materials": []})
 

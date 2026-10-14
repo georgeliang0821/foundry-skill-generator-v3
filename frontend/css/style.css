@@ -1027,6 +1027,7 @@ textarea:focus, input:focus, select:focus {
 }
 .tool-resolution.accepted { color: var(--success); }
 .tool-resolution.rejected { color: var(--danger); }
+.tool-resolution.failed { color: var(--danger); }
 
 /* Choice / question cards */
 .choice-card {

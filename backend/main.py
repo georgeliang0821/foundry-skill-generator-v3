@@ -705,6 +705,26 @@ def _normalize_named_items(items: list[Any], *, default_field: str = "name") -> 
     return normalized
 
 
+def _retire_failed_patch_calls(session: Session) -> bool:
+    failed_ids = {
+        message.metadata["patch_error"].get("call_id")
+        for message in session.conversation
+        if message.role == MessageRole.SYSTEM
+        and message.metadata.get("tool") == "propose_patch"
+        and isinstance(message.metadata.get("patch_error"), dict)
+        and isinstance(message.metadata["patch_error"].get("call_id"), str)
+    }
+    pending = [
+        call for call in session.pending_tool_calls
+        if call.tool != "propose_patch" or call.call_id not in failed_ids
+    ]
+    if len(pending) == len(session.pending_tool_calls):
+        return False
+    session.pending_tool_calls = pending
+    session.touch()
+    return True
+
+
 def get_session(session_id: str) -> Session:
     session = sessions.get(session_id)
     if not session:
@@ -713,6 +733,8 @@ def get_session(session_id: str) -> Session:
             sessions[session.id] = session
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if _retire_failed_patch_calls(session):
+        persist_session(session)
     return session
 
 
@@ -765,7 +787,8 @@ def get_session_for_user(session_id: str, upn: str) -> Session:
         raise HTTPException(status_code=404, detail="Session not found")
     if upn and session.owner_upn and session.owner_upn != upn:
         raise HTTPException(status_code=404, detail="Session not found")
-    if _hydrate_current_skill_from_remote(session):
+    retired = _retire_failed_patch_calls(session)
+    if _hydrate_current_skill_from_remote(session) or retired:
         persist_session(session)
     return session
 
@@ -3676,6 +3699,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             log_event("tool_result.request_positive_samples.saved", session_id=session.id, positive=len(positives))
     except PatchError as exc:
         detail = patch_error_detail(call, exc)
+        if call.tool == "propose_patch":
+            session.pending_tool_calls = [c for c in session.pending_tool_calls if c.call_id != call.call_id]
         session.conversation.append(
             ChatMessage(
                 role=MessageRole.SYSTEM,

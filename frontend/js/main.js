@@ -737,6 +737,9 @@ function renderLoadedSessionContent(statusText = "") {
         return;
       }
       appendMessage(message.role, message.content);
+    } else if (message.role === "system" && message.metadata?.tool === "propose_patch" && message.metadata?.patch_error) {
+      const detail = message.metadata.patch_error;
+      appendConversationStatus(`Patch was not applied: ${detail.guidance || detail.error || "The patch could not be applied."}`, { failed: true });
     }
   });
   const restoredTools = session?.pending_tool_calls || [];
@@ -5095,7 +5098,13 @@ async function acceptTool(call, result) {
       return false;
     }
     if (call.tool === "propose_patch" && detail?.recoverable) {
-      appendConversationStatus(`Patch was not applied: ${detail.guidance || detail.error}`, { failed: true });
+      if (detail.tool === "propose_patch" && detail.call_id === call.call_id) {
+        session.pending_tool_calls = (session.pending_tool_calls || []).filter((pending) => pending.call_id !== call.call_id);
+        resolveToolCard(call.call_id, "failed", { tool: call.tool });
+      }
+      markConversationStatus(runningNode, `Patch was not applied: ${detail.guidance || detail.error}`, true);
+      runningNode = null;
+      appendConversationStatus("Requesting a corrected patch...");
       await sendChatPayload(detail.retry_prompt || patchRetryPrompt(detail), []);
       return;
     }
@@ -5244,8 +5253,8 @@ function resolveToolCard(callId, action, context = {}) {
   });
   card.querySelector(".tool-resolution")?.remove();
   const badge = document.createElement("span");
-  badge.className = `tool-resolution ${action === "accept" ? "accepted" : action === "reject" ? "rejected" : ""}`;
-  badge.textContent = action === "accept" ? "Accepted" : action === "reject" ? "Rejected" : "Completed";
+  badge.className = `tool-resolution ${action === "accept" ? "accepted" : action === "reject" ? "rejected" : action === "failed" ? "failed" : ""}`;
+  badge.textContent = action === "accept" ? "Accepted" : action === "reject" ? "Rejected" : action === "failed" ? "Not applied" : "Completed";
   const actions = card.querySelector(".tool-actions");
   actions?.appendChild(badge);
   // No undo affordance for rename_skill: undo only rewinds session content, so
