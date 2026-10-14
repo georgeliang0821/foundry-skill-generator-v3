@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from backend.agent import (
@@ -132,3 +135,44 @@ def test_is_malformed_json_payload_detects_bad_output() -> None:
     assert _is_malformed_json_payload('{"text": "hi", "tool_calls": [{') is True
     assert _is_malformed_json_payload("42") is True
     assert _is_malformed_json_payload("") is True
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_foundry_timing_keeps_request_id_across_threads(monkeypatch, capsys, fail) -> None:
+    from backend import agent
+    from backend.diagnostics import log_context, log_event
+
+    monkeypatch.setenv("SGV2_DEBUG_LOG", "1")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.test/foundry")
+    monkeypatch.setattr(agent, "build_system_prompt", lambda session: "system")
+    monkeypatch.setattr(agent, "_build_foundry_user_prompt", lambda session, message: "query")
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: object())
+
+    def create_response(**kwargs):
+        log_event("test.sdk")
+        if fail:
+            raise RuntimeError("SDK failed")
+        return SimpleNamespace(output_text="ok", id="resp-test", _request_id="foundry-test")
+
+    fake_client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
+    fake_project = SimpleNamespace(get_openai_client=lambda: fake_client)
+    monkeypatch.setattr("azure.ai.projects.AIProjectClient", lambda *args: fake_project)
+    with log_context(request_id="chat-thread-test"):
+        if fail:
+            with pytest.raises(RuntimeError, match="SDK failed"):
+                agent._run_foundry_turn_sync(Session(), "go")
+        else:
+            assert agent._run_foundry_turn_sync(Session(), "go") == "ok"
+    log_event("outside")
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert all(record["request_id"] == "chat-thread-test" for record in records[:-1])
+    assert "request_id" not in records[-1]
+    assert any(record["event"] == "llm.prompt_build.done" for record in records)
+    assert any(record["event"] == "llm.client_init.done" for record in records)
+    sdk_event = "llm.responses_create.failed" if fail else "llm.responses_create.done"
+    assert next(record for record in records if record["event"] == sdk_event)["duration_ms"] >= 0
+    if not fail:
+        received = next(record for record in records if record["event"] == "llm.response.received")
+        assert received["foundry_response_id"] == "resp-test"
+        assert received["foundry_request_id"] == "foundry-test"

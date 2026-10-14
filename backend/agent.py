@@ -8,9 +8,10 @@ import re
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
+from contextvars import copy_context
 from typing import Any
 
-from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
+from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, log_timing, now_ms
 from .models import InputBinding, PendingToolCall, Session
 from .state_machine import build_system_prompt, load_prompt, session_materials_prompt_chars
 
@@ -842,8 +843,9 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     project_endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
     agent_name = (os.getenv("FOUNDRY_AGENT_NAME") or "skill-generator-agent").strip()
     agent_version = (os.getenv("FOUNDRY_AGENT_VERSION") or "2").strip()
-    system_prompt = _escape_handlebars(build_system_prompt(session))
-    query = _build_foundry_user_prompt(session, user_message)
+    with log_timing("llm.prompt_build", session_id=session.id):
+        system_prompt = _escape_handlebars(build_system_prompt(session))
+        query = _build_foundry_user_prompt(session, user_message)
 
     started = now_ms()
     log_event(
@@ -863,20 +865,28 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     )
 
     def _invoke() -> str:
-        project = AIProjectClient(project_endpoint, DefaultAzureCredential())
-        openai_client = project.get_openai_client()
-        resp = openai_client.responses.create(
-            input=[
-                {"type": "message", "role": "system", "content": system_prompt},
-                {"type": "message", "role": "user", "content": query},
-            ],
-            extra_body={
-                "agent_reference": {
-                    "name": agent_name,
-                    "version": agent_version,
-                    "type": "agent_reference",
-                }
-            },
+        with log_timing("llm.client_init", session_id=session.id):
+            project = AIProjectClient(project_endpoint, DefaultAzureCredential())
+            openai_client = project.get_openai_client()
+        with log_timing("llm.responses_create", session_id=session.id):
+            resp = openai_client.responses.create(
+                input=[
+                    {"type": "message", "role": "system", "content": system_prompt},
+                    {"type": "message", "role": "user", "content": query},
+                ],
+                extra_body={
+                    "agent_reference": {
+                        "name": agent_name,
+                        "version": agent_version,
+                        "type": "agent_reference",
+                    }
+                },
+            )
+        log_event(
+            "llm.response.received",
+            session_id=session.id,
+            foundry_response_id=getattr(resp, "id", None),
+            foundry_request_id=getattr(resp, "_request_id", None),
         )
         return (getattr(resp, "output_text", "") or "").strip()
 
@@ -894,5 +904,6 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
 
 
 def _run_foundry_turn_sync(session: Session, user_message: str) -> str:
+    context = copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _run_foundry_turn(session, user_message)).result()
+        return pool.submit(context.run, asyncio.run, _run_foundry_turn(session, user_message)).result()

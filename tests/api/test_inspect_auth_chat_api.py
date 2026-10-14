@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from backend.models import Session
 
 
@@ -231,3 +233,71 @@ def test_chat_sse_applies_passive_tool_effect_and_persists_assistant(client, bac
     assert session.conversation[-1].role == "assistant"
     assert session.conversation[-1].content == "Moving to research."
     assert session.pending_tool_calls == []
+
+
+def test_chat_logs_neighbor_delay_separately_from_agent(client, backend_main, grant_skill, monkeypatch, capsys) -> None:
+    from backend import diagnostics
+    from backend.models import NeighborSkill
+
+    monkeypatch.setenv("SGV2_DEBUG_LOG", "1")
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+    session.prepare_brief.understanding.neighbor_skills = [NeighborSkill(skill="peer")]
+    backend_main.sessions[session.id] = session
+    grant_skill("peer")
+    backend_main.store.save_skill(backend_main.SkillFiles(name="peer", skill_md="---\nname: peer\n---\nbody"))
+    clock = {"ms": 0}
+    monkeypatch.setattr(diagnostics, "now_ms", lambda: clock["ms"])
+    original_get_skill = backend_main.skills_repo.get_skill
+
+    def slow_sql(name):
+        clock["ms"] += 210000
+        return original_get_skill(name)
+
+    monkeypatch.setattr(backend_main.skills_repo, "get_skill", slow_sql)
+
+    class FastAgent:
+        def stream(self, session, message):
+            diagnostics.log_event("test.agent")
+            clock["ms"] += 5000
+            yield {"event": "text_delta", "data": {"delta": "Please confirm."}}
+
+    monkeypatch.setattr(backend_main, "agent", FastAgent())
+    capsys.readouterr()
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "adjust peer"})
+
+    assert response.status_code == 200
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    request_id = next(record["request_id"] for record in records if record["event"] == "chat.start")
+    scoped_records = [record for record in records if record["event"].startswith(("chat.", "neighbor_full_md.", "session.persist.")) or record["event"] == "test.agent"]
+    assert all(record["request_id"] == request_id for record in scoped_records)
+    sql_done = next(record for record in records if record["event"] == "neighbor_full_md.sql.done")
+    assert sql_done["duration_ms"] == 210000
+    assert sql_done["skill_name"] == "peer"
+    phases = [record for record in records if record["event"] == "chat.phase.done"]
+    assert next(record for record in phases if record["phase"] == "neighbor_load")["duration_ms"] == 210000
+    assert sum(record["duration_ms"] for record in phases if record["phase"] == "agent_next_event") == 5000
+    assert {"session_load", "initial_persist", "final_persist", "state_snapshot"} <= {record["phase"] for record in phases}
+    assert any(record["event"] == "neighbor_full_md.blob.done" for record in records)
+
+
+def test_chat_logs_agent_failure_phase(client, backend_main, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("SGV2_DEBUG_LOG", "1")
+    session = Session(current_stage="refine", owner_upn="test@example.com")
+    backend_main.sessions[session.id] = session
+
+    class FailedAgent:
+        def stream(self, session, message):
+            raise RuntimeError("agent unavailable")
+            yield
+
+    monkeypatch.setattr(backend_main, "agent", FailedAgent())
+    capsys.readouterr()
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "adjust peer"})
+
+    assert response.status_code == 200
+    assert response.json()["events"][-1]["event"] == "error"
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    failed = next(record for record in records if record["event"] == "chat.phase.failed")
+    assert failed["phase"] == "agent_next_event"
+    assert failed["duration_ms"] >= 0
+    assert failed["request_id"] == next(record["request_id"] for record in records if record["event"] == "chat.failed")

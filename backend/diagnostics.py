@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 SENSITIVE_KEYS = ("authorization", "secret", "password", "token", "key", "credential")
 SAFE_KEYS = ("token_claims", "has_delegated_token")
+_log_fields: ContextVar[dict[str, Any]] = ContextVar("log_fields", default={})
 
 
 def now_ms() -> int:
@@ -61,6 +64,7 @@ def log_event(event: str, /, level: str = "info", **fields: Any) -> None:
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "level": level,
         "event": event,
+        **_log_fields.get(),
         **fields,
     }
     print(json.dumps(_sanitize(record), ensure_ascii=False, default=str), flush=True)
@@ -68,6 +72,28 @@ def log_event(event: str, /, level: str = "info", **fields: Any) -> None:
 
 def log_exception(event: str, exc: BaseException, /, **fields: Any) -> None:
     log_event(event, level="error", error_type=type(exc).__name__, error=str(exc), **fields)
+
+
+@contextmanager
+def log_context(**fields: Any) -> Iterator[None]:
+    context_handle = _log_fields.set({**_log_fields.get(), **fields})
+    try:
+        yield
+    finally:
+        _log_fields.reset(context_handle)
+
+
+@contextmanager
+def log_timing(event: str, /, **fields: Any) -> Iterator[None]:
+    started = now_ms()
+    log_event(f"{event}.start", **fields)
+    try:
+        yield
+    except Exception as exc:
+        log_exception(f"{event}.failed", exc, duration_ms=elapsed_ms(started), **fields)
+        raise
+    else:
+        log_event(f"{event}.done", duration_ms=elapsed_ms(started), **fields)
 
 
 def env_flag(name: str) -> str:
