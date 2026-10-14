@@ -82,7 +82,7 @@ test("neighbor notification opens focused Quick Edit review and closes immediate
   await expect(dialog.getByRole("heading", { name: "notice-target" })).toBeVisible();
   await expect(dialog).toContainText("通知提出者：other@example.com");
   await expect(dialog).toContainText("這不代表已確認路由衝突");
-  await expect(dialog).toContainText("開啟審閱不會直接修改 Skill");
+  await expect(dialog).not.toContainText("開啟審閱不會直接修改 Skill");
   const source = dialog.locator(".neighbor-notice-source");
   await expect(source.locator("summary")).toHaveText("相關 Skill：notice-source");
   await expect(source.locator("p")).not.toBeVisible();

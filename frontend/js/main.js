@@ -7065,7 +7065,6 @@ function renderNeighborNotices() {
         <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available && !neighborNoticeActionBusy ? "" : " disabled"}>${svgIcon("i-document-text")}<span>開啟審閱</span></button>
         <button type="button" class="icon-button" data-notice-dismiss="${notice.id}"${neighborNoticeActionBusy ? " disabled" : ""}>${svgIcon("i-x")}<span>略過並結案</span></button>
       </div>
-      <p class="neighbor-notice-context">開啟審閱不會直接修改 Skill；略過後此通知將結案。</p>
     </section>`;
   }).join("") : "<p>沒有待處理通知。</p>";
 }
@@ -7488,4 +7487,3 @@ window.__sgv7 = {
   openGrantsModalFor,
   v7UpdateLoginGate,
 };
-
