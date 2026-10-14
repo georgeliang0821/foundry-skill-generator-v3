@@ -5713,7 +5713,7 @@ function nextTestPrompt() {
     "The user accepted the proposed patch and it has been applied.",
     "No fix items remain open.",
     "Immediately request the next skill-selection test run.",
-    "Use request_test_run with the prior positive and negative samples when available; otherwise generate 5 relevant positive and 5 relevant negative samples from the current skill.",
+    "Use request_test_run with the prior positive and negative samples when available; otherwise generate 2 relevant positive and 2 relevant negative samples from the current skill.",
   ].join("\n");
 }
 

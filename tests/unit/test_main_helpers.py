@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend.blob_store import compute_hash
-from backend.models import Session, SkillKind, Stage
+from backend.models import NegativeSample, Session, SkillKind, Stage
 
 
 def test_current_and_set_current_content(backend_main) -> None:
@@ -113,9 +113,43 @@ def test_session_test_samples_uses_checklist_then_fallback(backend_main) -> None
 
     session.verify_checklist.test_samples.content = None
     fallback_positive, fallback_negative = backend_main.session_test_samples(session)
-    assert len(fallback_positive) == 5
-    assert len(fallback_negative) == 5
+    assert len(fallback_positive) == 2
+    assert len(fallback_negative) == 2
     assert "demo-skill" in fallback_positive[0]
+
+
+def test_session_test_samples_preserves_brief_samples(backend_main) -> None:
+    session = Session(target_skill_id="demo-skill")
+    session.prepare_brief.positive_samples = ["p1", "p2", "p3", "p4"]
+    session.prepare_brief.negative_samples = [
+        NegativeSample(query=query) for query in ["n1", "n2", "n3", "n4"]
+    ]
+    session.verify_checklist.test_samples.content = {
+        "positive": ["legacy-positive"],
+        "negative": ["legacy-negative"],
+    }
+
+    positive, negative = backend_main.session_test_samples(session)
+
+    assert positive == ["p1", "p2", "p3", "p4"]
+    assert negative == ["n1", "n2", "n3", "n4"]
+
+
+@pytest.mark.parametrize("missing_kind", ["positive", "negative"])
+def test_session_test_samples_incomplete_uses_fallback(backend_main, missing_kind) -> None:
+    session = Session(target_skill_id="demo-skill")
+    session.verify_checklist.test_samples.content = {
+        "positive": [] if missing_kind == "positive" else ["p1"],
+        "negative": [] if missing_kind == "negative" else ["n1"],
+    }
+
+    positive, negative = backend_main.session_test_samples(session)
+
+    assert len(positive) == 2
+    assert len(negative) == 2
+    assert "demo-skill" in positive[0]
+    assert "p1" not in positive
+    assert "n1" not in negative
 
 
 def test_apply_tool_effect_updates_state(backend_main) -> None:

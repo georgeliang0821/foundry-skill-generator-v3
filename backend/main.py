@@ -1603,16 +1603,10 @@ def session_test_samples(session: Session) -> tuple[list[str], list[str]]:
         [
             f"Help me use {skill_name}",
             f"I need to run the {skill_name.replace('-', ' ')} workflow",
-            f"請用 {skill_name} 幫我處理需求",
-            f"Can you call the {skill_name} capability?",
-            f"我要使用這個 skill 完成 {skill_name.replace('-', ' ')}",
         ],
         [
             "Tell me a joke",
             "Summarize an unrelated news article",
-            "Create a UI mockup only",
-            "Explain the weather forecast",
-            "Write a generic project plan",
         ],
     )
 
