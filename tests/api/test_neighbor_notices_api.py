@@ -1,6 +1,10 @@
+import time
+
 import pytest
 
+from backend import acl
 from backend import neighbor_notice_repo as repo
+from backend.auth_store import LocalAuthStore
 from backend.models import CreateSessionRequest, NeighborSkill, Session
 from backend.state_machine import build_system_prompt
 
@@ -291,3 +295,44 @@ def test_dismiss_requires_recipient_and_closes_without_session(client, backend_m
     assert client.post(f"/api/neighbor-notices/{notice.id}/dismiss").status_code == 200
     assert repo.list_open_notices(OWNER) == []
     assert not backend_main.sessions
+
+
+@pytest.mark.parametrize("cookie_state", ["valid", "expired", "unknown", "missing"])
+@pytest.mark.parametrize("store_missing", [False, True])
+def test_notice_cookie_auth_matches_status_without_unauthorized_mutations(
+    anon_client, backend_main, fake_sql, monkeypatch, cookie_state, store_missing
+):
+    monkeypatch.setenv("SGV2_E2E_MODE", "1")
+    monkeypatch.setenv("E2E_MODE", "0")
+    monkeypatch.setenv("E2E_DEFAULT_UPN", "")
+    seed(backend_main, fake_sql, "target", OWNER)
+    notice = repo.upsert_open_notice("target", OWNER, AUTHOR, ["source"])
+    auth_store = LocalAuthStore(backend_main.auth_tokens, {})
+    monkeypatch.setattr(backend_main, "auth_store", auth_store)
+    monkeypatch.setitem(
+        backend_main.app.dependency_overrides,
+        backend_main.require_upn,
+        acl.make_upn_dependency(backend_main.auth_tokens, auth_store),
+    )
+    if store_missing:
+        monkeypatch.setattr(auth_store, "get_auth_token", lambda auth_id: None)
+    if cookie_state in {"valid", "expired"}:
+        backend_main.auth_tokens["notice-auth"] = {
+            "expires_at": time.time() + (3600 if cookie_state == "valid" else -60),
+            "profile": {"email": OWNER},
+        }
+    if cookie_state != "missing":
+        anon_client.cookies.set("sgv2_auth", "notice-auth")
+    valid = cookie_state == "valid"
+    assert anon_client.get("/api/auth/status").json()["authenticated"] is valid
+    listing = anon_client.get("/api/neighbor-notices")
+    assert listing.status_code == (200 if valid else 401)
+    if valid:
+        assert listing.json()[0]["id"] == notice.id
+    else:
+        for action in ("dismiss", "start-modify"):
+            response = anon_client.post(f"/api/neighbor-notices/{notice.id}/{action}")
+            assert response.status_code == 401
+        assert len(repo.list_open_notices(OWNER)) == 1
+        assert not backend_main.sessions
+    assert "Private body for target" in backend_main.store.load_skill("target").skill_md

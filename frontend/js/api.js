@@ -294,13 +294,13 @@ export async function saveNeighborEditApi(sessionId, skill) {
 
 export async function listNeighborNotices() {
   const res = await apiFetch("/api/neighbor-notices");
-  if (!res.ok) throw new Error(await formatFetchError(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
 export async function actOnNeighborNotice(id, action) {
   const res = await apiFetch(`/api/neighbor-notices/${encodeURIComponent(id)}/${action}`, { method: "POST" });
-  if (!res.ok) throw new Error(await formatFetchError(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 

@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent import FOUNDRY_OUTPUT_RULES, FOUNDRY_OUTPUT_SHAPE, TOOL_SCHEMAS, OrchestratorAgent
-from .auth_store import make_auth_store
+from .auth_store import _expired as auth_record_expired, make_auth_store
 from .blob_store import (
     MAX_SKILL_NAME_LEN,
     CachedSkillStore,
@@ -1351,7 +1351,7 @@ def get_auth_record(request: Request) -> dict[str, Any] | None:
     if not auth_id:
         return None
     record = auth_store.get_auth_token(auth_id) or auth_tokens.get(auth_id)
-    if not record:
+    if auth_record_expired(record):
         return None
     return record
 

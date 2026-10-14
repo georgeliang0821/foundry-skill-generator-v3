@@ -18,7 +18,7 @@
         <svg class="icon" aria-hidden="true" style="width:48px;height:48px"><use href="#i-user-circle"/></svg>
         <h2>Sign-in required</h2>
         <p>This Skill Generator manages skills per Microsoft account. Please sign in with your Microsoft account to continue.</p>
-        <button id="loginGateBtn" class="primary" type="button" onclick="window.location.href=(window.SG_API_BASE||'')+'/api/auth/login'">Sign in with Microsoft</button>
+        <button id="loginGateBtn" class="primary" type="button">Sign in with Microsoft</button>
       </div>
     </div>
     <div id="grantsModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="grantsModalTitle">
@@ -93,12 +93,17 @@
       <div class="modal-body">
         <p id="neighborNoticesError" role="alert"></p>
         <div id="neighborNoticesList" aria-live="polite"></div>
+        <div class="neighbor-notice-actions">
+          <button id="neighborNoticesRetry" type="button" class="icon-button hidden"><svg class="icon" aria-hidden="true"><use href="#i-arrow-path"/></svg><span>重試載入</span></button>
+          <button id="neighborNoticesSignIn" type="button" class="primary icon-button hidden"><svg class="icon" aria-hidden="true"><use href="#i-user-circle"/></svg><span>重新登入 Microsoft</span></button>
+        </div>
       </div>
     </dialog>
 
     <!-- Inline Heroicons solid sprite (24x24). All path data is original / public Heroicons MIT licensed. -->
     <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
       <defs>
+        <symbol id="i-bell" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.06 2.118 5.528a.75.75 0 0 1-.298 1.206c-1.544.566-3.16.97-4.831 1.198a3.75 3.75 0 0 1-7.478 0 24.585 24.585 0 0 1-4.831-1.198.75.75 0 0 1-.298-1.206A8.217 8.217 0 0 0 5.25 9.75V9Zm4.502 8.842a2.25 2.25 0 0 0 4.496 0 25.057 25.057 0 0 1-4.496 0Z" clip-rule="evenodd"/></symbol>
         <symbol id="i-sparkles" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M9 4.5a.75.75 0 0 1 .721.544l.813 2.846a3.75 3.75 0 0 0 2.576 2.576l2.846.813a.75.75 0 0 1 0 1.442l-2.846.813a3.75 3.75 0 0 0-2.576 2.576l-.813 2.846a.75.75 0 0 1-1.442 0l-.813-2.846A3.75 3.75 0 0 0 4.89 13.534l-2.846-.813a.75.75 0 0 1 0-1.442l2.846-.813A3.75 3.75 0 0 0 7.466 7.89L8.28 5.044A.75.75 0 0 1 9 4.5ZM18 1.5a.75.75 0 0 1 .728.568l.258 1.036a2.63 2.63 0 0 0 1.91 1.91l1.036.258a.75.75 0 0 1 0 1.456l-1.036.258a2.63 2.63 0 0 0-1.91 1.91l-.258 1.036a.75.75 0 0 1-1.456 0l-.258-1.036a2.63 2.63 0 0 0-1.91-1.91l-1.036-.258a.75.75 0 0 1 0-1.456l1.036-.258a2.63 2.63 0 0 0 1.91-1.91l.258-1.036A.75.75 0 0 1 18 1.5ZM16.5 15a.75.75 0 0 1 .712.513l.394 1.183a1.5 1.5 0 0 0 .948.948l1.183.395a.75.75 0 0 1 0 1.422l-1.183.395a1.5 1.5 0 0 0-.948.948l-.395 1.183a.75.75 0 0 1-1.422 0l-.395-1.183a1.5 1.5 0 0 0-.948-.948l-1.183-.395a.75.75 0 0 1 0-1.422l1.183-.395a1.5 1.5 0 0 0 .948-.948l.395-1.183A.75.75 0 0 1 16.5 15Z" clip-rule="evenodd"/></symbol>
         <symbol id="i-clipboard-check" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M7.5 5.25a3 3 0 0 1 3-3h3a3 3 0 0 1 3 3v.205c.933.085 1.857.197 2.774.334 1.454.218 2.476 1.483 2.476 2.917v3.033c0 8.131-6.45 14.61-14.5 14.61h-.001a.75.75 0 0 1-.75-.75v-3.86c0-1.434 1.022-2.7 2.476-2.917.917-.137 1.84-.249 2.774-.334V5.25Zm-1.5 9.564V4.875c-.62.038-1.236.087-1.849.146A1.5 1.5 0 0 0 3 6.508v3.033c0 1.853.493 3.616 1.36 5.131A18.91 18.91 0 0 1 6 14.814ZM12.97 9.97a.75.75 0 0 1 0 1.06l-3 3a.75.75 0 0 1-1.06 0l-1.5-1.5a.75.75 0 0 1 1.06-1.06l.97.97 2.47-2.47a.75.75 0 0 1 1.06 0Z" clip-rule="evenodd"/></symbol>
         <symbol id="i-document-text" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M5.625 1.5c-1.036 0-1.875.84-1.875 1.875v17.25c0 1.035.84 1.875 1.875 1.875h12.75c1.035 0 1.875-.84 1.875-1.875V12.75A3.75 3.75 0 0 0 16.5 9h-1.875a1.875 1.875 0 0 1-1.875-1.875V5.25A3.75 3.75 0 0 0 9 1.5H5.625Zm5.845 17.03a.75.75 0 0 0 0-1.06l-1.97-1.97 1.97-1.97a.75.75 0 0 0-1.06-1.06l-2.5 2.5a.75.75 0 0 0 0 1.06l2.5 2.5a.75.75 0 0 0 1.06 0Zm2.97-1.06a.75.75 0 0 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 0 0-1.06 1.06l1.97 1.97-1.97 1.97Z" clip-rule="evenodd"/><path fill="currentColor" d="M14.25 5.25a5.23 5.23 0 0 0-1.279-3.434 9.768 9.768 0 0 1 6.963 6.963A5.23 5.23 0 0 0 16.5 7.5h-1.875a.375.375 0 0 1-.375-.375V5.25Z"/></symbol>
@@ -192,11 +197,13 @@
           <p id="kindHelp" class="mode-help" aria-hidden="true"></p>
         </div>
 
-        <div class="auth-box">
+        <div class="header-account">
           <button id="neighborNoticesBtn" class="icon-button hidden" type="button" title="相鄰 Skill 通知" aria-label="相鄰 Skill 通知" aria-haspopup="dialog">
-            <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg>
-            <span id="neighborNoticesCount">0</span>
+            <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>
+            <span>相鄰 Skill 通知</span>
+            <span id="neighborNoticesCount" aria-hidden="true">0</span>
           </button>
+          <div class="auth-box">
           <div class="auth-copy">
             <span id="authStatus" class="auth-status">Checking sign-in</span>
             <span id="authProfile" class="auth-profile">Not signed in</span>
@@ -206,6 +213,7 @@
             <span class="auth-label">Sign in</span>
           </button>
           <div id="authProfilePanel" class="auth-profile-panel hidden" role="dialog" aria-label="Signed-in profile"></div>
+          </div>
         </div>
       </header>
 

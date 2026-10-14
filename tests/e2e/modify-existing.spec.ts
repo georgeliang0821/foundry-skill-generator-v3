@@ -30,6 +30,10 @@ test("neighbor notification starts the full PREPARE modify flow and closes immed
   await seedNeighborNotice(request);
   await openApp(page);
   await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  await expect(page.locator("#neighborNoticesBtn")).toContainText("相鄰 Skill 通知");
+  await expect(page.locator("#neighborNoticesBtn")).toHaveClass(/has-notices/);
+  await expect(page.locator("#neighborNoticesBtn use")).toHaveAttribute("href", "#i-bell");
+  await page.screenshot({ path: "test-results/neighbor-notice-header-desktop.png" });
   await page.locator("#neighborNoticesBtn").click();
   const dialog = page.locator("#neighborNoticesDialog");
   await expect(dialog).toContainText("notice-source");
@@ -40,6 +44,7 @@ test("neighbor notification starts the full PREPARE modify flow and closes immed
   await expect(page.getByTestId("skill-binding-status")).toContainText("notice-target");
   await expect(page.getByTestId("send-button")).toHaveText("Send");
   await expect(page.locator("#neighborNoticesCount")).toHaveText("0");
+  await expect(page.locator("#neighborNoticesBtn")).not.toHaveClass(/has-notices/);
   await expect(page.getByTestId("mode-select")).toHaveValue("modify");
   await expect(page.getByText("Confirm the current target boundary?", { exact: true })).toBeVisible();
   const session = await readSession(request, await currentSessionId(page));
@@ -55,6 +60,9 @@ test("neighbor notification can be dismissed on mobile without opening MODIFY", 
   await page.setViewportSize({ width: 390, height: 844 });
   await openApp(page);
   await expect(page.getByTestId("send-button")).toHaveText("Send");
+  await expect(page.locator("#neighborNoticesBtn")).toBeInViewport();
+  expect(await page.locator(".app-header").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/neighbor-notice-header-mobile.png" });
   const before = await currentSessionId(page);
   await page.locator("#neighborNoticesBtn").click();
   const dialog = page.locator("#neighborNoticesDialog");
@@ -67,6 +75,159 @@ test("neighbor notification can be dismissed on mobile without opening MODIFY", 
   expect(await currentSessionId(page)).toBe(before);
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
+});
+
+test("neighbor notice 401 clears stale rows and offers explicit sign-in", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await openApp(page);
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  const originalUrl = page.url();
+  await page.route("**/api/neighbor-notices", (route) => route.fulfill({
+    status: 401, json: { detail: "Sign in required. Use Microsoft sign-in to access this resource." },
+  }));
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog).toContainText("登入已失效，請重新登入。");
+  await expect(dialog.locator("[data-notice-id]")).toHaveCount(0);
+  await expect(dialog).not.toContainText("localhost");
+  await expect(dialog).not.toContainText("沒有待處理通知");
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("-");
+  await expect(page.locator("#authBtn")).toHaveText("Sign in");
+  await expect(page.locator("#authProfile")).toHaveText("Not signed in");
+  await expect(dialog.getByRole("button", { name: "重新登入 Microsoft" })).toBeVisible();
+  expect(page.url()).toBe(originalUrl);
+  await page.route("**/api/auth/login", (route) => route.fulfill({ contentType: "text/html", body: "<p>Microsoft sign-in</p>" }));
+  await dialog.getByRole("button", { name: "重新登入 Microsoft" }).click();
+  await expect(page).toHaveURL(/\/api\/auth\/login$/);
+});
+
+for (const action of ["dismiss", "start-modify"]) {
+  test(`neighbor notice ${action} 401 does not resolve or activate a session`, async ({ page, request }) => {
+    await seedNeighborNotice(request);
+    await openApp(page);
+    const before = await currentSessionId(page);
+    await page.locator("#neighborNoticesBtn").click();
+    const dialog = page.locator("#neighborNoticesDialog");
+    await expect(dialog.locator("[data-notice-id]")).toHaveCount(1);
+    let attempts = 0;
+    await page.route(`**/api/neighbor-notices/*/${action}`, (route) => {
+      attempts += 1;
+      return route.fulfill({ status: 401, json: { detail: "Sign in required" } });
+    });
+    await dialog.locator(action === "dismiss" ? "[data-notice-dismiss]" : "[data-notice-start]").click();
+    await expect(dialog).toContainText("登入已失效，請重新登入。");
+    await expect(dialog.locator("[data-notice-id]")).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(page.locator("#authBtn")).toHaveText("Sign in");
+    expect(await currentSessionId(page)).toBe(before);
+    expect((await (await request.get("/api/neighbor-notices")).json()).length).toBe(1);
+    expect(attempts).toBe(1);
+  });
+}
+
+for (const failure of ["server", "network"]) {
+  test(`neighbor notice ${failure} failure retries without stale actions or false sign-out`, async ({ page, request }) => {
+    await seedNeighborNotice(request);
+    await openApp(page);
+    await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+    await page.route("**/api/neighbor-notices", (route) => failure === "network"
+      ? route.abort()
+      : route.fulfill({ status: 500, json: { detail: "private backend diagnostic" } }));
+    await page.locator("#neighborNoticesBtn").click();
+    const dialog = page.locator("#neighborNoticesDialog");
+    await expect(dialog).toContainText("無法載入通知，請稍後重試。");
+    await expect(dialog.locator("[data-notice-id]")).toHaveCount(0);
+    await expect(dialog).not.toContainText("private backend diagnostic");
+    await expect(dialog).not.toContainText("沒有待處理通知");
+    await expect(page.locator("#authBtn")).toHaveText("Profile");
+    await page.unroute("**/api/neighbor-notices");
+    await dialog.getByRole("button", { name: "重試載入" }).click();
+    await expect(dialog.locator("[data-notice-id]")).toHaveCount(1);
+    await expect(page.locator("#neighborNoticesError")).toBeEmpty();
+    await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  });
+}
+
+test("neighbor notice loading clears stale controls until ready", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await openApp(page);
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/neighbor-notices", async (route) => {
+    await pending;
+    await route.continue();
+  });
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog).toContainText("正在載入通知");
+  await expect(dialog.locator("[data-notice-id]")).toHaveCount(0);
+  await expect(page.locator("#neighborNoticesList")).toHaveAttribute("aria-busy", "true");
+  release();
+  await expect(dialog.locator("[data-notice-id]")).toHaveCount(1);
+  await expect(page.locator("#neighborNoticesList")).toHaveAttribute("aria-busy", "false");
+});
+
+test("neighbor notice action failure keeps unavailable target disabled", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await page.route("**/api/neighbor-notices", async (route) => {
+    const response = await route.fetch();
+    const notices = await response.json();
+    notices[0].target.available = false;
+    await route.fulfill({ json: notices });
+  });
+  await openApp(page);
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  await expect(dialog.locator("[data-notice-start]")).toBeDisabled();
+  await page.route("**/api/neighbor-notices/*/dismiss", (route) => route.fulfill({ status: 500, json: { detail: "failed" } }));
+  await dialog.locator("[data-notice-dismiss]").click();
+  await expect(dialog).toContainText("操作未完成，請稍後再試。");
+  await expect(dialog.locator("[data-notice-start]")).toBeDisabled();
+  await expect(dialog.locator("[data-notice-dismiss]")).toBeEnabled();
+  await expect(dialog.getByRole("button", { name: "重試載入" })).toBeVisible();
+});
+
+test("neighbor notice two-digit badge fits desktop and mobile headers", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  const notices = await (await request.get("/api/neighbor-notices")).json();
+  await page.route("**/api/neighbor-notices", (route) => route.fulfill({
+    json: Array.from({ length: 12 }, (_, index) => ({ ...notices[0], id: `notice-${index}` })),
+  }));
+  await openApp(page);
+  const button = page.locator("#neighborNoticesBtn");
+  await expect(button).toHaveAccessibleName("相鄰 Skill 通知 (12)");
+  await expect(page.locator("#neighborNoticesCount")).toHaveText("12");
+  for (const width of [1504, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(button).toBeInViewport();
+    expect(await page.locator(".app-header").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    expect(await button.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/neighbor-notice-header-${width}-12.png` });
+  }
+});
+
+test("neighbor notice sign-in warns before leaving unsaved edits", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await openApp(page);
+  await expect(page.getByTestId("send-button")).toHaveText("Send");
+  await page.route("**/api/sessions/*/draft", (route) => route.fulfill({ status: 401, json: { detail: "Sign in required" } }));
+  await openTab(page, "files");
+  const editor = page.getByTestId("file-editor");
+  const edited = "---\nname: unsaved-notice-review\ndescription: Unsaved edits\n---\nKeep this text";
+  await editor.fill(edited);
+  await page.route("**/api/neighbor-notices", (route) => route.fulfill({ status: 401, json: { detail: "Sign in required" } }));
+  await page.locator("#neighborNoticesBtn").click();
+  await expect(page.locator("#neighborNoticesError")).toHaveText("登入已失效，請重新登入。");
+  const originalUrl = page.url();
+  const warning = page.waitForEvent("dialog");
+  const signIn = page.locator("#neighborNoticesSignIn").click();
+  const confirmation = await warning;
+  expect(confirmation.message()).toContain("尚未儲存的編輯");
+  await confirmation.dismiss();
+  await signIn;
+  expect(page.url()).toBe(originalUrl);
+  await expect(editor).toHaveValue(edited);
 });
 
 test("author sees pending and sent relationship status without another creator's editor", async ({ page, request }) => {

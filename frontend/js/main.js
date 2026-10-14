@@ -322,6 +322,9 @@ let userPickedContextTab = false;
 let isSending = false;
 let availableSkills = [];
 let neighborNotices = [];
+let neighborNoticesState = "idle";
+let neighborNoticesRequest = 0;
+let neighborNoticeActionBusy = false;
 let modifiableSkills = [];
 let skillsLoaded = false;
 let savedSessions = [];
@@ -6687,9 +6690,17 @@ bind("authBtn", "click", () => {
     setAuthProfileOpen(panel?.classList.contains("hidden") ?? true);
     return;
   }
+  signInWithWorkGuard();
+});
+bind("loginGateBtn", "click", signInWithWorkGuard);
+
+function signInWithWorkGuard() {
+  if (isSending || localEditorDirty) {
+    if (!window.confirm("目前有進行中的請求或尚未儲存的編輯。重新登入會離開此頁，仍要繼續嗎？")) return;
+  }
   persistSessionState();
   startMicrosoftLogin();
-});
+}
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest("#authBtn") || event.target.closest("#authProfilePanel")) {
@@ -6971,15 +6982,31 @@ async function refreshAuthStatus() {
     try { await refreshSkills(); } catch {}
     await refreshNeighborNotices();
   } else {
+    neighborNoticesRequest += 1;
     neighborNotices = [];
+    neighborNoticesState = "idle";
+    renderNeighborNotices();
     el("neighborNoticesBtn").classList.add("hidden");
     el("neighborNoticesDialog").close();
   }
 }
 
 function renderNeighborNotices() {
-  el("neighborNoticesCount").textContent = String(neighborNotices.length);
-  el("neighborNoticesBtn").setAttribute("aria-label", `相鄰 Skill 通知 (${neighborNotices.length})`);
+  const ready = neighborNoticesState === "ready";
+  const loading = neighborNoticesState === "loading";
+  const signedOut = neighborNoticesState === "unauthenticated";
+  const button = el("neighborNoticesBtn");
+  button.classList.toggle("has-notices", ready && neighborNotices.length > 0);
+  button.dataset.state = neighborNoticesState;
+  el("neighborNoticesCount").textContent = ready ? String(neighborNotices.length) : "-";
+  button.setAttribute("aria-label", ready ? `相鄰 Skill 通知 (${neighborNotices.length})` : `相鄰 Skill 通知 (${loading ? "載入中" : signedOut ? "請重新登入" : "尚未載入"})`);
+  el("neighborNoticesList").setAttribute("aria-busy", String(loading || neighborNoticeActionBusy));
+  el("neighborNoticesRetry").classList.toggle("hidden", !(neighborNoticesState === "error" || (ready && el("neighborNoticesError").textContent)));
+  el("neighborNoticesSignIn").classList.toggle("hidden", !signedOut);
+  if (!ready) {
+    el("neighborNoticesList").innerHTML = loading ? "<p>正在載入通知...</p>" : "";
+    return;
+  }
   el("neighborNoticesList").innerHTML = neighborNotices.length ? neighborNotices.map((notice) => {
     const target = notice.target || {};
     const sources = (notice.sources || []).map((source) => `<p><strong>${escapeHtml(source.name || source.skill_key)}</strong>: ${escapeHtml(source.available ? source.description : "來源已不存在或無法載入")}</p>`).join("");
@@ -6988,29 +7015,67 @@ function renderNeighborNotices() {
       <p>${escapeHtml(notice.proposer_upn)}</p>${sources}
       ${target.available ? "" : "<p>目標已不存在或無法載入。</p>"}
       <div class="neighbor-notice-actions">
-        <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available ? "" : " disabled"}>${svgIcon("i-adjustments")}<span>開始修改確認</span></button>
-        <button type="button" class="icon-button" data-notice-dismiss="${notice.id}">${svgIcon("i-x")}<span>不修改</span></button>
+        <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available && !neighborNoticeActionBusy ? "" : " disabled"}>${svgIcon("i-adjustments")}<span>開始修改確認</span></button>
+        <button type="button" class="icon-button" data-notice-dismiss="${notice.id}"${neighborNoticeActionBusy ? " disabled" : ""}>${svgIcon("i-x")}<span>不修改</span></button>
       </div>
     </section>`;
   }).join("") : "<p>沒有待處理通知。</p>";
 }
 
+function showNeighborNoticeFailure(err, action = false) {
+  appLog(`Neighbor notice ${action ? "action" : "load"} failed: ${err.message}`);
+  if (err.status === 401) {
+    neighborNoticesRequest += 1;
+    neighborNotices = [];
+    neighborNoticesState = "unauthenticated";
+    authStatus = { authenticated: false };
+    renderAuthStatus();
+    try { window.__sgv7?.v7UpdateLoginGate?.(authStatus); } catch {}
+    el("neighborNoticesError").textContent = "登入已失效，請重新登入。";
+  } else {
+    if (!action) {
+      neighborNotices = [];
+      neighborNoticesState = "error";
+    }
+    el("neighborNoticesError").textContent = action
+      ? (err.status === 409 ? "目標 Skill 已變更或無法開啟，請重新載入通知。" : "操作未完成，請稍後再試。")
+      : "無法載入通知，請稍後重試。";
+  }
+  renderNeighborNotices();
+}
+
 async function refreshNeighborNotices() {
+  if (neighborNoticesState === "loading" || !authStatus?.authenticated) return;
+  const request = ++neighborNoticesRequest;
+  neighborNotices = [];
+  neighborNoticesState = "loading";
+  el("neighborNoticesError").textContent = "";
+  renderNeighborNotices();
   el("neighborNoticesBtn").classList.remove("hidden");
   try {
-    neighborNotices = await listNeighborNotices();
-    el("neighborNoticesError").textContent = "";
+    const notices = await listNeighborNotices();
+    if (request !== neighborNoticesRequest) return;
+    neighborNotices = notices;
+    neighborNoticesState = "ready";
     renderNeighborNotices();
   } catch (err) {
-    el("neighborNoticesCount").textContent = "!";
-    el("neighborNoticesError").textContent = `無法載入通知：${err.message}`;
+    if (request !== neighborNoticesRequest) return;
+    showNeighborNoticeFailure(err);
   }
 }
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest("#neighborNoticesBtn")) {
     el("neighborNoticesDialog").showModal();
-    await refreshNeighborNotices();
+    if (!neighborNoticeActionBusy) await refreshNeighborNotices();
+    return;
+  }
+  if (event.target.closest("#neighborNoticesRetry")) {
+    if (!neighborNoticeActionBusy) await refreshNeighborNotices();
+    return;
+  }
+  if (event.target.closest("#neighborNoticesSignIn")) {
+    signInWithWorkGuard();
     return;
   }
   if (event.target.closest("[data-notice-close]")) {
@@ -7018,19 +7083,22 @@ document.addEventListener("click", async (event) => {
     return;
   }
   const button = event.target.closest("[data-notice-start], [data-notice-dismiss]");
-  if (!button || button.disabled) return;
+  if (!button || button.disabled || neighborNoticeActionBusy || neighborNoticesState !== "ready") return;
   const start = button.hasAttribute("data-notice-start");
   if (start && (isSending || localEditorDirty)) {
     el("neighborNoticesError").textContent = "請先完成目前請求或儲存編輯內容。";
     return;
   }
   const id = button.getAttribute(start ? "data-notice-start" : "data-notice-dismiss");
-  const row = button.closest("[data-notice-id]");
-  row.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+  const request = neighborNoticesRequest;
+  neighborNoticeActionBusy = true;
+  el("neighborNoticesError").textContent = "";
+  renderNeighborNotices();
   try {
     const result = await actOnNeighborNotice(id, start ? "start-modify" : "dismiss");
+    if (request !== neighborNoticesRequest || !authStatus?.authenticated) return;
     await refreshNeighborNotices();
-    if (start) {
+    if (start && authStatus?.authenticated) {
       el("neighborNoticesDialog").close();
       setInputBusy(true, "Loading...");
       const activity = beginConversationActivity("Loading neighbor review");
@@ -7045,8 +7113,10 @@ document.addEventListener("click", async (event) => {
       }
     }
   } catch (err) {
-    el("neighborNoticesError").textContent = err.message;
-    row.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+    if (request === neighborNoticesRequest) showNeighborNoticeFailure(err, true);
+  } finally {
+    neighborNoticeActionBusy = false;
+    renderNeighborNotices();
   }
 });
 
