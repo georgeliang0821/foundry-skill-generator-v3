@@ -7183,7 +7183,9 @@ document.addEventListener("click", async (event) => {
       try {
         await activateCreatedSession(result, activity);
         appendMessage("assistant", "已開啟相鄰 Skill 的路由邊界審閱；通知已結案，Skill 內容尚未修改。");
-        await sendChatPayload("請開始相鄰 Skill 的路由邊界審閱。", []);
+        if (!(session.pending_tool_calls || []).some((call) => call.tool === "propose_patch")) {
+          await sendChatPayload("請開始相鄰 Skill 的路由邊界審閱。", []);
+        }
       } catch (err) {
         activity.finish(`通知已結案，Session ${result.id} 已建立，但畫面載入失敗：${err.message}`, true);
       } finally {

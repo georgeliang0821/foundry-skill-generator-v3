@@ -106,6 +106,61 @@ test("neighbor notification opens focused Quick Edit review and closes immediate
   expect(await (await request.get("/api/neighbor-notices")).json()).toEqual([]);
 });
 
+for (const action of ["accept", "reject"] as const) {
+  test(`neighbor review waits for the existing patch card (${action})`, async ({ page, request }) => {
+    await seedNeighborNotice(request);
+    const notices = await (await request.get("/api/neighbor-notices")).json();
+    const opened = await request.post(`/api/neighbor-notices/${notices[0].id}/start-modify`);
+    expect(opened.ok()).toBeTruthy();
+    const review = await opened.json();
+    await setScenario(request, "patch_refine");
+    expect((await request.post(`/api/sessions/${review.id}/chat`, {
+      data: { message: "Please improve the selection boundary.", materials: [] },
+    })).ok()).toBeTruthy();
+    const before = await readSession(request, review.id);
+    expect(before.pending_tool_calls.filter((call: { tool: string }) => call.tool === "propose_patch")).toHaveLength(1);
+    expect(before.patch_history).toHaveLength(0);
+    await setScenario(request, "default");
+    await page.route("**/api/neighbor-notices/summary", (route) => route.fulfill({ json: { count: 1 } }));
+    await page.route("**/api/neighbor-notices", (route) => route.fulfill({ json: notices }));
+    const chatRequests: string[] = [];
+    page.on("request", (outgoing) => {
+      if (outgoing.url().endsWith("/chat")) chatRequests.push(outgoing.url());
+    });
+
+    await openApp(page);
+    await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
+    await page.locator("#neighborNoticesBtn").click();
+    await page.locator("#neighborNoticesDialog").getByRole("button", { name: "開啟審閱" }).click();
+    await expect(page.locator("#neighborNoticesDialog")).not.toBeVisible();
+    await expect(page.getByTestId("send-button")).toBeEnabled();
+    const card = page.getByTestId("patch-card");
+    await expect(card).toHaveCount(1);
+    await expect(card.getByRole("button", { name: "Accept patch" })).toBeVisible();
+    expect(chatRequests).toEqual([]);
+    const waiting = await readSession(request, review.id);
+    expect(waiting.current_skill.skill_md).toBe(before.current_skill.skill_md);
+    expect(waiting.patch_history).toHaveLength(0);
+    expect(waiting.conversation).toEqual(before.conversation);
+    expect(waiting.current_stage).toBe("refine");
+
+    await card.getByRole("button", { name: action === "accept" ? "Accept patch" : "Reject", exact: true }).click();
+    await expect(card).toContainText(action === "accept" ? "Accepted" : "Rejected");
+    await expect(page.getByTestId("send-button")).toBeEnabled();
+    const after = await readSession(request, review.id);
+    expect(after.patch_history).toHaveLength(action === "accept" ? 1 : 0);
+    if (action === "accept") {
+      expect(chatRequests.length).toBeGreaterThan(0);
+      expect(after.conversation.some((message: { metadata?: { patch_sync?: { status: string } } }) =>
+        message.metadata?.patch_sync?.status === "saved")).toBe(true);
+    } else {
+      expect(chatRequests).toEqual([]);
+      expect(after.current_skill.skill_md).toBe(before.current_skill.skill_md);
+      expect(after.current_stage).toBe("refine");
+    }
+  });
+}
+
 test("neighbor notification can be dismissed on mobile without opening MODIFY", async ({ page, request }) => {
   await seedNeighborNotice(request);
   await page.setViewportSize({ width: 390, height: 844 });
