@@ -6,6 +6,47 @@ test.beforeEach(async ({ request }) => {
   await resetE2E(request);
 });
 
+for (const omitPatchEvent of [false, true]) {
+  test(`restores a pending patch from session state (${omitPatchEvent ? "missing event" : "normal event"})`, async ({ page, request }) => {
+    await openApp(page);
+    await createDraftWithFakeAgent(page);
+    await page.getByTestId("accept-draft-button").click();
+    await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
+    await setScenario(request, "patch_refine");
+    await page.route("**/chat", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (omitPatchEvent) {
+        body.events = body.events.filter((event: { event: string; data?: { tool?: string } }) =>
+          event.event !== "tool_call" || event.data?.tool !== "propose_patch");
+      }
+      await route.fulfill({ response, json: body });
+    });
+
+    await sendChat(page, "Please improve the selection boundary.");
+    const card = page.getByTestId("patch-card");
+    await expect(card).toHaveCount(1);
+    await expect(card.getByRole("button", { name: "Accept patch" })).toBeVisible();
+    let session = await readSession(request, await currentSessionId(page));
+    expect(session.patch_history).toHaveLength(0);
+    expect(session.pending_tool_calls.filter((call: { tool: string }) => call.tool === "propose_patch")).toHaveLength(1);
+    await page.evaluate(() => {
+      const app = (window as any).__sgv2;
+      app.renderSession();
+      app.renderSession();
+    });
+    await expect(card).toHaveCount(1);
+
+    await setScenario(request, "default");
+    await card.getByRole("button", { name: "Accept patch" }).click();
+    await expect(card).toContainText("Accepted");
+    session = await readSession(request, await currentSessionId(page));
+    expect(session.patch_history).toHaveLength(1);
+    expect(session.conversation.some((message: { metadata?: { patch_sync?: { status: string } } }) =>
+      message.metadata?.patch_sync?.status === "saved")).toBe(true);
+  });
+}
+
 test("accepts and undoes a conversation patch", async ({ page, request }) => {
   await openApp(page);
   await createDraftWithFakeAgent(page);

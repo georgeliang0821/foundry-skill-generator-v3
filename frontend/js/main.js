@@ -850,6 +850,7 @@ function renderSession() {
   renderQuestionQueueStatus();
   renderFixListStatus();
   syncDraftScriptNotes();
+  restorePendingPatchCards();
   updateActionButtons();
   applyContextTabDefault();
   void refreshSkillForm();
@@ -4514,7 +4515,15 @@ async function submitPositiveSamplesCard(call, card) {
   }
 }
 
+function restorePendingPatchCards() {
+  for (const call of session?.pending_tool_calls || []) {
+    if (call.tool === "propose_patch") renderToolCall(call);
+  }
+}
+
 function renderToolCall(call) {
+  if (call.tool === "propose_patch" && [...el("chatStream").querySelectorAll("[data-call-id]")]
+    .some((card) => card.dataset.callId === call.call_id)) return;
   dbgLog("render", `renderToolCall: ${call.tool}`, { call_id: call.call_id, args: call.args || {} });
   if (renderPassiveToolCall(call)) {
     dbgLog("render", `-> passive status only: ${call.tool}`);
@@ -5862,6 +5871,9 @@ async function sendChatPayload(message, materials, options = {}) {
         renderToolCall(data);
       } else if (eventName === "state_update") {
         session = data;
+        if ((session.pending_tool_calls || []).some((call) => call.tool === "propose_patch")) {
+          responseHasInteractiveTool = true;
+        }
         persistSessionState();
         renderSession();
       } else if (eventName === "quality_gate_failed") {
