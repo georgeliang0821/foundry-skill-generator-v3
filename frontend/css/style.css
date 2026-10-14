@@ -3131,36 +3131,45 @@ textarea:focus, input:focus, select:focus {
 .save-samples-options strong { color: var(--text-1); }
 .modal-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 
-.grants-modal .grants-skill-line { margin-top: 0; color: #6b4a1c; }
+.grants-modal { background: var(--surface); color: var(--text-1); border-radius: 8px; width: min(620px, 100%); max-height: 90dvh; }
+.grants-modal .modal-head { border-color: var(--border); }
+.grants-modal .modal-body > label { display: block; font-size: var(--fs-sm); font-weight: 600; margin-bottom: 6px; }
+.grants-modal select, .grants-modal input[type="search"], .grants-modal input[type="text"] { width: 100%; min-width: 0; max-width: 100%; background: var(--surface); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: 6px; padding: 8px; }
+.grants-modal select[size] { height: 112px; font-size: var(--fs-sm); }
+.grants-status { color: var(--text-2); font-size: var(--fs-xs); margin: 6px 0; overflow-wrap: anywhere; }
+.grants-status:empty { display: none; }
 .grants-list { list-style: none; padding: 0; margin: 8px 0 16px; }
 .grants-list li {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 10px;
-  border: 1px solid #eed8b8;
-  border-radius: 8px;
-  margin-bottom: 6px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
   font-size: 13px;
 }
+.grants-list li > div { min-width: 0; overflow-wrap: anywhere; }
 .grants-list .grant-upn { font-weight: 600; }
-.grants-list .grant-meta { color: #8a6d3b; font-size: 11px; }
+.grants-list .grant-meta { color: var(--text-2); font-size: 11px; }
 .grants-list button.danger {
-  appearance: none; background: #fde2e1; border: 1px solid #f5c2c0;
-  color: #842029; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  appearance: none; background: var(--danger-soft); border: 1px solid var(--border);
+  color: var(--danger); border-radius: 6px; padding: 6px; cursor: pointer; flex: 0 0 30px; height: 30px;
 }
-.grants-add { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
-.grants-add label { display: block; font-size: 12px; font-weight: 600; color: #6b4a1c; margin-bottom: 4px; }
-.grants-add input {
-  flex: 1; min-width: 200px;
-  padding: 8px 10px; border: 1px solid #eed8b8; border-radius: 8px;
-  background: #fff8ee;
-}
-.grants-error { color: #842029; min-height: 1em; margin: 8px 0 0; font-size: 12px; }
+.grants-add { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 12px; }
+.grants-add label { display: block; font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
+.grants-add > button { justify-self: end; }
+.grants-search-row { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr); gap: 10px; }
+.grants-search-row > div { min-width: 0; }
+.grants-error { color: var(--danger); min-height: 1em; margin: 8px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.skill-delete-section { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 12px; }
+.skill-delete-section h4 { color: var(--danger); overflow-wrap: anywhere; }
+.grants-modal h4 { margin: 8px 0; font-size: var(--fs-sm); }
+.skill-delete-section h5 { margin: 12px 0 4px; font-size: var(--fs-xs); }
+.skill-dependencies { margin: 4px 0 10px; padding-left: 20px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.skill-dependencies button { margin-left: 8px; }
+#skillDeleteForm { display: grid; gap: 8px; font-size: var(--fs-sm); }
+#skillDeleteBtn { justify-self: end; }
 .grants-visibility {
-  border: 1px solid #e0cfae;
-  border-radius: 6px;
-  padding: 8px 10px;
+  padding: 10px 0;
   margin: 8px 0 4px;
-  background: #fdf8ef;
 }
 .grants-visibility label {
   display: flex;
@@ -3168,29 +3177,16 @@ textarea:focus, input:focus, select:focus {
   gap: 8px;
   font-size: 13px;
   font-weight: 600;
-  color: #6b4a1c;
+  color: var(--text-1);
   cursor: pointer;
 }
-.grants-visibility-hint { margin: 4px 0 0 22px; font-size: 11px; color: #8a6d3b; }
-.draft-public {
-  border: 1px solid #e0cfae;
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin: 8px 0 4px;
-  background: #fdf8ef;
+.grants-visibility-hint { margin: 4px 0 0 22px; font-size: 12px; color: var(--text-2); }
+@media (max-width: 540px) {
+  #grantsModal { padding: 12px; }
+  .grants-search-row { grid-template-columns: minmax(0, 1fr); }
+  .grants-modal .modal-body { padding: 14px; }
 }
-.draft-public label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #6b4a1c;
-  cursor: pointer;
-}
-.draft-public-hint { margin: 4px 0 0 22px; font-size: 11px; color: #8a6d3b; }
 /* Undo the global `input { width: 100% }` so the box stays next to its label. */
-.draft-public input[type="checkbox"],
 .grants-visibility input[type="checkbox"] {
   width: auto;
   flex: 0 0 auto;

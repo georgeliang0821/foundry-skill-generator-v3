@@ -439,6 +439,41 @@ export async function listSkillGrants(name) {
   return res.json();
 }
 
+export async function listPermissionSkills() {
+  const res = await apiFetch("/api/permissions/skills");
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
+export async function fetchSkillDependencies(name) {
+  const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}/dependencies`);
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
+export async function deleteManagedSkill(name, confirmName) {
+  const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm_name: confirmName }),
+  });
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
+export async function fetchSessionBinding(sessionId) {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/binding`);
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
+export async function searchPermissionPrincipals(query, principalType) {
+  const params = new URLSearchParams({ q: query, principal_type: principalType });
+  const res = await apiFetch(`/api/permissions/principals?${params}`);
+  if (!res.ok) throw new Error(await formatFetchError(res));
+  return res.json();
+}
+
 export async function addSkillGrant(name, payload) {
   const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}/grants`, {
     method: "POST",

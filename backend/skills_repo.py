@@ -289,6 +289,13 @@ def catalog_skill_names() -> set[str]:
     return {row[0] for row in db.fetchall("SELECT DISTINCT skill_name FROM dbo.skills")}
 
 
+def catalog_skill_scopes() -> set[tuple[str, str | None]]:
+    if _local_repo is not None:
+        with _local_repo._lock:
+            return {(row.skill_name, row.owner_upn) for row in _local_repo._skills.values()}
+    return {(row[0], row[1]) for row in db.fetchall("SELECT skill_name, owner_upn FROM dbo.skills")}
+
+
 def list_skills_for_user(user_upn: str) -> list[SkillRow]:
     """Skills visible to the user: a live grant OR is_public, enabled-only.
 
@@ -456,6 +463,46 @@ def delete_skill(skill_name: str, owner_upn: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 # Grants
 # ---------------------------------------------------------------------------
+
+
+def list_permission_skills(user_upn: str) -> list[SkillRow]:
+    creator = user_upn.strip().lower()
+    if not creator:
+        return []
+    if _local_repo is not None:
+        with _local_repo._lock:
+            return sorted(
+                [row for row in _local_repo._skills.values() if row.owner_upn is None and row.created_by == creator],
+                key=lambda row: row.skill_name,
+            )
+    rows = db.fetchall(
+        f"SELECT {_SKILL_COLUMNS} FROM dbo.skills s "
+        "WHERE s.owner_upn IS NULL AND s.created_by = ? ORDER BY s.skill_name",
+        (creator,),
+    )
+    return [SkillRow(*row) for row in rows]
+
+
+def list_database_principals(query: str = "", principal_type: str = "") -> list[dict[str, str]]:
+    if _local_repo is not None:
+        return []
+    rows = db.fetchall(
+        "SELECT TOP (100) name, type FROM sys.database_principals "
+        "WHERE type IN ('E', 'X') AND (? = '' OR type = ?) "
+        "AND CHARINDEX(?, name) > 0 ORDER BY type DESC, name",
+        (principal_type, principal_type, query),
+    )
+    return [{"name": row[0], "type": row[1]} for row in rows]
+
+
+def get_database_principal(name: str) -> dict[str, str] | None:
+    if _local_repo is not None:
+        return None
+    row = db.fetchone(
+        "SELECT name, type FROM sys.database_principals WHERE name = ? AND type IN ('E', 'X')",
+        (name,),
+    )
+    return {"name": row[0], "type": row[1]} if row else None
 
 
 def list_grants(skill_name: str, owner_upn: str | None = None) -> list[GrantRow]:

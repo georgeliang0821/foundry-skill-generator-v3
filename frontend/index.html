@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Skill Generator V3</title>
     <link rel="stylesheet" href="/vendor/@highlightjs/cdn-assets/styles/github.min.css" />
-    <link rel="stylesheet" href="/assets/css/style.css?v=20261014-neighbor-summary" />
+    <link rel="stylesheet" href="/assets/css/style.css?v=20261014-permissions" />
   </head>
   <body>
     <div id="permissionBanner" class="permission-banner hidden" role="alert">
@@ -24,24 +24,54 @@
     <div id="grantsModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="grantsModalTitle">
       <div class="modal-card grants-modal">
         <header class="modal-head">
-          <h3 id="grantsModalTitle">Skill access</h3>
-          <button class="modal-close" type="button" aria-label="Close" data-action="close-grants-modal">x</button>
+          <h3 id="grantsModalTitle">Manage Skills</h3>
+          <button class="modal-close icon-button" type="button" aria-label="Close" data-action="close-grants-modal"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
         </header>
         <div class="modal-body">
-          <p class="grants-skill-line"><strong>Skill:</strong> <span id="grantsModalSkill"></span></p>
+          <label for="grantsModalSkill">Skill</label>
+          <select id="grantsModalSkill" data-testid="permission-skill-select" disabled>
+            <option value="">Select a skill</option>
+          </select>
+          <p id="grantsStatus" class="grants-status" role="status"></p>
+          <div id="grantsDetails" hidden>
+          <h4>Access</h4>
           <div class="grants-visibility">
             <label for="grantsPublicToggle">
               <input id="grantsPublicToggle" type="checkbox" />
-              Public - everyone can use this skill
+              Public
             </label>
             <p class="grants-visibility-hint" id="grantsPublicHint"></p>
           </div>
           <ul id="grantsList" class="grants-list" aria-live="polite"></ul>
           <form id="grantsAddForm" class="grants-add" autocomplete="off">
-            <label for="grantsAddInput">Grant access to UPN</label>
-            <input id="grantsAddInput" type="email" placeholder="user@contoso.com" required />
-            <button class="primary" type="submit">Add</button>
+            <div class="grants-search-row">
+              <div><label for="grantsPrincipalType">Type</label>
+                <select id="grantsPrincipalType"><option value="E" title="SQL external users, including application identities">User</option><option value="X" title="Entra Security Group">Group</option></select>
+              </div>
+              <div><label for="grantsAddInput">Search SQL principals</label>
+                <input id="grantsAddInput" type="search" placeholder="Name or UPN" maxlength="256" />
+              </div>
+            </div>
+            <label for="grantsPrincipalSelect">Recipient</label>
+            <select id="grantsPrincipalSelect" size="4" aria-label="Recipient" required></select>
+            <p id="grantsSearchStatus" class="grants-status" role="status"></p>
+            <button id="grantsAddBtn" class="primary icon-button" type="submit" disabled><svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Add access</span></button>
           </form>
+          <section class="skill-delete-section" aria-labelledby="skillDeleteHeading">
+            <h4 id="skillDeleteHeading">Delete Skill</h4>
+            <p id="skillDependencyStatus" class="grants-status" role="status"></p>
+            <h5>Depends On</h5>
+            <ul id="skillDependencies" class="skill-dependencies"></ul>
+            <h5>Used By</h5>
+            <ul id="skillDependents" class="skill-dependencies"></ul>
+            <p id="skillDeleteWarning" class="grants-status"></p>
+            <form id="skillDeleteForm" autocomplete="off">
+              <label for="skillDeleteConfirm">Confirm skill name</label>
+              <input id="skillDeleteConfirm" type="text" spellcheck="false" />
+              <button id="skillDeleteBtn" class="danger icon-button" type="submit" disabled><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg><span>Delete Skill</span></button>
+            </form>
+          </section>
+          </div>
           <p id="grantsError" class="grants-error" role="alert" aria-live="assertive"></p>
         </div>
       </div>
@@ -170,9 +200,6 @@
                 <button id="refreshSkillsBtn" class="ghost icon-only-button" type="button" title="Refresh skills (re-read from SQL &amp; Blob)" data-testid="refresh-skills-button" aria-label="Refresh skills">
                   <svg class="icon" aria-hidden="true"><use href="#i-arrow-path"/></svg>
                 </button>
-                <button id="grantsBtn" class="ghost icon-only-button" style="display:none" type="button" title="Manage who can access this skill" data-testid="grants-button" aria-label="Manage grants">
-                  <svg class="icon" aria-hidden="true"><use href="#i-user-circle"/></svg>
-                </button>
               </div>
             </div>
             <div class="control-group edit-scope-group" style="display:none">
@@ -198,6 +225,9 @@
         </div>
 
         <div class="header-account">
+          <button id="grantsBtn" class="ghost icon-button hidden" type="button" title="Manage Skills" data-testid="grants-button" aria-haspopup="dialog">
+            <svg class="icon" aria-hidden="true"><use href="#i-share"/></svg><span>Manage Skills</span>
+          </button>
           <button id="neighborNoticesBtn" class="icon-button hidden" type="button" title="相鄰 Skill 通知" aria-label="相鄰 Skill 通知" aria-haspopup="dialog">
             <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>
             <span>相鄰 Skill 通知</span>

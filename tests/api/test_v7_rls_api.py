@@ -5,6 +5,157 @@ from tests.conftest import TEST_UPN
 import pytest
 
 
+def test_manage_delete_blocks_referenced_skill(client, backend_main, fake_sql):
+    for name, children in (("child", "[]"), ("parent", "[child]")):
+        backend_main.store.save_skill(backend_main.SkillFiles(
+            name=name, skill_md=f"---\nname: {name}\nmetadata:\n  children: {children}\n---\n",
+        ))
+        fake_sql.upsert_skill(name, created_by=TEST_UPN)
+    dependencies = client.get("/api/skills/child/dependencies")
+    assert dependencies.status_code == 200
+    assert dependencies.json()["dependents"][0]["name"] == "parent"
+    response = client.request("DELETE", "/api/skills/child", json={"confirm_name": "child"})
+    assert response.status_code == 409
+    assert backend_main.skills_repo.get_skill("child") is not None
+    assert backend_main.store.load_skill("child")
+
+
+def test_manage_delete_cascades_grants(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="remove-me", skill_md="---\nname: remove-me\n---\n"))
+    fake_sql.upsert_skill("remove-me", created_by=TEST_UPN)
+    fake_sql.add_grant("remove-me", TEST_UPN)
+    response = client.request("DELETE", "/api/skills/remove-me", json={"confirm_name": "remove-me"})
+    assert response.status_code == 200
+    assert backend_main.skills_repo.get_skill("remove-me") is None
+    assert not backend_main.skills_repo.list_grants("remove-me")
+    with pytest.raises(FileNotFoundError):
+        backend_main.store.load_skill("remove-me")
+    backup = next(iter(backend_main.store.store.history.values()))
+    assert backup["manifest"]["operation"] == "delete"
+    assert backup["manifest"]["captured_by"] == TEST_UPN
+    assert "SKILL.md" in backup["files"]
+
+
+@pytest.mark.parametrize("failure", ["backup", "blob", "sql"])
+def test_manage_delete_failure_preserves_registration(client, backend_main, fake_sql, monkeypatch, failure):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("unavailable")
+
+    if failure == "backup":
+        monkeypatch.setattr(backend_main.store, "backup_for_delete", fail)
+    elif failure == "blob":
+        monkeypatch.setattr(backend_main.store, "delete_skill", fail)
+    else:
+        monkeypatch.setattr(backend_main.skills_repo, "delete_skill", fail)
+    response = client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"})
+    assert response.status_code == 503
+    assert backend_main.skills_repo.get_skill("target") is not None
+    if failure != "sql":
+        assert backend_main.store.load_skill("target")
+    else:
+        assert "SQL cleanup failed" in response.json()["detail"]
+
+
+def test_manage_delete_hides_inaccessible_parent(client, backend_main, fake_sql):
+    for name, creator, children in (("child", TEST_UPN, "[]"), ("secret-parent", "other@x", "[child]")):
+        backend_main.store.save_skill(backend_main.SkillFiles(name=name, skill_md=f"---\nname: {name}\nmetadata:\n  children: {children}\n---\n"))
+        fake_sql.upsert_skill(name, created_by=creator)
+    response = client.get("/api/skills/child/dependencies")
+    assert response.status_code == 200
+    assert response.json()["hidden_dependents"] == 1
+    assert response.json()["can_delete"] is False
+    assert "secret-parent" not in response.text
+
+
+def test_manage_delete_keeps_session_and_rejects_old_save(client, backend_main, grant_skill):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="bound", skill_md="---\nname: bound\ndescription: d\n---\n"))
+    grant_skill("bound")
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "bound"}).json()["id"]
+    before = client.get(f"/api/sessions/{sid}").json()
+    assert client.request("DELETE", "/api/skills/bound", json={"confirm_name": "bound"}).status_code == 200
+    assert client.get(f"/api/sessions/{sid}").json() == before
+    assert client.post(f"/api/sessions/{sid}/save", json={"name": "bound"}).status_code == 403
+
+
+def test_manage_delete_fails_closed_on_incomplete_scan(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    fake_sql.upsert_skill("missing")
+    assert client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"}).status_code == 503
+    assert backend_main.store.load_skill("target")
+
+
+@pytest.mark.parametrize("creator, owner", [(None, None), ("other@x", None), (TEST_UPN, TEST_UPN)])
+def test_manage_delete_rejects_ineligible_scope(client, backend_main, fake_sql, creator, owner):
+    fake_sql.upsert_skill("target", created_by=creator, owner_upn=owner, is_public=owner is None)
+    assert client.get("/api/skills/target/dependencies").status_code == 403
+    assert client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"}).status_code == 403
+
+
+def test_manage_delete_requires_auth_and_exact_confirmation(client, anon_client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    assert anon_client.get("/api/skills/target/dependencies").status_code == 401
+    assert anon_client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"}).status_code == 401
+    for confirmation in ("TARGET", " target", "other"):
+        assert client.request("DELETE", "/api/skills/target", json={"confirm_name": confirmation}).status_code == 400
+    assert not backend_main.store.store.history
+
+
+@pytest.mark.parametrize("change", ["dependency", "version"])
+def test_manage_delete_rechecks_after_backup(client, backend_main, fake_sql, monkeypatch, change):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    backup = backend_main.store.backup_for_delete
+
+    def changed(name, upn):
+        version = backup(name, upn)
+        if change == "dependency":
+            backend_main.store.save_skill(backend_main.SkillFiles(name="parent", skill_md="---\nname: parent\nmetadata:\n  children: [target]\n---\n"))
+            fake_sql.upsert_skill("parent", created_by=TEST_UPN)
+        else:
+            backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\nChanged"))
+        return version
+
+    monkeypatch.setattr(backend_main.store, "backup_for_delete", changed)
+    assert client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"}).status_code == 409
+    assert backend_main.store.load_skill("target")
+
+
+@pytest.mark.parametrize("content", ["no frontmatter", "---\nname: broken\nmetadata: [bad]\n---\n", "---\nname: broken\nmetadata:\n  children: target\n---\n"])
+def test_manage_delete_rejects_malformed_dependency_documents(client, backend_main, fake_sql, content):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    backend_main.store.save_skill(backend_main.SkillFiles(name="broken", skill_md=content))
+    assert client.get("/api/skills/target/dependencies").status_code == 503
+
+
+def test_manage_delete_does_not_confuse_private_and_global_names(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    fake_sql.upsert_skill("target", owner_upn="other@x")
+    assert client.get("/api/skills/target/dependencies").status_code == 503
+
+
+def test_manage_delete_invalidates_caches(client, backend_main, fake_sql, monkeypatch):
+    from backend.skills_index import get_skills_index
+
+    backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))
+    fake_sql.upsert_skill("target", created_by=TEST_UPN)
+    fake_sql.add_grant("target", TEST_UPN)
+    assert backend_main.acl_mod.can_access(TEST_UPN, "target")
+    assert backend_main.store.list_skills()
+    invalidated = []
+    monkeypatch.setattr(get_skills_index(), "invalidate", lambda: invalidated.append(True))
+    assert client.request("DELETE", "/api/skills/target", json={"confirm_name": "target"}).status_code == 200
+    assert not backend_main.store.list_skills()
+    assert not backend_main.acl_mod.can_access(TEST_UPN, "target")
+    assert invalidated
+
+
 
 # ---------------------------------------------------------------------------
 # Auth gates
@@ -263,6 +414,98 @@ def test_orphan_blob_cannot_be_claimed_by_new_save(client, backend_main, fake_sq
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("is_public", [False, True])
+def test_permission_management_requires_creator(client, fake_sql, is_public):
+    fake_sql.upsert_skill("other-owned", created_by="other@example.com", is_public=is_public)
+    fake_sql.add_grant("other-owned", TEST_UPN)
+    fake_sql.add_grant("other-owned", "recipient@example.com")
+    assert client.get("/api/skills/other-owned/grants").status_code == 403
+    assert client.post("/api/skills/other-owned/grants", json={"user_upn": "new@example.com"}).status_code == 403
+    assert client.delete("/api/skills/other-owned/grants/recipient@example.com").status_code == 403
+    assert client.patch("/api/skills/other-owned/visibility", json={"is_public": not is_public}).status_code == 403
+    assert ("recipient@example.com", "other-owned") in fake_sql.grants
+    assert fake_sql.skills["other-owned"]["is_public"] is is_public
+
+
+def test_creator_can_manage_without_use_grant(client, fake_sql):
+    fake_sql.upsert_skill("owned-no-grant", created_by=TEST_UPN)
+    assert client.get("/api/skills/owned-no-grant/grants").status_code == 200
+    assert client.post("/api/skills/owned-no-grant/grants", json={"user_upn": "new@example.com"}).status_code == 200
+
+
+def test_permission_selector_only_lists_own_global_skills(client, fake_sql):
+    fake_sql.upsert_skill("owned", created_by=TEST_UPN)
+    fake_sql.upsert_skill("disabled", created_by=TEST_UPN, enabled=False)
+    fake_sql.upsert_skill("private", created_by=TEST_UPN, owner_upn=TEST_UPN)
+    fake_sql.upsert_skill("public-other", created_by="other@example.com", is_public=True)
+    fake_sql.upsert_skill("shared-other", created_by="other@example.com")
+    fake_sql.add_grant("shared-other", TEST_UPN)
+    fake_sql.upsert_skill("unknown-creator")
+    assert [row["skill_name"] for row in client.get("/api/permissions/skills").json()["skills"]] == ["disabled", "owned"]
+
+
+def test_private_scope_rejected_by_permission_guard(client, fake_sql, monkeypatch):
+    from backend import skills_repo
+    fake_sql.upsert_skill("private", created_by=TEST_UPN, owner_upn=TEST_UPN)
+    row = skills_repo.get_skill("private", TEST_UPN)
+    monkeypatch.setattr(skills_repo, "get_skill", lambda name: row)
+    assert client.get("/api/skills/private/grants").status_code == 403
+    assert client.patch("/api/skills/private/visibility", json={"is_public": True}).status_code == 403
+
+
+def test_sql_principal_search_and_group_grant(client, grant_skill, fake_sql, monkeypatch):
+    from backend import skills_repo
+    grant_skill("owned")
+    monkeypatch.setattr(skills_repo, "list_database_principals", lambda query, kind: [{"name": "EAA", "type": "X"}] if query == "EA" and kind == "X" else [])
+    monkeypatch.setattr(skills_repo, "get_database_principal", lambda name: {"name": "EAA", "type": "X"} if name == "EAA" else None)
+    assert client.get("/api/permissions/principals?q=EA&principal_type=X").json()["principals"] == [{"name": "EAA", "type": "X"}]
+    response = client.post("/api/skills/owned/grants", json={"user_upn": "EAA", "principal_type": "X"})
+    assert response.status_code == 200
+    assert response.json()["user_upn"] == "EAA"
+    assert ("EAA", "owned") in fake_sql.grants
+    assert client.delete("/api/skills/owned/grants/EAA").status_code == 200
+    assert ("EAA", "owned") not in fake_sql.grants
+    assert client.post("/api/skills/owned/grants", json={"user_upn": "missing", "principal_type": "X"}).status_code == 400
+    assert client.post("/api/skills/owned/grants", json={"user_upn": "EAA", "principal_type": "E"}).status_code == 400
+    assert client.get("/api/permissions/principals?principal_type=R").status_code == 400
+
+
+def test_permission_endpoints_require_auth(anon_client):
+    assert anon_client.get("/api/permissions/skills").status_code == 401
+    assert anon_client.get("/api/permissions/principals").status_code == 401
+
+
+def test_permission_principal_errors_fail_closed(client, grant_skill, monkeypatch):
+    from backend import skills_repo
+    assert client.get("/api/permissions/skills").json() == {"skills": []}
+    assert client.get("/api/permissions/principals").status_code == 403
+    grant_skill("owned")
+
+    def unavailable(*args):
+        raise RuntimeError("Database metadata unavailable")
+
+    monkeypatch.setattr(skills_repo, "list_database_principals", unavailable)
+    monkeypatch.setattr(skills_repo, "get_database_principal", unavailable)
+    assert client.get("/api/permissions/principals").status_code == 503
+    assert client.post("/api/skills/owned/grants", json={"user_upn": "EAA", "principal_type": "X"}).status_code == 503
+
+
+def test_selected_sql_upn_is_normalized(client, grant_skill, fake_sql, monkeypatch):
+    from backend import skills_repo
+    grant_skill("owned")
+    monkeypatch.setattr(skills_repo, "get_database_principal", lambda name: {"name": "Alice@Contoso.com", "type": "E"})
+    assert client.post("/api/skills/owned/grants", json={"user_upn": "Alice@Contoso.com", "principal_type": "E"}).status_code == 200
+    assert ("alice@contoso.com", "owned") in fake_sql.grants
+
+
+@pytest.mark.parametrize("group_name", ["Group" * 33, "\u7fa4\u7d44"])
+def test_group_grant_rejects_unsupported_names(client, grant_skill, monkeypatch, group_name):
+    from backend import skills_repo
+    grant_skill("owned")
+    monkeypatch.setattr(skills_repo, "get_database_principal", lambda name: {"name": group_name, "type": "X"})
+    assert client.post("/api/skills/owned/grants", json={"user_upn": group_name, "principal_type": "X"}).status_code == 400
+
+
 def test_grants_list_returns_my_grant(client, backend_main, grant_skill):
     grant_skill("shared")
     r = client.get("/api/skills/shared/grants")
@@ -416,7 +659,7 @@ def _seed_family(backend_main, grant_skill, fake_sql):
         backend_main.SkillFiles(name="family", skill_md=_PARENT_WITH_CHILDREN_MD)
     )
     grant_skill("family")
-    fake_sql.upsert_skill("hidden-child", is_internal=True)
+    fake_sql.upsert_skill("hidden-child", is_internal=True, created_by=TEST_UPN)
     fake_sql.upsert_skill("catalog-dep", is_internal=False)
 
 
@@ -431,6 +674,15 @@ def test_publishing_a_parent_publishes_its_internal_children(
     assert fake_sql.skills["hidden-child"]["is_public"] is True
     # A child still in the host catalog belongs to everyone, not to this parent.
     assert fake_sql.skills["catalog-dep"]["is_public"] is False
+
+
+def test_parent_visibility_never_changes_another_creators_child(client, backend_main, grant_skill, fake_sql):
+    _seed_family(backend_main, grant_skill, fake_sql)
+    fake_sql.skills["hidden-child"]["created_by"] = "other@example.com"
+    response = client.patch("/api/skills/family/visibility", json={"is_public": True})
+    assert response.status_code == 200
+    assert response.json()["failed_children"] == ["hidden-child"]
+    assert fake_sql.skills["hidden-child"]["is_public"] is False
 
 
 def test_demoting_a_parent_demotes_and_regrants_its_internal_children(

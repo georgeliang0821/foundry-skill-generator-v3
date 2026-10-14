@@ -1,6 +1,11 @@
 import {
   refreshSkillsCache,
   listSkillGrants,
+  listPermissionSkills,
+  fetchSkillDependencies,
+  deleteManagedSkill,
+  fetchSessionBinding,
+  searchPermissionPrincipals,
   addSkillGrant,
   removeSkillGrant,
   setSkillVisibility,
@@ -881,6 +886,8 @@ function skillBindingState() {
   };
 }
 
+const missingSkillBindings = new Set();
+
 function renderSkillBindingStatus() {
   const node = el("skillBindingStatus");
   if (!node) return;
@@ -888,7 +895,10 @@ function renderSkillBindingStatus() {
   node.className = `skill-binding-status ${binding.state}`;
   let stateText;
   let icon;
-  if (binding.state === "new") {
+  if (binding.hasRemote && missingSkillBindings.has(binding.remoteName)) {
+    stateText = "Skill deleted";
+    icon = "i-warning";
+  } else if (binding.state === "new") {
     stateText = binding.hasFiles ? "Skill not saved" : "Not started";
     icon = "i-flag";
   } else if (binding.state === "unsaved") {
@@ -915,6 +925,12 @@ function renderSkillBindingStatus() {
     ? `<button type="button" class="binding-convert" data-convert-form="${convertTarget}" data-testid="binding-convert-button"${isSending ? " disabled" : ""} title="Move the code of this ${session.skill_form} skill into ${convertTarget} form">Convert to ${convertTarget}</button>`
     : "";
   node.innerHTML = `${svgIcon(icon)}<span class="binding-state">${escapeHtml(stateText)}</span><span class="binding-skill" title="Skill: ${skillLabel}">Skill: ${skillLabel}</span>${publicBadge}${scriptBadge}${convertBadge}`;
+  if (binding.hasRemote && modifiableSkills.some((skill) => skill.name === binding.remoteName && !skill.owner_upn)) {
+    const permissionsButton = actionButton("Manage Skills", () => openGrantsModalFor(binding.remoteName));
+    permissionsButton.className = "ghost icon-button";
+    permissionsButton.innerHTML = `${svgIcon("i-share")}<span>Manage Skills</span>`;
+    node.appendChild(permissionsButton);
+  }
   node.title = binding.hasRemote
     ? `Remote: ${binding.remoteName || "none"}\nRemote version: ${binding.remoteVersion || "unknown"}\nLocal version: ${binding.localVersion || "none"}`
     : "This session is not bound to a Blob skill yet.";
@@ -4571,13 +4587,6 @@ function renderToolCall(call) {
       <label class="draft-name">Skill name
         <input type="text" data-testid="draft-name-input" value="${escapeHtml(normalizeSkillName(inferCurrentName(args.skill_md)))}" placeholder="my-skill-name" maxlength="64" spellcheck="false" autocomplete="off">
       </label>
-      <div class="draft-public">
-        <label for="draftPublicToggle">
-          <input id="draftPublicToggle" type="checkbox" data-testid="draft-public-toggle">
-          Public - everyone can use this skill
-        </label>
-        <p class="draft-public-hint">Leave this off to keep the skill private; you can change it later from Skill access.</p>
-      </div>
       <p class="patch-note">Lowercase letters, digits and hyphens only, no leading or trailing hyphen, 64 characters max. Renaming after this point moves the Blob folder, the SQL row and every grant.</p>
       <p class="patch-note draft-script-note" data-draft-script-note data-testid="draft-script-note" hidden></p>
       <p class="patch-note card-error" hidden></p>
@@ -4604,10 +4613,7 @@ function renderToolCall(call) {
           return;
         }
         nameError.hidden = true;
-        const makePublic = draftPublicChoice();
-        if (makePublic === null) return;
         if (await acceptTool(call, { action: "accept", name }) === false) return;
-        if (makePublic) await publishAfterDraftAccept(name);
       }),
     );
   } else if (call.tool === "propose_patch") {
@@ -4952,37 +4958,6 @@ function actionButton(text, handler) {
   return button;
 }
 
-// Returns the chosen visibility, or null when the user backs out of the
-// confirmation and the whole accept must be abandoned.
-function draftPublicChoice() {
-  const toggle = document.getElementById("draftPublicToggle");
-  if (!toggle || !toggle.checked) return false;
-  const ok = window.confirm(
-    "Make this skill public?\n\n"
-    + "Every signed-in user in the tenant will see it and can run it, and no grant is required. "
-    + "Any internal child skills are published with it.\n\n"
-    + "You can change this later from Skill access.",
-  );
-  return ok ? true : null;
-}
-
-// Saving is a content action, so publishing is a second, explicit call that is
-// only made once the draft is really committed under this name.
-async function publishAfterDraftAccept(name) {
-  if (session?.remote_skill_id !== name) return;
-  try {
-    await setSkillVisibility(name, true);
-    try { await refreshSkills(); } catch {}
-    renderSession();
-    appendConversationStatus(`${name} is now public. Every signed-in user can use it.`);
-  } catch (err) {
-    appendConversationStatus(
-      `${name} was saved but is still private: ${err.message}. Retry from Skill access.`,
-      { failed: true },
-    );
-  }
-}
-
 async function acceptTool(call, result) {
   dbgLog("action", `acceptTool: ${call.tool} -> ${result.action || "done"}`, { call_id: call.call_id, result });
   let runningNode = null;
@@ -5058,7 +5033,7 @@ async function acceptTool(call, result) {
     await refreshSessions();
     if (call.tool === "propose_skill_draft" && result.action === "accept") {
       // The public badge reads availableSkills, so a stale list hides the state.
-      try { await refreshSkills(); } catch {}
+      try { await refreshSkills(); renderSkillBindingStatus(); } catch {}
     }
     if (call.tool === "request_test_run") {
       setTestStatus({ status: "completed" });
@@ -6047,7 +6022,8 @@ function setInputBusy(busy, label = "Running...") {
 function updateActionButtons() {
   const hasDraft = Boolean(session?.current_skill?.skill_md);
   const binding = skillBindingState();
-  const canRunTests = hasDraft && binding.hasRemote && !binding.unknown;
+  const bindingDeleted = binding.hasRemote && missingSkillBindings.has(binding.remoteName);
+  const canRunTests = hasDraft && binding.hasRemote && !binding.unknown && !bindingDeleted;
   if (el("runTestBtn")) {
     el("runTestBtn").disabled = isSending || !canRunTests;
     el("runTestBtn").title = !hasDraft
@@ -6063,8 +6039,9 @@ function updateActionButtons() {
   if (el("saveDraftBtn")) {
     const upToDate = binding.hasRemote && !binding.unsaved && !binding.unknown && !localEditorDirty;
     const noticesPending = (session?.neighbor_notice_outcomes || []).some((outcome) => ["pending", "failed"].includes(outcome.status));
-    el("saveDraftBtn").disabled = isSending || !hasDraft || (upToDate && !noticesPending);
-    el("saveDraftBtn").title = !hasDraft
+    el("saveDraftBtn").disabled = isSending || bindingDeleted || !hasDraft || (upToDate && !noticesPending);
+    el("saveDraftBtn").title = bindingDeleted ? "The source skill was deleted. This conversation is retained."
+      : !hasDraft
       ? "Generate a skill draft first."
       : noticesPending
         ? "Save the source skill and send pending neighbor notifications."
@@ -6749,11 +6726,8 @@ bind("saveDraftBtn", "click", async () => {
   const call = (session?.pending_tool_calls || []).find((c) => c.tool === "propose_skill_draft");
   if (call) {
     const name = session.target_skill_id || inferCurrentName();
-    const makePublic = draftPublicChoice();
-    if (makePublic === null) return;
     if (await acceptTool(call, { action: "accept", name }) === false) return;
     appendConversationStatus(`Saved ${name} to the skill store.`);
-    if (makePublic) await publishAfterDraftAccept(name);
     return;
   }
   const pendingNoticeKeys = new Set((session.neighbor_notice_outcomes || [])
@@ -6901,6 +6875,12 @@ async function refreshSkills() {
       listSkills(storeFilter),
       listSkills(storeFilter, "modify"),
     ]);
+    if (session?.remote_skill_id) {
+      const boundName = session.remote_skill_id;
+      const binding = await fetchSessionBinding(session.id);
+      if (binding.missing) missingSkillBindings.add(boundName);
+      else missingSkillBindings.delete(boundName);
+    }
     skillsLoaded = true;
   } catch (err) {
     availableSkills = [];
@@ -6972,6 +6952,11 @@ async function resumeSession(sessionId) {
   const activity = beginConversationActivity("Loading saved session");
   try {
     session = await getSession(sessionId);
+    if (session.remote_skill_id) {
+      const binding = await fetchSessionBinding(sessionId);
+      if (binding.missing) missingSkillBindings.add(session.remote_skill_id);
+      else missingSkillBindings.delete(session.remote_skill_id);
+    }
     localEditorDirty = false;
     topologyData = null;
     attachedMaterials = [];
@@ -7281,66 +7266,231 @@ async function handleRefreshSkillsClick() {
 
 // Grants modal --------------------------------------------------------------
 
+let grantsViewRevision = 0;
+let grantsSearchRevision = 0;
+let grantsSearchTimer;
+let grantsBusy = false;
+let grantsReturnFocus;
+let grantsDependencies;
+let grantsDeleting = false;
+
 function _currentGrantsSkill() {
-  return document.getElementById("grantsModalSkill")?.textContent || "";
+  return el("grantsModalSkill")?.value || "";
 }
 
-async function openGrantsModalFor(skillName) {
-  if (!skillName) return;
-  const modal = document.getElementById("grantsModal");
-  const nameEl = document.getElementById("grantsModalSkill");
-  const errEl = document.getElementById("grantsError");
-  if (!modal || !nameEl) return;
-  nameEl.textContent = skillName;
-  errEl.textContent = "";
-  modal.classList.remove("hidden");
-  await renderGrantsList(skillName);
+function setGrantsBusy(busy) {
+  grantsBusy = busy;
+  el("grantsModalSkill").disabled = busy || el("grantsModalSkill").options.length < 2;
+  el("grantsDetails").querySelectorAll("input, select, button").forEach((node) => { node.disabled = busy; });
+  el("grantsAddBtn").disabled = busy || !el("grantsPrincipalSelect").value;
+  updateDeleteButton();
+}
+
+async function openGrantsModalFor(skillName = "") {
+  const revision = ++grantsViewRevision;
+  ++grantsSearchRevision;
+  grantsReturnFocus = document.activeElement;
+  el("grantsModal").classList.remove("hidden");
+  el("grantsError").textContent = "";
+  el("grantsStatus").textContent = "Loading skills...";
+  el("grantsDetails").hidden = true;
+  el("grantsModalSkill").replaceChildren(new Option("Select a skill", ""));
+  setGrantsBusy(true);
+  el("grantsModal").querySelector("[data-action='close-grants-modal']").focus();
+  try {
+    const data = await listPermissionSkills();
+    if (revision !== grantsViewRevision) return;
+    for (const skill of data.skills) el("grantsModalSkill").add(new Option(skill.skill_name, skill.skill_name));
+    el("grantsStatus").textContent = data.skills.length ? "" : "No skills available for management.";
+    setGrantsBusy(false);
+    el("grantsModalSkill").focus();
+    if (skillName && data.skills.some((skill) => skill.skill_name === skillName)) {
+      el("grantsModalSkill").value = skillName;
+      await selectPermissionSkill();
+    }
+  } catch (err) {
+    if (revision !== grantsViewRevision) return;
+    el("grantsStatus").textContent = "";
+    el("grantsError").textContent = err.message;
+    setGrantsBusy(false);
+  }
 }
 
 function closeGrantsModal() {
-  document.getElementById("grantsModal")?.classList.add("hidden");
+  if (grantsDeleting) return;
+  ++grantsViewRevision;
+  ++grantsSearchRevision;
+  window.clearTimeout(grantsSearchTimer);
+  el("grantsModal").classList.add("hidden");
+  if (grantsReturnFocus?.isConnected) grantsReturnFocus.focus();
+}
+
+async function selectPermissionSkill() {
+  const revision = ++grantsViewRevision;
+  ++grantsSearchRevision;
+  window.clearTimeout(grantsSearchTimer);
+  el("grantsError").textContent = "";
+  el("grantsDetails").hidden = true;
+  el("grantsPrincipalSelect").replaceChildren();
+  el("grantsAddInput").value = "";
+  el("skillDeleteConfirm").value = "";
+  grantsDependencies = null;
+  const skill = _currentGrantsSkill();
+  el("skillDeleteHeading").textContent = skill ? `Delete Skill: ${skill}` : "Delete Skill";
+  if (!skill) return;
+  setGrantsBusy(true);
+  await renderGrantsList(skill);
+  if (revision !== grantsViewRevision) return;
+  await loadSkillDependencies(skill);
+}
+
+function updateDeleteButton() {
+  el("skillDeleteBtn").disabled = grantsBusy || !grantsDependencies?.can_delete
+    || el("skillDeleteConfirm").value !== _currentGrantsSkill();
+}
+
+async function loadSkillDependencies(skill) {
+  const revision = grantsViewRevision;
+  grantsDependencies = null;
+  updateDeleteButton();
+  el("skillDependencyStatus").textContent = "Checking dependencies...";
+  el("skillDependencies").replaceChildren();
+  el("skillDependents").replaceChildren();
+  el("skillDeleteWarning").textContent = "";
+  try {
+    const data = await fetchSkillDependencies(skill);
+    if (revision !== grantsViewRevision) return;
+    grantsDependencies = data;
+    el("skillDependencyStatus").textContent = data.can_delete ? "No incoming dependencies." : "Deletion blocked: remove or replace these dependencies first.";
+    el("skillDependencies").innerHTML = data.dependencies.map((name) => `<li>${escapeHtml(name)}</li>`).join("") || "<li>None</li>";
+    for (const item of data.dependents) {
+      const row = document.createElement("li");
+      row.textContent = item.path.join(" -> ");
+      if (item.can_modify) {
+        const button = actionButton("Open scenario", async () => {
+          closeGrantsModal();
+          el("modeSelect").value = "modify";
+          renderSkillSelector();
+          el("targetSkill").value = item.name;
+          await startSession();
+        });
+        button.className = "ghost icon-button";
+        button.innerHTML = `${svgIcon("i-adjustments")}<span>Open scenario</span>`;
+        row.appendChild(button);
+      } else {
+        row.append(" (contact the creator)");
+      }
+      el("skillDependents").appendChild(row);
+    }
+    if (data.hidden_dependents) {
+      const row = document.createElement("li");
+      row.textContent = `${data.hidden_dependents} restricted reference(s). Contact the administrator.`;
+      el("skillDependents").appendChild(row);
+    } else if (!data.dependents.length) el("skillDependents").innerHTML = "<li>None</li>";
+    el("skillDeleteWarning").textContent = "Only this skill and its access grants will be deleted. Dependencies, history and conversations are retained. A final backup is required.";
+  } catch (err) {
+    if (revision !== grantsViewRevision) return;
+    el("skillDependencyStatus").textContent = `Deletion unavailable: ${err.message}`;
+  }
+  updateDeleteButton();
+}
+
+async function handleSkillDelete(event) {
+  event.preventDefault();
+  const skill = _currentGrantsSkill();
+  if (grantsBusy || !grantsDependencies?.can_delete || el("skillDeleteConfirm").value !== skill) return;
+  if (!confirm(`Delete "${skill}" and its access grants? This cannot be undone here.`)) return;
+  const revision = grantsViewRevision;
+  const returnFocus = grantsReturnFocus;
+  grantsDeleting = true;
+  setGrantsBusy(true);
+  el("grantsModal").querySelector("[data-action='close-grants-modal']").disabled = true;
+  el("grantsError").textContent = "";
+  try {
+    await deleteManagedSkill(skill, el("skillDeleteConfirm").value);
+    missingSkillBindings.add(skill);
+    await refreshSkills();
+    renderSkillBindingStatus();
+    updateActionButtons();
+    if (revision !== grantsViewRevision) return;
+    await openGrantsModalFor();
+    grantsReturnFocus = returnFocus;
+    el("grantsStatus").textContent = `Deleted ${skill}. History and conversations retained.`;
+  } catch (err) {
+    if (revision !== grantsViewRevision) return;
+    el("grantsError").textContent = err.message;
+    await loadSkillDependencies(skill);
+  } finally {
+    grantsDeleting = false;
+    el("grantsModal").querySelector("[data-action='close-grants-modal']").disabled = false;
+    if (revision === grantsViewRevision) setGrantsBusy(false);
+  }
 }
 
 async function renderGrantsList(skillName) {
-  const list = document.getElementById("grantsList");
-  if (!list) return;
-  list.innerHTML = "<li><em>Loading...</em></li>";
+  const revision = grantsViewRevision;
+  el("grantsStatus").textContent = "Loading access...";
   try {
     const data = await listSkillGrants(skillName);
+    if (revision !== grantsViewRevision) return;
     renderGrantsVisibility(!!data.is_public);
-    if (!data.grants || data.grants.length === 0) {
-      list.innerHTML = data.is_public
-        ? "<li><em>No grants needed - this skill is public</em></li>"
-        : "<li><em>No grants yet</em></li>";
-      return;
-    }
-    list.innerHTML = data.grants.map((g) => {
-      const upn = (g.user_upn || "").replace(/</g, "&lt;");
-      const grantedBy = (g.granted_by || "").replace(/</g, "&lt;");
-      const at = (g.granted_at || "").replace(/T/, " ").slice(0, 19);
-      return `<li>
-        <div>
-          <div class="grant-upn">${upn}</div>
-          <div class="grant-meta">granted by ${grantedBy} at ${at}</div>
-        </div>
-        <button class="danger" type="button" data-grant-remove="${encodeURIComponent(g.user_upn)}">Remove</button>
-      </li>`;
-    }).join("");
+    el("grantsList").innerHTML = (data.grants || []).map((grant) => {
+      const at = (grant.granted_at || "").replace(/T/, " ").slice(0, 19);
+      return `<li><div><div class="grant-upn">${escapeHtml(grant.user_upn)}</div>
+        <div class="grant-meta">Granted by ${escapeHtml(grant.granted_by || "")} at ${escapeHtml(at)}${grant.expires_at ? `; expires ${escapeHtml(grant.expires_at)}` : ""}</div></div>
+        <button class="danger icon-button" type="button" aria-label="Remove access for ${escapeHtml(grant.user_upn)}" title="Remove access" data-grant-remove="${encodeURIComponent(grant.user_upn)}">${svgIcon("i-x")}</button></li>`;
+    }).join("") || "<li><em>No individual or group grants</em></li>";
+    el("grantsDetails").hidden = false;
+    el("grantsStatus").textContent = "";
+    setGrantsBusy(false);
+    await searchGrantPrincipals();
   } catch (err) {
-    list.innerHTML = `<li><em>Failed to load: ${String(err).slice(0,200)}</em></li>`;
+    if (revision !== grantsViewRevision) return;
+    el("grantsStatus").textContent = "";
+    el("grantsDetails").hidden = true;
+    el("grantsError").textContent = err.message;
+    setGrantsBusy(false);
   }
+}
+
+async function searchGrantPrincipals() {
+  const revision = ++grantsSearchRevision;
+  const viewRevision = grantsViewRevision;
+  el("grantsPrincipalSelect").replaceChildren();
+  el("grantsAddBtn").disabled = true;
+  el("grantsSearchStatus").textContent = "Searching...";
+  try {
+    const data = await searchPermissionPrincipals(el("grantsAddInput").value.trim(), el("grantsPrincipalType").value);
+    if (revision !== grantsSearchRevision || viewRevision !== grantsViewRevision) return;
+    for (const principal of data.principals) {
+      el("grantsPrincipalSelect").add(new Option(principal.name, principal.name));
+    }
+    el("grantsPrincipalSelect").selectedIndex = -1;
+    el("grantsSearchStatus").textContent = data.principals.length
+      ? (data.principals.length === 100 ? "First 100 results. Refine your search." : "")
+      : "No matching SQL principals.";
+  } catch (err) {
+    if (revision !== grantsSearchRevision || viewRevision !== grantsViewRevision) return;
+    el("grantsSearchStatus").textContent = err.message;
+  }
+}
+
+function queueGrantPrincipalSearch() {
+  ++grantsSearchRevision;
+  el("grantsPrincipalSelect").replaceChildren();
+  el("grantsAddBtn").disabled = true;
+  window.clearTimeout(grantsSearchTimer);
+  grantsSearchTimer = window.setTimeout(searchGrantPrincipals, 200);
 }
 
 function renderGrantsVisibility(isPublic) {
   const toggle = document.getElementById("grantsPublicToggle");
   const hint = document.getElementById("grantsPublicHint");
-  const form = document.getElementById("grantsAddForm");
   if (toggle) toggle.checked = isPublic;
-  if (form) form.classList.toggle("hidden", isPublic);
   if (hint) {
     hint.textContent = isPublic
-      ? "Everyone signed in can use this skill; per-user grants are not required."
-      : "Only the users listed below can use this skill.";
+      ? "All users with EAA access can use this skill. Existing grants are retained."
+      : "Only the listed identities and security group members can use this skill in EAA.";
   }
 }
 
@@ -7348,74 +7498,104 @@ async function handlePublicToggleChange(ev) {
   const skill = _currentGrantsSkill();
   const errEl = document.getElementById("grantsError");
   const toggle = ev.target;
-  if (!skill) return;
+  if (!skill || grantsBusy) return;
   const next = toggle.checked;
-  if (next && !confirm(`Make "${skill}" available to everyone?`)) {
+  if (next && !confirm(`Make "${skill}" available to all users with EAA access? Eligible internal children will follow.`)) {
     toggle.checked = false;
     return;
   }
   errEl.textContent = "";
-  toggle.disabled = true;
+  const revision = grantsViewRevision;
+  setGrantsBusy(true);
   try {
-    await setSkillVisibility(skill, next);
+    const result = await setSkillVisibility(skill, next);
+    if (revision !== grantsViewRevision) return;
     await renderGrantsList(skill);
-    await refreshSkills();
+    if (revision !== grantsViewRevision) return;
+    if (result.failed_children?.length) errEl.textContent = `Access updated, but these children were not changed: ${result.failed_children.join(", ")}`;
+    try { await refreshSkills(); renderSkillBindingStatus(); } catch {}
   } catch (err) {
+    if (revision !== grantsViewRevision) return;
     toggle.checked = !next;
     errEl.textContent = String(err).slice(0, 300);
   } finally {
-    toggle.disabled = false;
+    if (revision === grantsViewRevision) setGrantsBusy(false);
   }
 }
 
 async function handleAddGrantSubmit(ev) {
   ev.preventDefault();
-  const input = document.getElementById("grantsAddInput");
+  const input = document.getElementById("grantsPrincipalSelect");
   const errEl = document.getElementById("grantsError");
   const skill = _currentGrantsSkill();
-  if (!input || !skill) return;
-  const upn = (input.value || "").trim().toLowerCase();
+  if (!input || !skill || grantsBusy) return;
+  const upn = input.value || "";
   if (!upn) return;
   errEl.textContent = "";
+  const revision = grantsViewRevision;
+  setGrantsBusy(true);
   try {
-    await addSkillGrant(skill, { user_upn: upn });
-    input.value = "";
+    await addSkillGrant(skill, { user_upn: upn, principal_type: el("grantsPrincipalType").value });
+    if (revision !== grantsViewRevision) return;
     await renderGrantsList(skill);
   } catch (err) {
+    if (revision !== grantsViewRevision) return;
     errEl.textContent = String(err).slice(0, 300);
+  } finally {
+    if (revision === grantsViewRevision) setGrantsBusy(false);
   }
 }
 
 async function handleGrantsListClick(ev) {
   const btn = ev.target.closest("button[data-grant-remove]");
-  if (!btn) return;
+  if (!btn || grantsBusy) return;
   const upn = decodeURIComponent(btn.dataset.grantRemove);
   const skill = _currentGrantsSkill();
   const errEl = document.getElementById("grantsError");
   if (!confirm(`Remove access for ${upn}?`)) return;
   errEl.textContent = "";
+  const revision = grantsViewRevision;
+  setGrantsBusy(true);
   try {
     await removeSkillGrant(skill, upn);
+    if (revision !== grantsViewRevision) return;
     await renderGrantsList(skill);
   } catch (err) {
+    if (revision !== grantsViewRevision) return;
     errEl.textContent = String(err).slice(0, 300);
+  } finally {
+    if (revision === grantsViewRevision) setGrantsBusy(false);
   }
 }
 
+let v7UiWired = false;
+
 function wireV7Ui() {
+  if (v7UiWired) return;
+  v7UiWired = true;
   // Refresh button
   const refreshBtn = document.getElementById("refreshSkillsBtn");
   if (refreshBtn) refreshBtn.addEventListener("click", handleRefreshSkillsClick);
   // Grants gear: opens modal for currently-selected skill
   const grantsBtn = document.getElementById("grantsBtn");
-  if (grantsBtn) grantsBtn.addEventListener("click", () => {
-    const sel = document.getElementById("targetSkill");
-    const value = sel ? sel.value : "";
-    if (!value) {
-      showPermissionBanner("Select a skill first.");
-      return;
-    }
-    openGrantsModalFor(value);
+  if (grantsBtn) grantsBtn.addEventListener("click", () => openGrantsModalFor());
+  el("grantsModalSkill").addEventListener("change", selectPermissionSkill);
+  el("skillDeleteForm").addEventListener("submit", handleSkillDelete);
+  el("skillDeleteConfirm").addEventListener("input", updateDeleteButton);
+  el("grantsPrincipalType").addEventListener("change", queueGrantPrincipalSearch);
+  el("grantsAddInput").addEventListener("input", queueGrantPrincipalSearch);
+  el("grantsPrincipalSelect").addEventListener("change", () => {
+    el("grantsAddBtn").disabled = grantsBusy || !el("grantsPrincipalSelect").value;
+  });
+  el("grantsModal").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeGrantsModal();
+    if (event.key !== "Tab") return;
+    const nodes = [...el("grantsModal").querySelectorAll("button, select, input")]
+      .filter((node) => !node.disabled && node.getClientRects().length);
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   });
   // Modal close
   document.querySelectorAll('[data-action="close-grants-modal"]').forEach((el) => {
@@ -7449,8 +7629,6 @@ function wireV7Ui() {
   const sel = document.getElementById("targetSkill");
   if (sel) {
     sel.addEventListener("change", () => {
-      const gb = document.getElementById("grantsBtn");
-      if (gb) gb.style.display = sel.value ? "" : "none";
       syncKindSelectToTargetSkill();
       // Re-filter the session list to the chosen skill (modify mode).
       renderSessionSelector();
@@ -7464,8 +7642,8 @@ function v7UpdateLoginGate(status) {
   // Show grants gear only if a target skill is bound + signed in.
   const grantsBtn = document.getElementById("grantsBtn");
   if (grantsBtn) {
-    const sel = document.getElementById("targetSkill");
-    grantsBtn.style.display = (status && status.authenticated && sel && sel.value) ? "" : "none";
+    grantsBtn.classList.toggle("hidden", !status?.authenticated);
+    if (!status?.authenticated && !el("grantsModal").classList.contains("hidden")) closeGrantsModal();
   }
 }
 

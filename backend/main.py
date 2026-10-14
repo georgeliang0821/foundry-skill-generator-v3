@@ -12,6 +12,7 @@ import os
 import base64
 import hashlib
 import secrets
+import threading
 from uuid import NAMESPACE_URL, uuid5
 import time
 from pathlib import Path
@@ -1095,7 +1096,20 @@ def _load_stored_assets(session: Session, skill_name: str) -> list[SkillAsset]:
     return [SkillAsset(path=path, content=check_asset(path, data)) for path, data in sorted(raw.items())]
 
 
+_skill_mutation_lock = threading.RLock()
+
+
 def save_skill_dual_write(
+    session: Session,
+    user_upn: str,
+    requested_name: str | None = None,
+    orphan_action: str | None = None,
+) -> SkillFiles:
+    with _skill_mutation_lock:
+        return _save_skill_dual_write(session, user_upn, requested_name, orphan_action)
+
+
+def _save_skill_dual_write(
     session: Session,
     user_upn: str,
     requested_name: str | None = None,
@@ -2776,6 +2790,13 @@ def list_sessions(upn: str = Depends(require_upn)) -> list[SessionSummary]:
 @app.get("/api/sessions/{session_id}")
 def read_session(session_id: str, upn: str = Depends(require_upn)) -> Session:
     return get_session_for_user(session_id, upn)
+
+
+@app.get("/api/sessions/{session_id}/binding")
+def session_binding(session_id: str, upn: str = Depends(require_upn)):
+    session = get_session_for_user(session_id, upn)
+    name = session.remote_skill_id
+    return {"missing": bool(name and skills_repo.get_skill(name) is None)}
 
 
 @app.post("/api/sessions/{session_id}/children")
@@ -4479,6 +4500,11 @@ def neighbor_edit_select(session_id: str, skill: str, req: NeighborSelectRequest
 
 @app.post("/api/sessions/{session_id}/neighbor-edits/{skill}/save")
 def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_upn)) -> Session:
+    with _skill_mutation_lock:
+        return _neighbor_edit_save(session_id, skill, upn)
+
+
+def _neighbor_edit_save(session_id: str, skill: str, upn: str) -> Session:
     """Write the selected version of a neighbor skill to Blob + SQL. Gated by the
     authenticated creator's modify rights."""
     session = get_session_for_user(session_id, upn)
@@ -4794,7 +4820,7 @@ def refresh_skills_cache(upn: str = Depends(require_upn)):
 
 @app.get("/api/skills/{name}/grants")
 def list_skill_grants(name: str, upn: str = Depends(require_upn)):
-    acl_mod.assert_can_access(upn, name)
+    acl_mod.assert_can_manage_permissions(upn, name)
     row = skills_repo.get_skill(name)
     grants = skills_repo.list_grants(name)
     return {
@@ -4802,6 +4828,124 @@ def list_skill_grants(name: str, upn: str = Depends(require_upn)):
         "is_public": bool(row.is_public) if row else False,
         "grants": [g.to_payload() for g in grants],
     }
+
+
+@app.get("/api/permissions/skills")
+def list_permission_skills(upn: str = Depends(require_upn)):
+    return {"skills": [row.to_payload() for row in skills_repo.list_permission_skills(upn)]}
+
+
+def _skill_dependencies(name: str, upn: str) -> dict:
+    import yaml
+
+    acl_mod.assert_can_manage_permissions(upn, name)
+    dependencies = []
+    dependents = []
+    hidden = 0
+    found = False
+    try:
+        documents = store.dependency_documents()
+        scanned = {(item[0], item[1]) for item in documents}
+        if not skills_repo.catalog_skill_scopes().issubset(scanned):
+            raise ValueError("Registered skill content is missing.")
+        for source, owner, content in documents:
+            match = re.match(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", content, re.DOTALL)
+            if not match:
+                raise ValueError("Missing frontmatter.")
+            frontmatter = yaml.safe_load(match.group(1))
+            if not isinstance(frontmatter, dict):
+                raise ValueError("Invalid frontmatter.")
+            metadata = frontmatter.get("metadata", {})
+            if not isinstance(metadata, dict):
+                raise ValueError("Invalid metadata.")
+            children = metadata.get("children", [])
+            if not isinstance(children, list) or any(not isinstance(child, str) or safe_skill_name(child) != child for child in children):
+                raise ValueError("Invalid children.")
+            if source == name and owner is None:
+                dependencies = list(dict.fromkeys(children))
+                found = True
+            if name not in children or (source == name and owner is None):
+                continue
+            row = skills_repo.get_skill(source, owner)
+            visible = bool(row and (row.created_by == upn or (owner is None and acl_mod.can_access(upn, source))))
+            if visible:
+                dependents.append({"name": source, "can_modify": owner is None and acl_mod.can_modify(upn, source), "path": [source, name]})
+            else:
+                hidden += 1
+        if not found:
+            raise ValueError("Target content is missing.")
+    except Exception as exc:
+        log_exception("skills.dependencies.failed", exc, skill_name=name)
+        raise HTTPException(status_code=503, detail="Dependency check is incomplete. Deletion is unavailable.") from exc
+    return {"skill_name": name, "dependencies": dependencies, "dependents": dependents, "hidden_dependents": hidden, "can_delete": not dependents and not hidden}
+
+
+@app.get("/api/skills/{name}/dependencies")
+def skill_dependencies(name: str, upn: str = Depends(require_upn)):
+    return _skill_dependencies(name, upn)
+
+
+class DeleteSkillRequest(BaseModel):
+    confirm_name: str
+
+
+@app.delete("/api/skills/{name}")
+def delete_managed_skill(name: str, req: DeleteSkillRequest, upn: str = Depends(require_upn)):
+    with _skill_mutation_lock:
+        return _delete_managed_skill(name, req, upn)
+
+
+def _delete_managed_skill(name: str, req: DeleteSkillRequest, upn: str):
+    from .skills_index import get_skills_index
+
+    acl_mod.assert_can_manage_permissions(upn, name)
+    if req.confirm_name != name:
+        raise HTTPException(status_code=400, detail="Enter the exact skill name to confirm deletion.")
+    dependencies = _skill_dependencies(name, upn)
+    if not dependencies["can_delete"]:
+        raise HTTPException(status_code=409, detail={"message": "Other skills still depend on this skill.", **dependencies})
+    try:
+        version = store.backup_for_delete(name, upn)
+    except Exception as exc:
+        log_exception("skills.delete.backup_failed", exc, skill_name=name)
+        raise HTTPException(status_code=503, detail="Final backup failed. Nothing was deleted. Check history storage configuration.") from exc
+    dependencies = _skill_dependencies(name, upn)
+    if not dependencies["can_delete"]:
+        raise HTTPException(status_code=409, detail={"message": "Dependencies changed during backup. Nothing was deleted.", **dependencies})
+    if store.load_skill(name).version_hash != version:
+        raise HTTPException(status_code=409, detail="Skill changed after backup; reload before deleting.")
+    try:
+        store.delete_skill(name)
+    except Exception as exc:
+        log_exception("skills.delete.blob_failed", exc, skill_name=name)
+        store._index = None
+        store._expires_at = None
+        acl_mod.get_cache().invalidate(None)
+        get_skills_index().invalidate()
+        raise HTTPException(status_code=503, detail="Blob deletion failed and may be partial. SQL registration was retained; contact the administrator.") from exc
+    try:
+        skills_repo.delete_skill(name)
+    except Exception as exc:
+        log_exception("skills.delete.sql_failed", exc, skill_name=name)
+        raise HTTPException(status_code=503, detail="Live files were deleted, but SQL cleanup failed. The final backup was retained; contact the administrator.") from exc
+    finally:
+        acl_mod.get_cache().invalidate(None)
+        get_skills_index().invalidate()
+    log_event("skills.delete.done", skill_name=name, user_upn=upn)
+    return {"deleted": True, "skill_name": name}
+
+
+@app.get("/api/permissions/principals")
+def list_permission_principals(q: str = "", principal_type: str = "", upn: str = Depends(require_upn)):
+    if principal_type not in {"", "E", "X"} or len(q) > 256:
+        raise HTTPException(status_code=400, detail="Invalid principal search.")
+    if not skills_repo.list_permission_skills(upn):
+        raise HTTPException(status_code=403, detail="No skills available for permission management.")
+    try:
+        return {"principals": skills_repo.list_database_principals(q.strip(), principal_type)}
+    except Exception as exc:
+        log_exception("permissions.principals.failed", exc, user_upn=upn)
+        raise HTTPException(status_code=503, detail="SQL principal search is unavailable. Check database metadata permissions.") from exc
 
 
 class VisibilityRequest(BaseModel):
@@ -4822,6 +4966,7 @@ def _propagate_visibility_to_children(
         if not _is_internal_skill(child):
             continue
         try:
+            acl_mod.assert_can_manage_permissions(upn, child)
             skills_repo.set_skill_visibility(child, is_public)
             if not is_public:
                 # A private child with no grant is reachable by nobody at all.
@@ -4842,7 +4987,7 @@ def _propagate_visibility_to_children(
 
 @app.patch("/api/skills/{name}/visibility")
 def set_skill_visibility(name: str, req: VisibilityRequest, upn: str = Depends(require_upn)):
-    acl_mod.assert_can_access(upn, name)
+    acl_mod.assert_can_manage_permissions(upn, name)
     row = skills_repo.get_skill(name)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
@@ -4876,14 +5021,31 @@ def set_skill_visibility(name: str, req: VisibilityRequest, upn: str = Depends(r
 class GrantRequest(BaseModel):
     user_upn: str
     expires_at: str | None = None
+    principal_type: str | None = None
 
 
 @app.post("/api/skills/{name}/grants")
 def add_skill_grant(name: str, req: GrantRequest, upn: str = Depends(require_upn)):
-    acl_mod.assert_can_access(upn, name)
-    target = (req.user_upn or "").strip().lower()
-    if not target:
+    acl_mod.assert_can_manage_permissions(upn, name)
+    target = (req.user_upn or "").strip()
+    if not target or len(target) > 256:
         raise HTTPException(status_code=400, detail="user_upn required")
+    if req.principal_type is not None:
+        if req.principal_type not in {"E", "X"}:
+            raise HTTPException(status_code=400, detail="Invalid principal type.")
+        try:
+            principal = skills_repo.get_database_principal(target)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="SQL principal validation is unavailable.") from exc
+        if not principal or principal["type"] != req.principal_type:
+            raise HTTPException(status_code=400, detail="Select an existing SQL external principal.")
+        target = principal["name"]
+        if req.principal_type == "X" and (not target.isascii() or len(target) > 128):
+            raise HTTPException(status_code=400, detail="Group names must be ASCII and at most 128 characters.")
+        if req.principal_type == "E" and "@" in target:
+            target = target.lower()
+    elif "@" in target:
+        target = target.lower()
     expires_dt = None
     if req.expires_at:
         from datetime import datetime as _dt
@@ -4898,11 +5060,11 @@ def add_skill_grant(name: str, req: GrantRequest, upn: str = Depends(require_upn
 
 @app.delete("/api/skills/{name}/grants/{user_upn}")
 def remove_skill_grant(name: str, user_upn: str, upn: str = Depends(require_upn)):
-    acl_mod.assert_can_access(upn, name)
-    target = (user_upn or "").strip().lower()
+    acl_mod.assert_can_manage_permissions(upn, name)
+    target = (user_upn or "").strip()
     if not target:
         raise HTTPException(status_code=400, detail="user_upn required")
-    if target == upn:
+    if target.lower() == upn.lower():
         # Refuse to remove the last grant (caller would orphan themselves).
         row = skills_repo.get_skill(name)
         remaining = [g for g in skills_repo.list_grants(name) if g.user_upn != target]

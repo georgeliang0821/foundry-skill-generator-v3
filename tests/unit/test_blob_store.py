@@ -378,7 +378,10 @@ class _FakeBlobContainer:
     def list_blobs(self, name_starts_with: str = "", include=None):
         return [type("_B", (), {"name": n, "etag": "e", "metadata": {}})() for n in sorted(self.blobs) if n.startswith(name_starts_with)]
 
-    def delete_blob(self, name: str) -> None:
+    def delete_blob(self, name: str, **kwargs) -> None:
+        if name not in self.blobs:
+            from azure.core.exceptions import ResourceNotFoundError
+            raise ResourceNotFoundError("Missing")
         del self.blobs[name]
 
     def get_blob_client(self, name: str):
@@ -409,6 +412,9 @@ class _FakeBlobContainer:
                 return self
 
             def readall(self) -> bytes:
+                if name not in container.blobs:
+                    from azure.core.exceptions import ResourceNotFoundError
+                    raise ResourceNotFoundError("Missing")
                 return container.blobs[name]
 
         return _Client()
@@ -520,6 +526,41 @@ def _history_store(live, history):
     store.history_container = "skill-history"
     store.service = type("_Service", (), {"get_container_client": lambda self, name: history if name == "skill-history" else live})()
     return store
+
+
+def test_delete_backup_captures_final_package_and_keeps_history() -> None:
+    original = {"skills/demo/SKILL.md": b"---\nname: demo\n---\n", "skills/demo/assets/a.txt": b"data"}
+    live, history = _FakeBlobContainer(original), _FakeBlobContainer({})
+    store = _history_store(live, history)
+    store.backup_for_delete("demo", "owner@example.com")
+    manifest_path = next(path for path in history.blobs if path.endswith("/manifest.json"))
+    manifest = json.loads(history.blobs[manifest_path])
+    assert manifest["operation"] == "delete"
+    assert manifest["captured_by"] == "owner@example.com"
+    store.delete_skill("demo")
+    assert not live.blobs
+    assert history.blobs[manifest_path]
+    assert any(path.endswith("files/assets/a.txt") for path in history.blobs)
+
+
+def test_delete_backup_requires_history_container() -> None:
+    store = _azure_store(_FakeBlobContainer({}))
+    store.history_container = ""
+    with pytest.raises(SkillBackupError):
+        store.backup_for_delete("demo", "owner@example.com")
+
+
+def test_delete_propagates_non_missing_blob_errors(monkeypatch) -> None:
+    container = _FakeBlobContainer({"skills/demo/SKILL.md": b"content"})
+
+    def denied(*args, **kwargs):
+        from azure.core.exceptions import HttpResponseError
+        raise HttpResponseError("Forbidden")
+
+    monkeypatch.setattr(container, "delete_blob", denied)
+    from azure.core.exceptions import HttpResponseError
+    with pytest.raises(HttpResponseError):
+        _azure_store(container).delete_skill("demo")
 
 
 @pytest.mark.parametrize("fail_manifest", [False, True])
@@ -713,13 +754,13 @@ class _FakeHnsContainer(_FakeBlobContainer):
             if n.startswith(name_starts_with)
         ]
 
-    def delete_blob(self, name: str) -> None:
+    def delete_blob(self, name: str, **kwargs) -> None:
         if name in self.dirs:
             if any(n.startswith(f"{name}/") for n in [*self.blobs, *self.dirs]):
                 raise RuntimeError("DirectoryIsNotEmpty")
             self.dirs.remove(name)
             return
-        del self.blobs[name]
+        super().delete_blob(name, **kwargs)
 
     def get_blob_client(self, name: str):
         client = super().get_blob_client(name)

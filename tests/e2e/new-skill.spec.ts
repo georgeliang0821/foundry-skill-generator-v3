@@ -37,6 +37,5 @@ test("draft card prefills the name from the proposed frontmatter", async ({ page
   // arrives, so it must read the name off the proposed draft itself.
   await expect(page.getByTestId("draft-name-input")).toHaveValue("e2e-calendar-skill");
 
-  const toggle = await page.getByTestId("draft-public-toggle").boundingBox();
-  expect(toggle!.width).toBeLessThan(40);
+  await expect(page.getByTestId("draft-public-toggle")).toHaveCount(0);
 });

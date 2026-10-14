@@ -122,7 +122,7 @@ sequenceDiagram
 - **寫入前的關卡**（依序，任一失敗就不寫）：既有 skill 的建立者權限（改名同時檢查來源，NEW 同名覆寫也適用）→ topology 驗證 → skill 資產檢查（見 [04-agent-mechanism.md 第 7.6 節](04-agent-mechanism.md#76-skill-資產assetsreferences)）→ `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則；有資產時含 F2/F3）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)）→ EAA MCP `lint_skill_package`（見 [2.3](#23-eaa-skill-lint)）。
 - **寫入順序**：完成關卡與候選版號驗證 → 選用的覆寫前備份 → `SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ skill 資產（把 session 的完整集合寫到 `skills/<name>/assets/`、`references/`，並移除該資料夾內不在集合裡的檔案）→ script 型才有 `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
 - **覆寫前備份（選用）**：設定 `AZURE_BLOB_HISTORY_CONTAINER` 後，共用 `save_skill()` 在任何正式檔案寫入前，先讀取目的地的舊套件，以來源檔案的 ETag 做條件式讀取，將原始 bytes 寫到獨立歷史容器。一般 session 與鄰近 skill 儲存都帶入已驗證登入者；首次建立與只能建立的改名目的地不備份。正式覆寫仍使用舊 `SKILL.md` 的 ETag 作條件，來源變更回 409；備份讀寫失敗回 503，不寫正式內容。未設定時維持一般儲存流程。
-- **歷史格式與範圍**：路徑為 `<skill-name>/<UTC-timestamp>_<revision-id>/files/<relative-path>`，時間取自 manifest 的 `captured_at`，格式為 `YYYYMMDDTHHMMSSZ`，例如 `20261014T010954Z`；`revision-id` 是系統產生的完整 UUID，同一秒的多次備份仍各有獨立目錄。來源 store ID 與實際 Blob 路徑保存在 manifest，供追查來源；歷史容器可按環境分開設定。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者、自然語言 `change_summary`，以及各檔案路徑、長度與 SHA256；不推定歷史作者。`change_summary` 描述此次嘗試儲存相對於快照舊套件的修改，不是快照內容摘要或儲存成功證明。Agent 在提案中以使用者語言說明實際變更，有對話依據時才融合修改原因，不附文字 diff。主 session 累積已接受而尚未儲存成功的說明，成功後清空；手動替換正文或 undo 清除可能失效的說明。鄰近 skill 沿選定版本到已儲存版本的來源鏈收集說明，切回其他分支時記錄版本切換。手動儲存 API 可帶 `change_summary`；沒有可信說明時留空，不額外呼叫模型推測。manifest 是稽核資料，不加入 skill 指令。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈，刪除或改名不移除歷史，也不額外建立快照。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
+- **歷史格式與範圍**：路徑為 `<skill-name>/<UTC-timestamp>_<revision-id>/files/<relative-path>`，時間取自 manifest 的 `captured_at`，格式為 `YYYYMMDDTHHMMSSZ`，例如 `20261014T010954Z`；`revision-id` 是系統產生的完整 UUID，同一秒的多次備份仍各有獨立目錄。來源 store ID 與實際 Blob 路徑保存在 manifest，供追查來源；歷史容器可按環境分開設定。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者、自然語言 `change_summary`，以及各檔案路徑、長度與 SHA256；不推定歷史作者。`change_summary` 描述此次嘗試儲存相對於快照舊套件的修改，不是快照內容摘要或儲存成功證明。Agent 在提案中以使用者語言說明實際變更，有對話依據時才融合修改原因，不附文字 diff。主 session 累積已接受而尚未儲存成功的說明，成功後清空；手動替換正文或 undo 清除可能失效的說明。鄰近 skill 沿選定版本到已儲存版本的來源鏈收集說明，切回其他分支時記錄版本切換。手動儲存 API 可帶 `change_summary`；沒有可信說明時留空，不額外呼叫模型推測。manifest 是稽核資料，不加入 skill 指令。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈；刪除或改名不移除歷史，管理面板刪除另要求最後版本快照，改名不額外建立快照。刪除快照標記 `operation: delete`、`change_summary: Before deletion`，不增加內容版號，`from_version` 與 `to_version` 均為被刪套件的版號。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
 - **new vs modify**：new skill 首次儲存是 INSERT（同時寫 `created_by` / `created_at` / `updated_at`）；modify 既有 skill 是覆寫內容的 UPDATE。新建與改名目的地的 Blob 使用只能建立、不可覆寫的條件式寫入，名稱被其他寫入占用時回 409；只有 Blob、沒有 SQL metadata 的名稱也不能被認領。
 - **upsert 行為**：`upsert_skill` 是 `MERGE dbo.skills`，比對鍵是 `skill_key`：不存在 -> INSERT `(skill_name, owner_upn, created_by, is_public, enabled, is_internal)`；已存在 -> UPDATE `is_public` / `enabled` / 指定的 `is_internal`，並**設 `updated_at = SYSUTCDATETIME()`**。`created_by` 只在 INSERT 填入，UPDATE 不修改，包括空白值；改名的新列沿用來源建立者。
 - **絕不寫入計算欄位**：`skill_key` / `blob_path` / `blob_prefix` 都是 PERSISTED computed column，由 SQL 自行產生；應用程式若嘗試寫入會直接被 SQL Server 拒絕。
@@ -146,9 +146,20 @@ flowchart LR
 
 可見性與內容分開處理，只由 `PATCH /api/skills/{name}/visibility` 寫入：
 
-- **前端兩段式**：draft 卡片上的「Public」勾選框不會隨儲存送出。使用者勾選並在確認對話框按下確定後，前端先以**私有**接受 draft，成功後才另外呼叫 PATCH 公開。順序是 fail-safe 的——PATCH 失敗時 skill 仍是私有，前端會提示可從 Skill access 重試。
+- **獨立管理入口**：生成卡片不提供 Public 選項，也不在接受 draft 後自動公開；新 Skill 預設不公開並補作者 grant。頁首「Manage Skills」不依賴 session 或 Modify 選單，儲存後的綁定狀態列也提供預選該 Skill 的入口。公開切換需確認，失敗時保留原設定。User／Group 選擇與授權操作始終顯示，不受 Public 勾選影響；公開不需要個別 grant，但仍可新增或撤銷，改回不公開時保留的 grants 決定使用權。
+- **管理範圍**：`GET /api/permissions/skills` 只查 SQL metadata，列出 `created_by` 等於驗證登入者、且 `owner_upn IS NULL` 的全域 Skill，包含已停用項目，不依賴使用 grant 或 Blob 讀取。授權清單、新增、撤銷與可見性 API 均以 `assert_can_manage_permissions` 再檢查相同條件；公開或有使用 grant 不提供管理權，空白建立者與私人命名空間 Skill 拒絕管理。
+- **SQL 授權對象**：`GET /api/permissions/principals` 供具有可管理 Skill 的登入者搜尋 `sys.database_principals` 中的 `E`／`X`，依名稱與類型篩選、最多 100 筆；Generator SP 需具備目標 principal 的 metadata 可見性。`E` 對應 User，選項提示其包含 SQL external users 與應用程式身分，不能視為完整人員名錄；`X` 對應 Group（Entra Security Group）。選取後 POST grant 帶 `principal_type`，後端重新查證 principal 存在與類型，再將個人 UPN 小寫化，群組則保留 SQL 原始名稱。群組名稱限 ASCII、最多 128 字元；不建 SQL user、不展開成員、不改 schema，也不呼叫 Graph。SQL 查詢失敗回 503，不放行未驗證對象；本機 store 沒有 Azure principal 名錄。
 - **降回私有時補 grant**：改成 `is_public = 0` 會同時補一筆呼叫者的 grant，否則作者會失去自己 skill 的存取權。
-- **internal children 跟隨 parent**：PATCH 會讀取 Blob 上該 skill 的 `children`，只對**不在 host catalog 的 internal child** 套用同一個可見性（公開時一起公開、降回私有時一起降並補 grant）。已在 catalog 的 child 屬於所有人，不由這支 parent 重新界定範圍。單一 child 失敗不會中斷其他 child，結果會回在 `children` / `failed_children`。
+- **internal children 跟隨 parent**：PATCH 會讀取 Blob 上該 skill 的 `children`，只對**同一建立者、全域且不在 host catalog 的 internal child** 套用同一個可見性（公開時一起公開、降回私有時一起降並補 grant）。已在 catalog 的 child 不由這支 parent 重新界定範圍；他人的或私人命名空間 child 不修改，列入 `failed_children`。單一 child 失敗不會中斷其他 child，結果會回在 `children` / `failed_children`，前端顯示未變更清單。個人／群組 grant 僅作用於選取的 Skill，不自動授權其 children。
+- **群組使用與生效時間**：EAA 的互動讀路徑透過 OBO + SQL `v_my_skills`／RLS 判斷 Security Group 成員資格；群組須已依 EAA Case A2 建立 SQL principal 與 view 權限。Generator 仍以共用 SP 查個人 UPN grants，不因新增群組 grant 就取得登入者的群組使用視角。EAA 新增／撤銷 grant 與公開切換受其 RLS 清單快取 TTL 影響（預設 300 秒），不呼叫 `sync_skills`；Entra 成員變動另有傳播與 token／連線更新時間。
+
+#### 管理刪除與依賴
+
+- `GET /api/skills/{name}/dependencies` 沿用全域建立者管理檢查，直接掃描 live Blob 的全域與 private namespace，不用使用者清單或快取推定沒有引用。SQL 全部 `(skill_name, owner_upn)` 必須有對應內容，frontmatter 與 `metadata.children` 必須可解析，否則回 503、禁止刪除。回應列出本身的依賴與直接引用者的路徑；可修改的 scenario 提供開啟入口，無權查看的引用者只回數量、不回名稱。任何引用者都阻擋刪除，包括停用或 internal skill。
+- `DELETE /api/skills/{name}` 要求 `confirm_name` 與名稱完全相同，UI 另有最後確認。先檢查依賴，再完成最後套件備份，備份後重新檢查建立者、依賴及來源版本，才刪 live Blob；檔案先於 HNS 目錄，目錄由深到淺，檔案 snapshot 一併刪除，只忽略真正的不存在。最後刪除 `dbo.skills`，grants 由 FK cascade 清除，不逐筆刪 grants，也不連帶刪其他 capability。
+- Azure 刪除必須設定 `AZURE_BLOB_HISTORY_CONTAINER`。備份失敗不開始刪除；Blob 失敗保留 SQL 登錄並回報可能部分刪除，SQL 失敗則明確回報 live 已移除但登錄清理失敗，保留最後備份供管理員處理。兩種失敗都不假裝成功，沒有跨 Blob／SQL 交易或自動還原。
+- 刪除不寫入、清空或備份 session。對話、素材、草稿與歷史維持原樣；`GET /api/sessions/{id}/binding` 只計算來源 SQL 是否還存在，前端重新開啟對話時顯示已刪除並停用 Save。既有 `save_skill_dual_write` 每次重新檢查來源建立者與 SQL 登錄，不允許舊對話將已刪來源重新建立。
+- 成功刪除或可能部分刪除後清除本程序的 store index、ACL 與 `SkillsIndex`，前端刷新使用與 Modify 清單及管理選單。一般存檔、鄰近 skill 存檔與刪除共用程序內鎖，適用本機單程序操作；多 worker、多實例與 EAA 等外部寫入沒有共用鎖，不能保證並行修改時的完整依賴一致性。此情況應先由維運協調寫入時段；其他程序與 EAA 的快取依各自 TTL 生效，不宣稱立即同步。
 
 ### 2.3 EAA skill lint
 
@@ -219,7 +230,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `agent.py` | orchestrator 介面：工具 schema（`TOOL_SCHEMAS`）、從 `prompts/11_output_rules.md` 載入 AI 規則（`_load_output_rules`）、把 Foundry 的串流轉成事件 |
 | `state_machine.py` | 五階段轉移表、品質關卡（quality gate）、組裝各階段 system prompt（含 peer skills、變數、研究結果） |
 | `models.py` | Pydantic 資料模型：`Session`、`ChatMessage`、`SkillDraft`、`ResearchBrief`、`PatchRecord`、`TestResult` 等 |
-| `acl.py` | 身分與授權：從請求取出 UPN（email）、`AclCache` 快取讀取授權、FastAPI 相依 `require_upn`；`assert_can_modify` 直接查 SQL 建立者，不使用 grant 快取 |
+| `acl.py` | 身分與授權：從請求取出 UPN（email）、`AclCache` 快取讀取授權、FastAPI 相依 `require_upn`；`assert_can_modify` 直接查 SQL 建立者，`assert_can_manage_permissions` 檢查建立者與全域 scope，兩者不使用 grant 快取 |
 | `auth_store.py` | 登入狀態保存：`LocalAuthStore`（記憶體）與選用的 `AzureBlobAuthStore`（共用 / 多實例） |
 | `session_store.py` | 撰寫 session 的 JSON 持久化（本機檔案，或 `SGV2_SESSION_STORE=blob` 改存 Blob）；以 `PERSIST_CONTEXT` 序列化，skill 資產全文只在這裡寫出 |
 | `blob_store.py` | Azure Blob 版 Skill 儲存與 `SKILL.md` frontmatter 解析（含含冒號 description 的容錯）；script 型 skill 另存 `scripts/<name>.py`，列表以 `has_script` 標示，`SkillFiles.remove_script` 會刪除既有 script；skill 資產的寫入、清掃、讀取（`load_assets`），刪除 skill 時刪整個 prefix；選用的覆寫前完整套件備份與 manifest（獨立歷史容器，不隨 skill 刪除） |
@@ -244,7 +255,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | 資料表 / View | 欄位 | 用途 |
 | --- | --- | --- |
 | `dbo.skills` | `skill_name`, `owner_upn`(NULL=全域), `created_by`(`VARCHAR(256) NULL`), `is_public`, `is_internal`, `enabled`, `created_at`, `updated_at`；**計算欄位** `skill_key`(PK), `blob_path`, `blob_prefix` | Skill 的 metadata、建立者與可見性 |
-| `dbo.user_skill_grants` | `user_upn`, `skill_key`(FK CASCADE), `granted_at`, `granted_by`, `expires_at`；PK = (user_upn, skill_key) | 每位使用者可存取哪些 Skill |
+| `dbo.user_skill_grants` | `user_upn`, `skill_key`(FK CASCADE), `granted_at`, `granted_by`, `expires_at`；PK = (user_upn, skill_key) | 授權主體可使用哪些 Skill；個人填小寫 UPN，Security Group 填 SQL principal 名稱 |
 | `dbo.skill_neighbor_notice` | `id`, `skill_key`, `target_user`, `proposer_upn`, `source_skill_keys_json`, `status`, `created_at`, `updated_at`, `closed_at`, `modify_session_id` | 相鄰關係通知；`open` / `accepted` / `dismissed`，未結案的目標與提議者唯一，不存 description 或 patch，無刪除串連 FK |
 | `dbo.v_my_skills` | 上述兩者的 join | 「目前登入者看得到的 skill」的官方語意定義 |
 
@@ -266,8 +277,8 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 - `SKILL.md` **全文存在 Blob**，SQL 只存可查詢的 metadata 與權限。**schema v2 已移除 `description` 與 `version` 欄位**，description 的唯一真實來源是 Blob 上 `SKILL.md` 的 frontmatter。
 - 可見性語意 = `enabled = 1 AND (有未過期的 grant OR is_public = 1)`。
 - **內容修改語意** = `enabled = 1 AND created_by = 登入者的小寫 email`。建立者沒有使用 grant 仍能開啟 MODIFY 與儲存；非建立者即使有 grant 或 skill 為公開，也不能修改內容。空白建立者拒絕修改，不自動從 `owner_upn` 或 grants 推定。`owner_upn` 決定 scope 與計算欄位，不能替代建立者。
-- **連線身分 ≠ 寫入的使用者**：`backend/db.py` 以 `AZURE_*` service principal（`ActiveDirectoryServicePrincipal`）連線，只決定能不能讀寫資料表。`dbo.skills.created_by` 由後端的 `require_upn` 取得已驗證登入者後填入，不能由前端指定，也不使用 SQL `CURRENT_USER` 或連線身分的預設值。`dbo.user_skill_grants` 的 `user_upn` / `granted_by` 同樣以應用程式使用者的 email 參數帶入（見 [6](#6-登入與-token-流程)）。
-- **為什麼應用程式不直接查 `v_my_skills`**：本應用以**單一 service principal**（`ActiveDirectoryServicePrincipal`）連線 SQL，所有使用者共用同一個 DB 身分，因此 `SUSER_SNAME()` 命中 RLS 的 bypass 分支，RLS 不會替我們做逐人過濾；而 `v_my_skills` 也沒有 `user_upn` 欄位可供外部帶入條件。`skills_repo` 因此在 base table 上**複刻**該 view 的 WHERE 條件，並顯式帶入 `g.user_upn = ?`。改動 view 的語意時，`skills_repo.list_skills_for_user` 必須同步跟著改。
+- **連線身分 ≠ 寫入的使用者**：`backend/db.py` 以 `AZURE_*` service principal（`ActiveDirectoryServicePrincipal`）連線，只決定能不能讀寫資料表。`dbo.skills.created_by` 由後端的 `require_upn` 取得已驗證登入者後填入，不能由前端指定，也不使用 SQL `CURRENT_USER` 或連線身分的預設值。grant 的 `granted_by` 同樣取驗證登入者；`user_upn` 則是選取的授權對象（個人 UPN 或 SQL 群組主體名稱，見上方可見性與 [6](#6-登入與-token-流程)）。
+- **為什麼應用程式不直接查 `v_my_skills`**：本應用以**單一 service principal**（`ActiveDirectoryServicePrincipal`）連線 SQL，所有使用者共用同一個 DB 身分，因此 RLS 不會替我們做逐人過濾；而 `v_my_skills` 也沒有 `user_upn` 欄位可供外部帶入條件。`skills_repo` 在 base table 上顯式帶入 `g.user_upn = ?`，目前僅支援個人直接 grant 或公開設定，不解析登入者群組；EAA OBO 讀路徑的群組 grant 由 SQL RLS 判斷。Generator 的授權管理能力與使用清單的成員視角是兩條不同路徑。
 - **`skills/` 這個前綴被寫死在計算欄位公式裡**。應用程式的 `blob_store.BLOB_ROOT` 必須與其一致，否則 SQL 的 `blob_path` 會指向應用程式從未寫入的位置，而且**不會有任何錯誤**。因此前綴不提供設定；`AZURE_BLOB_CONTAINER` 若以 `container/prefix` 形式帶入 `skills` 以外的前綴，服務會在啟動時直接拋錯。
 - `is_internal` 是**可發現性**（是否投影給宿主的 `list_skills`），**不是權限**；權限一律看 grant 與 `is_public`。存 scenario skill 時，`save_skill_dual_write()` **只會**把 `PrepareBrief.delegation` 宣告的 child（真正被委派工作的能力層技能）以 `upsert_skill(child, is_internal=True)` 標為內部。`metadata.children` 本身是**依賴白名單**，還包含 `html-ppt` 這類通用技能；把它們標成內部會讓它們從**所有人**的 `list_skills` 消失，因此不在標記範圍內。孤兒提示只在「該 child 離開白名單**且**目前 `is_internal = 1`」時觸發；選 `make_capability` 會改回 `is_internal=False`。`upsert_skill(is_internal=None)` 代表「不動既有值」，新列則取 schema 預設 `0`。
 - 刪除 `dbo.skills` 的一列時，`user_skill_grants` 的相關授權因 FK CASCADE 一併清除。

@@ -164,6 +164,7 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
 
     monkeypatch.setattr(skills_repo, "list_skills_for_user", _list_skills_for_user)
     monkeypatch.setattr(skills_repo, "catalog_skill_names", lambda: {meta["skill_name"] for meta in state.skills.values()})
+    monkeypatch.setattr(skills_repo, "catalog_skill_scopes", lambda: {(meta["skill_name"], meta["owner_upn"]) for meta in state.skills.values()})
     monkeypatch.setattr(
         skills_repo, "list_skills_created_by",
         lambda upn: [
@@ -172,6 +173,13 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
         ],
     )
     monkeypatch.setattr(skills_repo, "get_skill", _get_skill)
+    monkeypatch.setattr(
+        skills_repo, "list_permission_skills",
+        lambda upn: [
+            _row(key, meta) for key, meta in sorted(state.skills.items())
+            if upn.strip() and meta["owner_upn"] is None and meta.get("created_by") == upn.strip().lower()
+        ],
+    )
     monkeypatch.setattr(skills_repo, "get_skill_by_key", lambda key: _row(key, state.skills[key]) if key in state.skills else None)
     monkeypatch.setattr(skills_repo, "upsert_skill", state.upsert_skill)
     monkeypatch.setattr(skills_repo, "set_skill_visibility", state.set_skill_visibility)

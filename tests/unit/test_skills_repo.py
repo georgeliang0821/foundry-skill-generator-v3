@@ -75,6 +75,62 @@ def test_catalog_skill_names_sql_is_not_acl_filtered(fake_db) -> None:
     assert seen == [("SELECT DISTINCT skill_name FROM dbo.skills", ())]
 
 
+def test_catalog_skill_scopes_sql_preserves_private_namespace(fake_db):
+    seen = []
+    fake_db["execute"] = lambda sql, params: seen.append((sql, params)) or [("same-name", None), ("same-name", "other@x")]
+    assert skills_repo.catalog_skill_scopes() == {("same-name", None), ("same-name", "other@x")}
+    assert seen == [("SELECT skill_name, owner_upn FROM dbo.skills", ())]
+
+
+def test_catalog_skill_scopes_local_includes_disabled_private_skills(local_repo):
+    local_repo.upsert_skill("global")
+    local_repo.upsert_skill("private", owner_upn="other@x", enabled=False)
+    assert skills_repo.catalog_skill_scopes() == {("global", None), ("private", "other@x")}
+
+
+def test_database_principal_search_is_parameterized_and_preserves_names(fake_db):
+    captured = {}
+
+    def behavior(sql, params):
+        captured.update(sql=sql, params=params)
+        return [("EAA", "X")]
+
+    fake_db["execute"] = behavior
+    query = "E%' OR 1=1 --"
+    assert skills_repo.list_database_principals(query, "X") == [{"name": "EAA", "type": "X"}]
+    assert captured["params"] == ("X", "X", query)
+    assert query not in captured["sql"]
+    assert "TOP (100)" in captured["sql"]
+    assert "type IN ('E', 'X')" in captured["sql"]
+    assert skills_repo.get_database_principal("EAA") == {"name": "EAA", "type": "X"}
+    assert captured["params"] == ("EAA",)
+
+
+def test_permission_skills_sql_filters_creator_and_global_scope(fake_db):
+    captured = {}
+
+    def behavior(sql, params):
+        captured.update(sql=sql, params=params)
+        return []
+
+    fake_db["execute"] = behavior
+    assert skills_repo.list_permission_skills(" AUTHOR@X ") == []
+    assert captured["params"] == ("author@x",)
+    assert "s.owner_upn IS NULL" in captured["sql"]
+    assert "s.created_by = ?" in captured["sql"]
+    assert "s.enabled = 1" not in captured["sql"]
+
+
+def test_permission_skills_local_includes_disabled_but_not_private(local_repo):
+    skills_repo.upsert_skill("mine", created_by="author@x", enabled=False)
+    skills_repo.upsert_skill("private", created_by="author@x", owner_upn="author@x")
+    skills_repo.upsert_skill("others", created_by="other@x", is_public=True)
+    assert [row.skill_name for row in skills_repo.list_permission_skills("author@x")] == ["mine"]
+    assert skills_repo.list_permission_skills("") == []
+    assert skills_repo.list_database_principals() == []
+    assert skills_repo.get_database_principal("EAA") is None
+
+
 def test_catalog_skill_names_local_includes_hidden_disabled_and_deduplicates(local_repo) -> None:
     local_repo.upsert_skill("hidden-skill")
     local_repo.upsert_skill("hidden-skill", owner_upn="other@example.com")

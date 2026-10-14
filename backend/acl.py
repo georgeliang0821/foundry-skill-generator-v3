@@ -189,3 +189,17 @@ def assert_can_modify(user_upn: str, skill_name: str) -> None:
 
 def visible_skill_names(user_upn: str) -> frozenset[str]:
     return _cache.get_or_load(user_upn)
+
+
+def assert_can_manage_permissions(user_upn: str, skill_name: str) -> None:
+    if not user_upn:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    row = skills_repo.get_skill(skill_name)
+    if not (
+        row and row.owner_upn is None and row.created_by
+        and row.created_by.strip().lower() == user_upn.strip().lower()
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the creator of a global skill can manage its permissions.",
+        )

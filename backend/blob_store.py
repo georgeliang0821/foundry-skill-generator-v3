@@ -289,6 +289,8 @@ class SkillStore(Protocol):
     def load_skill(self, name: str) -> SkillFiles: ...
     def save_skill(self, files: SkillFiles, expected_version_hash: str = "", *, create_only: bool = False, captured_by: str = "", change_summary: str = "") -> SkillFiles: ...
     def delete_skill(self, name: str) -> None: ...
+    def dependency_documents(self) -> list[tuple[str, str | None, str]]: ...
+    def backup_for_delete(self, name: str, captured_by: str) -> str: ...
     def has_script(self, name: str) -> bool: ...
     def load_assets(self, name: str) -> dict[str, bytes]: ...
 
@@ -380,6 +382,21 @@ class LocalSkillStore:
         existed = self._skills.pop(safe, None) is not None
         self._assets.pop(safe, None)
         log_event("skill_store.local.delete.done", skill_name=safe, existed=existed)
+
+    def dependency_documents(self) -> list[tuple[str, str | None, str]]:
+        with self._lock:
+            return [(name, None, files.skill_md) for name, files in self._skills.items()]
+
+    def backup_for_delete(self, name: str, captured_by: str) -> str:
+        current = self.load_skill(name)
+        contents = self.load_assets(name)
+        contents["SKILL.md"] = current.skill_md.encode("utf-8")
+        if current.script is not None:
+            contents[script_relpath_of(name)] = current.script.encode("utf-8")
+        manifest = _backup_manifest(self.id, blob_path_of(name), name, current.version_hash, captured_by, contents, "Before deletion", current.skill_md)
+        manifest["operation"] = "delete"
+        self.history[manifest["revision_id"]] = {"manifest": manifest, "files": contents}
+        return current.version_hash
 
     def has_script(self, name: str) -> bool:
         current = self._skills.get(safe_skill_name(name))
@@ -593,7 +610,7 @@ class AzureBlobSkillStore:
             container.delete_blob(blob_name)
         log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
 
-    def _backup_skill(self, safe: str, expected_version_hash: str, captured_by: str, change_summary: str = "", target_skill_md: str = "") -> str:
+    def _backup_skill(self, safe: str, expected_version_hash: str, captured_by: str, change_summary: str = "", target_skill_md: str = "", *, operation: str = "save") -> str:
         from azure.core import MatchConditions
         from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
         from azure.storage.blob import ContentSettings
@@ -628,6 +645,7 @@ class AzureBlobSkillStore:
             raise VersionConflict("Skill files changed during backup; reload before saving.") from exc
 
         manifest = _backup_manifest(self.id, skill_path, safe, source_etag, captured_by, contents, change_summary, target_skill_md)
+        manifest["operation"] = operation
         captured_at = datetime.fromisoformat(manifest["captured_at"])
         timestamp = captured_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         revision_prefix = f"{safe}/{timestamp}_{manifest['revision_id']}/"
@@ -728,25 +746,50 @@ class AzureBlobSkillStore:
         )
         return saved
 
+    def dependency_documents(self) -> list[tuple[str, str | None, str]]:
+        documents = []
+        container = self._container()
+        for blob in container.list_blobs(name_starts_with=f"{self.prefix}/" if self.prefix else ""):
+            relative = self._strip_prefix(str(blob.name))
+            if not relative.endswith("/SKILL.md"):
+                continue
+            parts = relative.split("/")
+            if len(parts) == 2:
+                name, owner = parts[0], None
+            elif len(parts) == 4 and parts[0] == "_private":
+                name, owner = parts[2], parts[1]
+            else:
+                raise ValueError("Unrecognized skill namespace; dependency scan incomplete.")
+            content = container.get_blob_client(blob.name).download_blob().readall().decode("utf-8")
+            documents.append((name, owner, content))
+        return documents
+
+    def backup_for_delete(self, name: str, captured_by: str) -> str:
+        if not self.history_container:
+            raise SkillBackupError("Deletion requires AZURE_BLOB_HISTORY_CONTAINER.")
+        current = self.load_skill(name)
+        return self._backup_skill(name, current.version_hash, captured_by, "Before deletion", current.skill_md, operation="delete")
+
     def delete_skill(self, name: str) -> None:
+        from azure.core.exceptions import ResourceNotFoundError
+
         started = now_ms()
         safe = safe_skill_name(name)
         container = self._container()
         files, dirs = self._list_entries(self._skill_dir(safe))
         # HNS refuses to delete a non-empty directory, so files go first, then dirs deepest-first.
-        if dirs:
-            dirs = sorted(dirs, key=lambda d: d.count("/"), reverse=True) + [self._skill_root(safe)]
+        dirs = sorted(set(dirs), key=lambda path: path.count("/"), reverse=True) + [self._skill_root(safe)]
         paths = files + dirs
         for path in paths:
             try:
-                container.delete_blob(path)
+                container.delete_blob(path, delete_snapshots="include")
                 log_event(
                     "skill_store.azure.delete.done",
                     skill_name=safe,
                     skill_path=path,
                     duration_ms=elapsed_ms(started),
                 )
-            except Exception as exc:  # noqa: BLE001 -- missing blob is a no-op.
+            except ResourceNotFoundError as exc:
                 log_event(
                     "skill_store.azure.delete.missing",
                     level="warning",
@@ -799,6 +842,12 @@ class CachedSkillStore:
         self.store.delete_skill(name)
         self._index = None
         self._expires_at = None
+
+    def dependency_documents(self) -> list[tuple[str, str | None, str]]:
+        return self.store.dependency_documents()
+
+    def backup_for_delete(self, name: str, captured_by: str) -> str:
+        return self.store.backup_for_delete(name, captured_by)
 
     def has_script(self, name: str) -> bool:
         return self.store.has_script(name)
