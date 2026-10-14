@@ -1601,6 +1601,18 @@ def build_system_prompt(session: Session) -> str:
         runtime_state,
         _format_remote_skill_state(session),
     ]
+    if stage in {Stage.REFINE, Stage.TEST}:
+        pending_patches = [
+            {
+                "call_id": call.call_id,
+                "target_file": call.args.get("target_file", "SKILL.md"),
+                "change_summary": call.args.get("change_summary") or call.args.get("reason", ""),
+                "status": "awaiting_card_acceptance",
+            }
+            for call in session.pending_tool_calls if call.tool == "propose_patch"
+        ]
+        if pending_patches:
+            parts.append("## Pending Patch Actions\n\n" + json.dumps(pending_patches, ensure_ascii=False))
     if stage == Stage.DONE:
         parts.append(DONE_REENTRY_GUIDANCE)
     if kind is SkillKind.SCENARIO:

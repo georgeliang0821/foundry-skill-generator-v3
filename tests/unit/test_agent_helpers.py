@@ -39,6 +39,14 @@ def test_output_rules_forbid_named_handoffs_and_require_scope_only() -> None:
     assert "-> use <new-skill-name>" not in text
 
 
+def test_output_rules_use_the_existing_patch_card_for_acceptance() -> None:
+    text = "\n".join(FOUNDRY_OUTPUT_RULES)
+    assert "awaiting_card_acceptance" in text
+    assert "Chat agreement or an `ask_user_input` answer is not a patch tool result" in text
+    assert "unless an existing actionable tool card already provides that decision" in text
+    assert "Do not emit a separate `ask_user_input` for the same acceptance" in text
+
+
 def test_load_output_rules_raises_when_the_prompt_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.agent.load_prompt", lambda _name: "<!-- Missing prompt -->")
 

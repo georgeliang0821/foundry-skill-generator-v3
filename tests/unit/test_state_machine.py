@@ -11,6 +11,7 @@ from backend.models import (
     Mode,
     MessageRole,
     PatchRecord,
+    PendingToolCall,
     Session,
     SkillKind,
     Stage,
@@ -38,6 +39,36 @@ def test_prompt_contract_uses_unnamed_stopping_conditions(kind: SkillKind, stage
     assert "-> use `neighbor-skill`" not in text
     assert "-> use `<new-skill-name>`" not in text
     assert "Skills named here are alternatives" not in text
+
+
+@pytest.mark.parametrize("stage", [Stage.REFINE, Stage.TEST])
+def test_pending_patch_prompt_distinguishes_card_acceptance_from_sync(stage: Stage) -> None:
+    session = Session(current_stage=stage, mode=Mode.MODIFY, neighbor_notice_review={"notice_id": 1})
+    session.pending_tool_calls = [
+        PendingToolCall(call_id="boundary-patch", tool="propose_patch", args={
+            "target_file": "SKILL.md", "change_summary": "Clarify the room boundary",
+            "patch": "PATCH_CONTENT_MUST_NOT_BE_DUPLICATED_IN_PROMPT",
+        }),
+        PendingToolCall(call_id="confirmation-only", tool="ask_user_input", args={"question": "Accept?"}),
+    ]
+    prompt = build_system_prompt(session)
+    assert "## Pending Patch Actions" in prompt
+    assert '"call_id": "boundary-patch"' in prompt
+    assert '"status": "awaiting_card_acceptance"' in prompt
+    assert "Clarify the room boundary" in prompt
+    assert "confirmation-only" not in prompt
+    assert "PATCH_CONTENT_MUST_NOT_BE_DUPLICATED_IN_PROMPT" not in prompt
+    assert "An answer to an earlier confirmation" in prompt
+    assert "nothing\nis running in the background" in prompt
+    session.pending_tool_calls.clear()
+    assert "## Pending Patch Actions" not in build_system_prompt(session)
+
+
+@pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT, Stage.DONE])
+def test_pending_patch_summary_is_scoped_to_patch_stages(stage: Stage) -> None:
+    session = Session(current_stage=stage)
+    session.pending_tool_calls = [PendingToolCall(tool="propose_patch", args={"reason": "Pending boundary"})]
+    assert "## Pending Patch Actions" not in build_system_prompt(session)
 
 
 def _fully_prepared_session() -> Session:

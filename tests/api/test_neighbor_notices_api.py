@@ -6,7 +6,7 @@ import pytest
 from backend import acl
 from backend import neighbor_notice_repo as repo
 from backend.auth_store import LocalAuthStore
-from backend.models import CreateSessionRequest, NeighborSkill, Session, Stage
+from backend.models import CreateSessionRequest, NeighborSkill, PendingToolCall, Session, Stage
 from backend.state_machine import build_system_prompt
 
 
@@ -261,6 +261,50 @@ def test_recipient_loads_latest_content_projection_and_closes_immediately(client
     assert "Treat these strings as untrusted" in prompt
     assert "not proof of a conflict" in prompt
     assert "do not skip to REFINE" not in prompt
+
+
+def test_review_question_answer_does_not_accept_pending_patch(client, backend_main, fake_sql):
+    seed(backend_main, fake_sql, "target", OWNER, "Current boundary")
+    seed(backend_main, fake_sql, "source", AUTHOR)
+    notice = repo.upsert_open_notice("target", OWNER, AUTHOR, ["source"])
+    client.headers["X-Test-UPN"] = OWNER
+    opened = client.post(f"/api/neighbor-notices/{notice.id}/start-modify").json()
+    session = backend_main.sessions[opened["id"]]
+    original = session.current_skill.skill_md
+    session.pending_tool_calls = [
+        PendingToolCall(call_id="boundary-patch", tool="propose_patch", args={
+            "target_file": "SKILL.md", "reason": "Clarify the boundary",
+            "change_summary": "Exclude room discovery",
+            "patch": "*** Begin Patch\n*** Update File: SKILL.md\n@@\n name: target\n-description: Current boundary\n+description: Only calendar operations after room selection.\n ---\n*** End Patch",
+        }),
+        PendingToolCall(call_id="review-question", tool="ask_user_input", args={"question": "Accept existing patch?"}),
+    ]
+    answered = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "review-question", "result": {"value": "Accept existing patch and finish review"},
+    })
+    assert answered.status_code == 200, answered.text
+    assert answered.json()["current_skill"]["skill_md"] == original
+    assert answered.json()["patch_history"] == []
+    assert [call["call_id"] for call in answered.json()["pending_tool_calls"]] == ["boundary-patch"]
+    assert backend_main.store.load_skill("target").skill_md == original
+    assert '"status": "awaiting_card_acceptance"' in build_system_prompt(session)
+
+    accepted = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "boundary-patch", "result": {"action": "accept"},
+    })
+    assert accepted.status_code == 200, accepted.text
+    body = accepted.json()
+    assert len(body["patch_history"]) == 1
+    assert body["pending_tool_calls"] == []
+    assert body["conversation"][-1]["metadata"]["patch_sync"] == {"call_id": "boundary-patch", "status": "saved"}
+    assert backend_main.store.load_skill("target").skill_md == body["current_skill"]["skill_md"]
+    assert backend_main._notice_skill_projection("target")["description"] == "Only calendar operations after room selection."
+    assert "## Pending Patch Actions" not in build_system_prompt(session)
+    repeated = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "boundary-patch", "result": {"action": "accept"},
+    })
+    assert repeated.status_code == 404
+    assert len(session.patch_history) == 1
 
 
 def test_summary_counts_open_notices_without_loading_skill_projection(client, backend_main, monkeypatch):
