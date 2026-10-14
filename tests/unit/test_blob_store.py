@@ -458,6 +458,31 @@ def test_azure_backup_preserves_complete_old_package(summary) -> None:
     assert live.blobs == {"skills/demo/SKILL.md": b"new"}
 
 
+@pytest.mark.parametrize("azure", [False, True])
+@pytest.mark.parametrize("source_version,target_version", [(None, None), ('"1.6"', '"1.6.1"'), ('"1.6.1"', '"1.6.1"'), ("1.10", '"1.10.1"')])
+def test_backup_manifest_records_declared_version_transition(azure, source_version, target_version) -> None:
+    def skill_md(version, body):
+        metadata = f"metadata:\n  version: {version}\n" if version is not None else ""
+        return f"---\nname: demo\ndescription: Demo\n{metadata}---\n{body}"
+
+    original = skill_md(source_version, "Original")
+    replacement = skill_md(target_version, "Changed")
+    if azure:
+        live = _FakeBlobContainer({"skills/demo/SKILL.md": original.encode("utf-8")})
+        history = _FakeBlobContainer({})
+        store = _history_store(live, history)
+    else:
+        store = LocalSkillStore(history_enabled=True)
+        store.save_skill(SkillFiles(name="demo", skill_md=original))
+    store.save_skill(SkillFiles(name="demo", skill_md=replacement))
+    if azure:
+        manifest = json.loads(next(data for path, data in history.blobs.items() if path.endswith("/manifest.json")))
+    else:
+        manifest = next(iter(store.history.values()))["manifest"]
+    assert manifest["from_version"] == (source_version.strip('"') if source_version else None)
+    assert manifest["to_version"] == (target_version.strip('"') if target_version else None)
+
+
 def test_azure_backup_skips_first_creation() -> None:
     live = _FakeBlobContainer({})
     store = _azure_store(live)

@@ -39,11 +39,20 @@ class SkillBackupError(RuntimeError):
     """The pre-overwrite backup failed; live content was not written."""
 
 
-def _backup_manifest(store_id: str, source_path: str, name: str, etag: str, captured_by: str, contents: dict[str, bytes], change_summary: str = "") -> dict:
+def _backup_manifest(store_id: str, source_path: str, name: str, etag: str, captured_by: str, contents: dict[str, bytes], change_summary: str = "", target_skill_md: str = "") -> dict:
+    def version_of(skill_md: str) -> str | None:
+        try:
+            span = _metadata_version_span(skill_md)
+        except ValueError:
+            return None
+        return span[2] if span is not None else None
+
     return {
         "schema_version": 1,
         "revision_id": uuid4().hex,
         "skill_name": name,
+        "from_version": version_of(contents.get("SKILL.md", b"").decode("utf-8", errors="replace")),
+        "to_version": version_of(target_skill_md),
         "source_store": store_id,
         "source_blob_path": source_path,
         "source_etag": etag,
@@ -346,7 +355,7 @@ class LocalSkillStore:
             contents["SKILL.md"] = current.skill_md.encode("utf-8")
             if current.script is not None:
                 contents[script_relpath_of(safe)] = current.script.encode("utf-8")
-            manifest = _backup_manifest(self.id, blob_path_of(safe), safe, current.version_hash, captured_by, contents, change_summary)
+            manifest = _backup_manifest(self.id, blob_path_of(safe), safe, current.version_hash, captured_by, contents, change_summary, files.skill_md)
             self.history[manifest["revision_id"]] = {"manifest": manifest, "files": contents}
         saved = files.model_copy(deep=True)
         saved.name = safe
@@ -584,7 +593,7 @@ class AzureBlobSkillStore:
             container.delete_blob(blob_name)
         log_event("skill_store.azure.save_assets.done", skill_name=safe, written=len(assets), removed=len(stale))
 
-    def _backup_skill(self, safe: str, expected_version_hash: str, captured_by: str, change_summary: str = "") -> str:
+    def _backup_skill(self, safe: str, expected_version_hash: str, captured_by: str, change_summary: str = "", target_skill_md: str = "") -> str:
         from azure.core import MatchConditions
         from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
         from azure.storage.blob import ContentSettings
@@ -618,7 +627,7 @@ class AzureBlobSkillStore:
         except (ResourceModifiedError, ResourceNotFoundError) as exc:
             raise VersionConflict("Skill files changed during backup; reload before saving.") from exc
 
-        manifest = _backup_manifest(self.id, skill_path, safe, source_etag, captured_by, contents, change_summary)
+        manifest = _backup_manifest(self.id, skill_path, safe, source_etag, captured_by, contents, change_summary, target_skill_md)
         captured_at = datetime.fromisoformat(manifest["captured_at"])
         timestamp = captured_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         revision_prefix = f"{safe}/{timestamp}_{manifest['revision_id']}/"
@@ -653,7 +662,7 @@ class AzureBlobSkillStore:
 
         if getattr(self, "history_container", "") and not create_only:
             try:
-                expected_version_hash = self._backup_skill(safe, expected_version_hash, captured_by, change_summary)
+                expected_version_hash = self._backup_skill(safe, expected_version_hash, captured_by, change_summary, files.skill_md)
             except VersionConflict:
                 raise
             except Exception as exc:

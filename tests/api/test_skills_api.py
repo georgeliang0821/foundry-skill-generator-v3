@@ -96,6 +96,8 @@ def test_save_versions_new_content_but_preserves_old_snapshot(client, backend_ma
     backup = next(iter(local.history.values()))
     assert backup["files"]["SKILL.md"] == original.encode("utf-8")
     assert backup["manifest"]["change_summary"] == "Update the instructions."
+    assert backup["manifest"]["from_version"] == "1.6"
+    assert backup["manifest"]["to_version"] == "1.6.1"
     if neighbor:
         edit = backend_main.sessions[sid].neighbor_edits[0]
         assert edit.versions[0].skill_md == original
@@ -106,6 +108,8 @@ def test_save_versions_new_content_but_preserves_old_snapshot(client, backend_ma
         assert response.json()["current_skill"]["skill_md"] == expected
     assert client.post(endpoint, json={}).status_code == 200
     assert backend_main.store.load_skill("demo-skill").skill_md == expected
+    repeated = list(local.history.values())[-1]["manifest"]
+    assert repeated["from_version"] == repeated["to_version"] == "1.6.1"
 
 
 def test_neighbor_summary_follows_selected_branch(client, backend_main, grant_skill) -> None:
