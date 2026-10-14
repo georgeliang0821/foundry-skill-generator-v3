@@ -4169,7 +4169,7 @@ def start_neighbor_notice_modify(notice_id: int, upn: str = Depends(require_upn)
         review = {"notice_id": notice.id, "target_skill_key": target.skill_key,
                   "proposer_upn": notice.proposer_upn,
                   "sources": [_notice_skill_projection(key) for key in notice.source_skill_keys]}
-        _create_session(CreateSessionRequest(mode="modify", target_skill_id=target.skill_name, start_stage="prepare"), upn, session_id=sid, review=review)
+        _create_session(CreateSessionRequest(mode="modify", target_skill_id=target.skill_name, start_stage="refine"), upn, session_id=sid, review=review)
         return sid
 
     try:

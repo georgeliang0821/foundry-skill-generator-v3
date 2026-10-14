@@ -39,6 +39,8 @@
   --warning-soft: #fbe8d5;
   --danger:  #b53224;
   --danger-soft: #fbe5e1;
+  --notice: #0f6b78;
+  --notice-strong: #0c5360;
 
   /* Skill form (bundled script vs inline sample code) */
   --form-script: #5b4a8a;
@@ -100,15 +102,23 @@
 .neighbor-notice-row { padding: 16px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .neighbor-notice-row:last-child { border-bottom: 0; }
 .neighbor-notice-row p { margin: 6px 0; }
+.neighbor-notice-row h4 { margin: 0 0 8px; font-size: var(--fs-lg); }
+.neighbor-notice-row .neighbor-notice-label { margin: 0 0 4px; color: var(--text-2); font-size: var(--fs-sm); }
+.neighbor-notice-context { color: var(--text-2); font-size: var(--fs-sm); }
+.neighbor-notice-source { margin: 12px 0; }
+.neighbor-notice-source summary { cursor: pointer; overflow-wrap: anywhere; }
+.neighbor-notice-source summary::marker { color: var(--notice); }
+.neighbor-notice-source summary:focus-visible { outline: 2px solid var(--notice); outline-offset: 3px; }
+.neighbor-notice-source p { padding-left: 16px; }
 .neighbor-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 #neighborNoticesError { color: var(--danger); overflow-wrap: anywhere; }
 .header-account { grid-area: auth; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; }
 #neighborNoticesBtn { min-height: 44px; font-size: var(--fs-sm); border-radius: var(--r-sm); gap: 8px; }
-#neighborNoticesBtn.has-notices { background: var(--brand-600); border-color: var(--brand-600); color: var(--surface); }
-#neighborNoticesBtn.has-notices:hover { background: var(--brand-700); border-color: var(--brand-700); }
-#neighborNoticesBtn:focus-visible { outline: 2px solid var(--brand-600); outline-offset: 3px; }
+#neighborNoticesBtn.has-notices { background: var(--notice); border-color: var(--notice); color: var(--surface); }
+#neighborNoticesBtn.has-notices:hover { background: var(--notice-strong); border-color: var(--notice-strong); }
+#neighborNoticesBtn:focus-visible { outline: 2px solid var(--notice); outline-offset: 3px; }
 #neighborNoticesCount { display: inline-grid; place-items: center; min-width: 3ch; height: 24px; padding: 0 4px; border-radius: var(--r-sm); background: var(--surface-3); color: var(--text-1); font-weight: 600; font-variant-numeric: tabular-nums; }
-#neighborNoticesBtn.has-notices #neighborNoticesCount { background: var(--surface); color: var(--brand-700); }
+#neighborNoticesBtn.has-notices #neighborNoticesCount { background: var(--surface); color: var(--notice-strong); }
 #neighborNoticesBtn[data-state="error"], #neighborNoticesBtn[data-state="unauthenticated"] { border-color: var(--danger); }
 
 /* ─── Reset ───────────────────────────────────────────────── */

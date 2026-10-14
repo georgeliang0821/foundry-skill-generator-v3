@@ -318,7 +318,7 @@ class FakeE2EAgent:
         yield {"event": "llm_status", "data": {"status": "started", "model": "e2e-fake-model", "stage": stage}}
 
         has_tool_answers = any(getattr(item.role, "value", str(item.role)) in {"tool", "MessageRole.TOOL"} for item in session.conversation)
-        if session.neighbor_notice_review and stage == Stage.PREPARE.value and user_message == "請開始相鄰 Skill 的修改確認。":
+        if session.neighbor_notice_review and stage == Stage.REFINE.value and user_message == "請開始相鄰 Skill 的路由邊界審閱。":
             sources = session.neighbor_notice_review.get("sources", [])
             yield {"event": "text_delta", "data": {"delta": "Current neighbor descriptions: " + "; ".join(str(source.get("description", "")) for source in sources)}}
             yield self._tool(session, "ask_user_input", {"question": "Confirm the current target boundary?", "options": ["Confirm boundary", "No modification needed"]})

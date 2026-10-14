@@ -115,7 +115,7 @@ sequenceDiagram
 - **授權**：私有 skill 儲存後會補一筆作者自己的 grant；`is_public = 1` 的 skill 不需要任何 grant。
 - **updated_at 規則**：只要已存在 DB 的 skill 被再次修改並覆寫，`updated_at` 就更新為最新時間。
 - **相鄰關係通知**：相鄰搜尋仍只使用作者可讀的候選清單與作者確認。確認路由 checkpoint 後，自己的鄰居沿用編輯／儲存流程；他人的鄰居只排入 session 待送關係，不產生對方的 description 或 patch。建立者空白時跳過並顯示原因。來源 Blob、SQL metadata 與授權儲存成功後才寫入 `dbo.skill_neighbor_notice`，以未結案的 `(skill_key, proposer_upn)` 去重並合併來源 key 清單；失敗保留待送狀態，來源保存成果不回滾，再次儲存可重試。
-- **收件處理**：登入通知清單只給收件人；「不修改」直接結案。「開始修改確認」重新驗證目標精確 key 與建立者，載入目標最新套件及來源最新 name／description，建立 PREPARE MODIFY，session 保存成功就結案並記錄 session ID，再由第一輪 Agent 審閱提出建議讓 creator 確認。不預先替換 description，不授予來源使用權，也不提供來源正文、script 或資產；後續不儲存也不會重新開啟通知。建立 session 失敗保留未結案，重試沿用同一 session ID。刪除、改名、停用或建立者異動不會 fallback 同名 Skill；來源不可用會明確標示。現有 MODIFY 只處理全域 Blob 路徑，私有 scope 目標保持未結案並回報不支援，不開啟同名全域 Skill。
+- **收件處理**：登入通知清單只給收件人；卡片標示待審閱目標與通知提出者，來源 name／description 以可展開的相關 Skill 呈現。「略過並結案」直接結案。「開啟審閱」重新驗證目標精確 key 與建立者，載入目標最新套件及來源最新 name／description，建立 REFINE MODIFY（Quick Edit），session 保存成功就結案並記錄 session ID。第一輪 Agent 比較 description／When NOT to Use 的路由邊界，說明可能重疊或已清楚區分之處，需要調整才在 creator 確認方向後提出 patch；只有核心用途需變更且 creator 同意時才進 PREPARE。不預先替換 description，不授予來源使用權，也不提供來源正文、script 或資產；後續不儲存也不會重新開啟通知。建立 session 失敗保留未結案，重試沿用同一 session ID；重開已建立的 session 保留其當前階段，不重設為 REFINE。刪除、改名、停用或建立者異動不會 fallback 同名 Skill；來源不可用會明確標示。現有 MODIFY 只處理全域 Blob 路徑，私有 scope 目標保持未結案並回報不支援，不開啟同名全域 Skill。
 
 ```mermaid
 flowchart LR

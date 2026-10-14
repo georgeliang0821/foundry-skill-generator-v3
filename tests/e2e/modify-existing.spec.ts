@@ -26,7 +26,7 @@ async function seedNeighborNotice(request: APIRequestContext) {
   expect((await saved.json()).neighbor_notice_outcomes[0].status).toBe("sent");
 }
 
-test("neighbor notification starts the full PREPARE modify flow and closes immediately", async ({ page, request }) => {
+test("neighbor notification opens focused Quick Edit review and closes immediately", async ({ page, request }) => {
   await seedNeighborNotice(request);
   await openApp(page);
   await expect(page.locator("#neighborNoticesCount")).toHaveText("1");
@@ -37,18 +37,28 @@ test("neighbor notification starts the full PREPARE modify flow and closes immed
   await page.locator("#neighborNoticesBtn").click();
   const dialog = page.locator("#neighborNoticesDialog");
   await expect(dialog).toContainText("notice-source");
-  await expect(dialog).toContainText("other@example.com");
+  await expect(dialog).toContainText("待審閱的 Skill");
+  await expect(dialog.getByRole("heading", { name: "notice-target" })).toBeVisible();
+  await expect(dialog).toContainText("通知提出者：other@example.com");
+  await expect(dialog).toContainText("這不代表已確認路由衝突");
+  await expect(dialog).toContainText("開啟審閱不會直接修改 Skill");
+  const source = dialog.locator(".neighbor-notice-source");
+  await expect(source.locator("summary")).toHaveText("相關 Skill：notice-source");
+  await expect(source.locator("p")).not.toBeVisible();
   await page.screenshot({ path: "test-results/neighbor-notice-desktop.png" });
-  await dialog.getByRole("button", { name: "開始修改確認" }).click();
+  await source.locator("summary").click();
+  await expect(source.locator("p")).toBeVisible();
+  await dialog.getByRole("button", { name: "開啟審閱" }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByTestId("skill-binding-status")).toContainText("notice-target");
   await expect(page.getByTestId("send-button")).toHaveText("Send");
   await expect(page.locator("#neighborNoticesCount")).toHaveText("0");
   await expect(page.locator("#neighborNoticesBtn")).not.toHaveClass(/has-notices/);
   await expect(page.getByTestId("mode-select")).toHaveValue("modify");
+  await expect(page.getByTestId("edit-scope-select")).toHaveValue("refine");
   await expect(page.getByText("Confirm the current target boundary?", { exact: true })).toBeVisible();
   const session = await readSession(request, await currentSessionId(page));
-  expect(session.current_stage).toBe("prepare");
+  expect(session.current_stage).toBe("refine");
   expect(session.neighbor_notice_review.sources[0].name).toBe("notice-source");
   await openTab(page, "files");
   await expect(page.getByTestId("file-editor")).toHaveValue(/notice-target/);
@@ -66,15 +76,43 @@ test("neighbor notification can be dismissed on mobile without opening MODIFY", 
   const before = await currentSessionId(page);
   await page.locator("#neighborNoticesBtn").click();
   const dialog = page.locator("#neighborNoticesDialog");
-  await expect(dialog.getByRole("button", { name: "不修改" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "略過並結案" })).toBeInViewport();
   expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
   await page.screenshot({ path: "test-results/neighbor-notice-mobile.png" });
-  await dialog.getByRole("button", { name: "不修改" }).click();
+  await dialog.getByRole("button", { name: "略過並結案" }).click();
   await expect(dialog).toContainText("沒有待處理通知");
   await expect(page.locator("#neighborNoticesCount")).toHaveText("0");
   expect(await currentSessionId(page)).toBe(before);
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
+});
+
+test("neighbor notice explains multiple and unavailable sources on mobile", async ({ page, request }) => {
+  await seedNeighborNotice(request);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/neighbor-notices", async (route) => {
+    const response = await route.fetch();
+    const notices = await response.json();
+    notices[0].sources[0].description = "Long source boundary ".repeat(100);
+    notices[0].sources.push({ skill_key: "missing-source", name: "", available: false });
+    await route.fulfill({ json: notices });
+  });
+  await openApp(page);
+  await page.locator("#neighborNoticesBtn").click();
+  const dialog = page.locator("#neighborNoticesDialog");
+  const sources = dialog.locator(".neighbor-notice-source");
+  await expect(sources).toHaveCount(2);
+  await expect(sources.nth(1).locator("summary")).toHaveText("相關 Skill：missing-source（無法載入）");
+  await expect(sources.nth(0).locator("p")).not.toBeVisible();
+  await sources.nth(0).locator("summary").click();
+  await expect(sources.nth(0).locator("p")).toBeVisible();
+  expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await sources.nth(0).locator("summary").click();
+  await sources.nth(1).locator("summary").click();
+  await expect(sources.nth(1).locator("p")).toContainText("無法確認目前的路由邊界");
+  await expect(dialog.getByRole("button", { name: "開啟審閱" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "略過並結案" })).toBeInViewport();
+  await page.screenshot({ path: "test-results/neighbor-notice-multiple-mobile.png" });
 });
 
 test("neighbor notice 401 clears stale rows and offers explicit sign-in", async ({ page, request }) => {
@@ -105,6 +143,7 @@ for (const action of ["dismiss", "start-modify"]) {
   test(`neighbor notice ${action} 401 does not resolve or activate a session`, async ({ page, request }) => {
     await seedNeighborNotice(request);
     await openApp(page);
+    await expect(page.getByTestId("session-id")).toContainText(/[a-f0-9]{32}/i);
     const before = await currentSessionId(page);
     await page.locator("#neighborNoticesBtn").click();
     const dialog = page.locator("#neighborNoticesDialog");

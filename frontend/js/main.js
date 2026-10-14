@@ -5706,7 +5706,7 @@ function nextTestPrompt() {
 async function activateCreatedSession(created, activity) {
   session = created;
   el("modeSelect").value = session.mode;
-  if (session.neighbor_notice_review) el("editScopeSelect").value = "prepare";
+  if (session.neighbor_notice_review) el("editScopeSelect").value = session.current_stage === "prepare" ? "prepare" : "refine";
   localEditorDirty = false;
   topologyData = null;
   persistSessionState();
@@ -7009,15 +7009,22 @@ function renderNeighborNotices() {
   }
   el("neighborNoticesList").innerHTML = neighborNotices.length ? neighborNotices.map((notice) => {
     const target = notice.target || {};
-    const sources = (notice.sources || []).map((source) => `<p><strong>${escapeHtml(source.name || source.skill_key)}</strong>: ${escapeHtml(source.available ? source.description : "來源已不存在或無法載入")}</p>`).join("");
+    const sources = (notice.sources || []).map((source) => `<details class="neighbor-notice-source">
+      <summary>相關 Skill：<strong>${escapeHtml(source.name || source.skill_key)}</strong>${source.available ? "" : "（無法載入）"}</summary>
+      <p>${escapeHtml(source.available ? source.description : "來源已不存在或無法載入，無法確認目前的路由邊界。")}</p>
+    </details>`).join("");
     return `<section class="neighbor-notice-row" data-notice-id="${notice.id}">
-      <strong>${escapeHtml(target.name || notice.skill_key)}</strong>
-      <p>${escapeHtml(notice.proposer_upn)}</p>${sources}
+      <p class="neighbor-notice-label">待審閱的 Skill</p>
+      <h4>${escapeHtml(target.name || notice.skill_key)}</h4>
+      <p class="neighbor-notice-context">通知提出者：${escapeHtml(notice.proposer_upn)}</p>
+      <p>對方將下列 Skill 標記為與你的 Skill 相鄰。請確認兩者的用途與路由邊界；這不代表已確認路由衝突。</p>
+      ${sources || "<p>目前沒有可供比較的來源 Skill。</p>"}
       ${target.available ? "" : "<p>目標已不存在或無法載入。</p>"}
       <div class="neighbor-notice-actions">
-        <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available && !neighborNoticeActionBusy ? "" : " disabled"}>${svgIcon("i-adjustments")}<span>開始修改確認</span></button>
-        <button type="button" class="icon-button" data-notice-dismiss="${notice.id}"${neighborNoticeActionBusy ? " disabled" : ""}>${svgIcon("i-x")}<span>不修改</span></button>
+        <button type="button" class="primary icon-button" data-notice-start="${notice.id}"${target.available && !neighborNoticeActionBusy ? "" : " disabled"}>${svgIcon("i-document-text")}<span>開啟審閱</span></button>
+        <button type="button" class="icon-button" data-notice-dismiss="${notice.id}"${neighborNoticeActionBusy ? " disabled" : ""}>${svgIcon("i-x")}<span>略過並結案</span></button>
       </div>
+      <p class="neighbor-notice-context">開啟審閱不會直接修改 Skill；略過後此通知將結案。</p>
     </section>`;
   }).join("") : "<p>沒有待處理通知。</p>";
 }
@@ -7104,8 +7111,8 @@ document.addEventListener("click", async (event) => {
       const activity = beginConversationActivity("Loading neighbor review");
       try {
         await activateCreatedSession(result, activity);
-        appendMessage("assistant", "已開啟相鄰 Skill 修改確認；通知已結案，Skill 內容尚未修改。");
-        await sendChatPayload("請開始相鄰 Skill 的修改確認。", []);
+        appendMessage("assistant", "已開啟相鄰 Skill 的路由邊界審閱；通知已結案，Skill 內容尚未修改。");
+        await sendChatPayload("請開始相鄰 Skill 的路由邊界審閱。", []);
       } catch (err) {
         activity.finish(`通知已結案，Session ${result.id} 已建立，但畫面載入失敗：${err.message}`, true);
       } finally {
