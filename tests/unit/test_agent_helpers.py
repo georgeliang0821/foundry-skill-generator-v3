@@ -8,6 +8,7 @@ import pytest
 from backend.agent import (
     FOUNDRY_OUTPUT_RULES,
     FOUNDRY_OUTPUT_SHAPE,
+    TOOL_SCHEMAS,
     _escape_handlebars,
     _extract_json_candidate,
     _infer_ask_user_input,
@@ -17,6 +18,19 @@ from backend.agent import (
     _session_context,
 )
 from backend.models import Material, MaterialKind, Session
+
+
+@pytest.mark.parametrize("name,required", [
+    ("select_neighbor_skill", ["skill_name"]),
+    ("confirm_neighbor_notification", ["skill_name", "notify"]),
+])
+def test_neighbor_tools_are_registered_for_model_calls(name, required) -> None:
+    matching = [schema for schema in TOOL_SCHEMAS if schema["name"] == name]
+    assert len(matching) == 1
+    parameters = matching[0]["parameters"]
+    assert parameters["required"] == required
+    assert set(parameters["properties"]) == set(required)
+    assert parameters["additionalProperties"] is False
 
 
 def test_output_rules_come_from_the_prompt_file() -> None:
@@ -161,7 +175,7 @@ def test_foundry_timing_keeps_request_id_across_threads(monkeypatch, capsys, fai
     from backend import agent
     from backend.diagnostics import log_context, log_event
     from openai import APITimeoutError
-    import httpx2
+    import httpx
 
     monkeypatch.setenv("SGV2_DEBUG_LOG", "1")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.test/foundry")
@@ -181,7 +195,7 @@ def test_foundry_timing_keeps_request_id_across_threads(monkeypatch, capsys, fai
         log_event("test.sdk")
         assert client_options["api_key"]() == "not-a-real-secret"
         if fail == "timeout":
-            raise APITimeoutError(request=httpx2.Request("POST", "https://example.test/responses"))
+            raise APITimeoutError(request=httpx.Request("POST", "https://example.test/responses"))
         if fail == "responses_create":
             raise RuntimeError("SDK failed")
         return SimpleNamespace(output_text="ok", id="resp-test", _request_id="foundry-test")
