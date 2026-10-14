@@ -38,6 +38,7 @@ def test_accept_propose_patch_updates_content_and_patch_history(client, backend_
     assert body["patch_history"][0]["content_after"] == "hi"
     assert body["pending_tool_calls"] == []
     assert body["conversation"][-1]["metadata"]["patch_sync"] == {"call_id": "call_patch", "status": "local"}
+    assert body["pending_change_summaries"] == ["shorten greeting"]
 
 
 def test_patch_sync_failure_retains_local_patch_and_reports_outcome(client, backend_main, monkeypatch) -> None:
@@ -67,6 +68,8 @@ def test_patch_sync_failure_retains_local_patch_and_reports_outcome(client, back
     outcome = body["conversation"][-1]["metadata"]["patch_sync"]
     assert outcome == {"call_id": "blocked_patch", "status": "failed", "detail": detail}
     assert body["pending_tool_calls"] == []
+
+    assert body["pending_change_summaries"] == ["Update the skill instructions."]
 
 
 def test_patch_sync_success_reports_saved(client, backend_main, monkeypatch) -> None:
@@ -100,6 +103,8 @@ def test_patch_version_tracks_saved_content_and_undo_remains_local(client, backe
     assert record["version_hash_after"] == backend_main.version_hash(saved)
     assert body["current_skill"]["skill_md"] == saved
     assert body["conversation"][-1]["metadata"]["patch_sync"]["status"] == "saved"
+    assert body["pending_change_summaries"] == []
+    assert next(iter(local.history.values()))["manifest"]["change_summary"] == "Update the skill instructions."
     undone = client.post(f"/api/sessions/{sid}/patches/{record['id']}/undo")
     assert undone.status_code == 200
     assert undone.json()["current_skill"]["skill_md"] == original
@@ -128,6 +133,44 @@ def test_lint_rejected_patch_never_writes_a_snapshot(client, backend_main, grant
     assert 'version: "1.6"' in session.current_skill.skill_md
 
 
+def test_pending_summaries_survive_retry_and_clear_after_save(client, backend_main, grant_skill, monkeypatch) -> None:
+    local = backend_main.store.store
+    local.history_enabled = True
+    original = "---\nname: demo\ndescription: Demo\n---\nOriginal"
+    backend_main.store.save_skill(backend_main.SkillFiles(name="demo", skill_md=original))
+    grant_skill("demo")
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo"}).json()["id"]
+    session = backend_main.sessions[sid]
+
+    def fail_save(*args, **kwargs):
+        raise backend_main.HTTPException(status_code=503, detail="Unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(backend_main, "save_skill_dual_write", fail_save)
+        for call_id, old, new in [("first", "Original", "Changed"), ("second", "Changed", "Final")]:
+            response = _accept_patch(client, session, call_id=call_id, old=old, new=new, addresses=[])
+            assert response.status_code == 200
+    assert not local.history
+    restored = backend_main.Session.model_validate(session.model_dump())
+    assert restored.pending_change_summaries == ["Update the skill instructions."] * 2
+    response = client.post(f"/api/sessions/{sid}/save", json={})
+    assert response.status_code == 200, response.text
+    assert next(iter(local.history.values()))["manifest"]["change_summary"] == "\n".join(restored.pending_change_summaries)
+    assert session.pending_change_summaries == []
+    assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
+    assert list(local.history.values())[-1]["manifest"]["change_summary"] == ""
+
+
+def test_manual_draft_replacement_clears_pending_summary(client, backend_main) -> None:
+    session = backend_main.Session(pending_change_summaries=["A previous proposal."])
+    session.current_skill.skill_md = "Original"
+    backend_main.sessions[session.id] = session
+    assert client.put(f"/api/sessions/{session.id}/draft", json={"skill_md": "Original"}).status_code == 200
+    assert session.pending_change_summaries == ["A previous proposal."]
+    assert client.put(f"/api/sessions/{session.id}/draft", json={"skill_md": "Manually replaced"}).status_code == 200
+    assert session.pending_change_summaries == []
+
+
 def _accept_patch(client, session, *, call_id, old, new, addresses):
     session.pending_tool_calls.append(
         PendingToolCall(
@@ -142,6 +185,7 @@ def _accept_patch(client, session, *, call_id, old, new, addresses):
 +{new}
 *** End Patch""",
                 "reason": "fix",
+                "change_summary": "Update the skill instructions.",
                 "addresses": addresses,
             },
         )

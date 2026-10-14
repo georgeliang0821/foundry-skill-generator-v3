@@ -432,11 +432,12 @@ def test_azure_backup_preserves_complete_old_package() -> None:
     store = _azure_store(live)
     store.history_container = "skill-history"
     store.service = type("_Service", (), {"get_container_client": lambda self, name: history if name == "skill-history" else live})()
-    store.save_skill(SkillFiles(name="demo", skill_md="new", remove_script=True, assets={}), captured_by="User@Example.com")
+    store.save_skill(SkillFiles(name="demo", skill_md="new", remove_script=True, assets={}), captured_by="User@Example.com", change_summary=" Remove obsolete script and assets. ")
     manifests = [name for name in history.blobs if name.endswith("/manifest.json")]
     assert len(manifests) == 1
     manifest = json.loads(history.blobs[manifests[0]])
     assert manifest["captured_by"] == "user@example.com"
+    assert manifest["change_summary"] == "Remove obsolete script and assets."
     assert manifest["source_etag"] == hashlib.sha256(b"old").hexdigest()
     assert datetime.fromisoformat(manifest["captured_at"]).utcoffset().total_seconds() == 0
     for entry in manifest["files"]:
@@ -473,8 +474,9 @@ def test_local_backup_retains_history_after_deletion() -> None:
     store = LocalSkillStore(history_enabled=True)
     first = store.save_skill(SkillFiles(name="demo", skill_md="old", script="script", assets={"assets/a.txt": "a"}))
     assert not store.history
-    store.save_skill(SkillFiles(name="demo", skill_md="new"), first.version_hash, captured_by="test@example.com")
+    store.save_skill(SkillFiles(name="demo", skill_md="new"), first.version_hash, captured_by="test@example.com", change_summary="Update skill instructions.")
     backup = next(iter(store.history.values()))
+    assert backup["manifest"]["change_summary"] == "Update skill instructions."
     assert backup["files"] == {"SKILL.md": b"old", "scripts/demo.py": b"script", "assets/a.txt": b"a"}
     store.delete_skill("demo")
     assert len(store.history) == 1

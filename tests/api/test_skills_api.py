@@ -48,7 +48,7 @@ def test_save_backup_failure_returns_503_without_live_write(client, backend_main
     else:
         client.put(f"/api/sessions/{sid}/draft", json={"skill_md": replacement})
         endpoint = f"/api/sessions/{sid}/save"
-    def fail(files, expected_version_hash="", *, create_only=False, captured_by=""):
+    def fail(files, expected_version_hash="", *, create_only=False, captured_by="", change_summary=""):
         assert captured_by == "test@example.com"
         raise backend_main.SkillBackupError("Skill backup failed; live content was not saved.")
     monkeypatch.setattr(backend_main.store, "save_skill", fail)
@@ -83,18 +83,19 @@ def test_save_versions_new_content_but_preserves_old_snapshot(client, backend_ma
     sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo-skill"}).json()["id"]
     changed = original.replace("Original", "Changed")
     if neighbor:
-        client.post(f"/api/sessions/{sid}/neighbor-edits/demo-skill/propose", json={"skill_md": changed})
+        client.post(f"/api/sessions/{sid}/neighbor-edits/demo-skill/propose", json={"skill_md": changed, "change_summary": "Update the instructions."})
         endpoint = f"/api/sessions/{sid}/neighbor-edits/demo-skill/save"
     else:
         client.put(f"/api/sessions/{sid}/draft", json={"skill_md": changed})
         endpoint = f"/api/sessions/{sid}/save"
 
-    response = client.post(endpoint, json={})
+    response = client.post(endpoint, json={} if neighbor else {"change_summary": "Update the instructions."})
     assert response.status_code == 200, response.text
     expected = changed.replace('"1.6"', '"1.6.1"')
     assert backend_main.store.load_skill("demo-skill").skill_md == expected
     backup = next(iter(local.history.values()))
     assert backup["files"]["SKILL.md"] == original.encode("utf-8")
+    assert backup["manifest"]["change_summary"] == "Update the instructions."
     if neighbor:
         edit = backend_main.sessions[sid].neighbor_edits[0]
         assert edit.versions[0].skill_md == original
@@ -105,6 +106,29 @@ def test_save_versions_new_content_but_preserves_old_snapshot(client, backend_ma
         assert response.json()["current_skill"]["skill_md"] == expected
     assert client.post(endpoint, json={}).status_code == 200
     assert backend_main.store.load_skill("demo-skill").skill_md == expected
+
+
+def test_neighbor_summary_follows_selected_branch(client, backend_main, grant_skill) -> None:
+    local = backend_main.store.store
+    local.history_enabled = True
+    original = "---\nname: demo-skill\ndescription: Demo\n---\nOriginal"
+    backend_main.store.save_skill(backend_main.SkillFiles(name="demo-skill", skill_md=original))
+    grant_skill("demo-skill")
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo-skill"}).json()["id"]
+    endpoint = f"/api/sessions/{sid}/neighbor-edits/demo-skill"
+    for content, summary in [("First", "Add routing guidance."), ("Second", "Clarify required inputs.")]:
+        response = client.post(f"{endpoint}/propose", json={
+            "skill_md": original.replace("Original", content), "change_summary": summary,
+        })
+        assert response.status_code == 200, response.text
+    edit = backend_main.sessions[sid].neighbor_edits[0]
+    assert client.post(f"{endpoint}/save").status_code == 200
+    assert list(local.history.values())[-1]["manifest"]["change_summary"] == "Add routing guidance.\nClarify required inputs."
+    assert client.post(f"{endpoint}/select", json={"version_id": edit.versions[0].version_id}).status_code == 200
+    assert client.post(f"{endpoint}/save").status_code == 200
+    summary = list(local.history.values())[-1]["manifest"]["change_summary"]
+    assert summary.startswith("Switch to selected version:")
+    assert "Clarify required inputs." not in summary
 
 
 def test_failed_lint_does_not_advance_version_or_create_snapshot(client, backend_main, grant_skill, monkeypatch) -> None:

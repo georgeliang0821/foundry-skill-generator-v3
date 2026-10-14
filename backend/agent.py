@@ -75,6 +75,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "skill_md": {"type": "string"},
+                "change_summary": {"type": "string"},
             },
             "required": ["skill_md"],
             "additionalProperties": False,
@@ -89,6 +90,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "target_file": {"type": "string"},
                 "patch": {"type": "string"},
                 "reason": {"type": "string"},
+                "change_summary": {"type": "string"},
                 "addresses": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -346,6 +348,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "The neighbor skill to edit (must be a skill the user can access)."},
+                "change_summary": {"type": "string"},
                 "patch": {"type": "string", "description": "A V4A patch against the neighbor's current SKILL.md: one hunk with a few unchanged CONTEXT lines (copied from the file to locate the spot) plus your `-`/`+` edits. Indentation is matched leniently. Full rewrites are not allowed."},
                 "label": {"type": "string", "description": "A short label for this version, e.g. 'add backlink to <new skill>'."},
             },
@@ -409,6 +412,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "The child skill to edit. It must be one of the declared metadata.children."},
+                "change_summary": {"type": "string"},
                 "patch": {"type": "string", "description": "A V4A patch against the child's current SKILL.md: one hunk with a few unchanged CONTEXT lines plus your `-`/`+` edits. Full rewrites are not allowed."},
                 "label": {"type": "string", "description": "A short label for this version, e.g. 'accept new calendar_events field'."},
             },

@@ -237,10 +237,10 @@ def test_competing_create_cannot_overwrite_winner_or_claim_creator(client, backe
     client.put(f"/api/sessions/{sid}/draft", json={"skill_md": "---\nname: racing\n---\nLosing draft"})
     save = backend_main.store.save_skill
 
-    def race(files, expected_version_hash="", *, create_only=False, captured_by=""):
+    def race(files, expected_version_hash="", *, create_only=False, captured_by="", change_summary=""):
         save(backend_main.SkillFiles(name="racing", skill_md="Winning draft"), create_only=True)
         fake_sql.upsert_skill("racing", created_by="winner@x")
-        return save(files, expected_version_hash, create_only=create_only, captured_by=captured_by)
+        return save(files, expected_version_hash, create_only=create_only, captured_by=captured_by, change_summary=change_summary)
 
     monkeypatch.setattr(backend_main.store, "save_skill", race)
     assert client.post(f"/api/sessions/{sid}/save", json={"name": "racing"}).status_code == 409

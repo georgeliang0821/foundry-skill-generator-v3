@@ -541,6 +541,8 @@ class NeighborVersion(BaseModel):
 
     version_id: str = Field(default_factory=lambda: uuid4().hex)
     label: str = ""
+    change_summary: str = ""
+    parent_version_id: str = ""
     skill_md: str = ""
     version_hash: str = ""
     created_at: str = Field(default_factory=utc_now_iso)
@@ -672,6 +674,7 @@ class Session(BaseModel):
     remote_skill_id: str | None = None
     remote_version_hash: str = ""
     blob_store_id: str = ""
+    pending_change_summaries: list[str] = Field(default_factory=list)
     # EAA lint_skill_package policy version the last save was validated against.
     eaa_ruleset_version: str = ""
     current_stage: Stage = Stage.PREPARE
@@ -816,6 +819,7 @@ class ToolResultRequest(BaseModel):
 
 class SaveSessionSkillRequest(BaseModel):
     name: str | None = None
+    change_summary: str | None = None
     orphan_action: Literal["keep_internal", "make_capability"] | None = None
 
 
@@ -870,6 +874,7 @@ class NeighborProposeRequest(BaseModel):
 
     skill_md: str
     label: str = ""
+    change_summary: str = ""
     origin: Literal["agent_proposed", "user_edited"] = "user_edited"
 
 

@@ -1245,7 +1245,10 @@ def save_skill_dual_write(
         if_match=bool(expected_version),
     )
     try:
-        saved = store.save_skill(files, expected_version, create_only=existing is None, captured_by=user_upn)
+        saved = store.save_skill(
+            files, expected_version, create_only=existing is None, captured_by=user_upn,
+            change_summary="\n".join(session.pending_change_summaries),
+        )
     except SkillBackupError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VersionConflict as exc:
@@ -1312,6 +1315,7 @@ def save_skill_dual_write(
     session.target_skill_id = saved.name
     session.remote_skill_id = saved.name
     session.remote_version_hash = saved.version_hash
+    session.pending_change_summaries.clear()
     if session.patch_history and session.patch_history[-1].content_after == session.current_skill.skill_md:
         session.patch_history[-1].content_after = saved.skill_md
         session.patch_history[-1].version_hash_after = version_hash(saved.skill_md)
@@ -1904,6 +1908,10 @@ def _accept_material_patch(session: Session, call) -> None:
         "user_content": material.content if material.user_content is None else material.user_content,
     })
     apply_code_material_change(session, codes_before, notify=False)
+    if session.remote_skill_id:
+        summary = str(call.args.get("reason") or "").strip()
+        if summary:
+            session.pending_change_summaries.append(summary)
     session.conversation.append(
         ChatMessage(
             role=MessageRole.SYSTEM,
@@ -3448,6 +3456,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             _assert_topology_preserved(session, session.current_skill.skill_md, tool="propose_skill_draft")
             _note_material_fidelity(session, session.current_skill.skill_md, tool="propose_skill_draft")
             _note_skill_lint(session, session.current_skill.skill_md, tool="propose_skill_draft")
+            summary = str(call.args.get("change_summary") or "").strip()
+            session.pending_change_summaries = [summary] if summary else []
             save_skill_dual_write(
                 session,
                 upn,
@@ -3472,6 +3482,9 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             # into invented code, so the check runs here too.
             _note_material_fidelity(session, updated, tool="propose_patch")
             _note_skill_lint(session, updated, tool="propose_patch")
+            summary = str(args.get("change_summary") or args.get("reason") or "").strip()
+            if summary:
+                session.pending_change_summaries.append(summary)
             session.patch_history.append(
                 PatchRecord(
                     target_file=target,
@@ -3707,6 +3720,7 @@ def undo_session_patch(session_id: str, patch_id: str, upn: str = Depends(requir
     if not latest.content_before:
         raise HTTPException(status_code=409, detail="This patch cannot be undone because previous content was not recorded")
     set_current_content(session, latest.target_file, latest.content_before, latest.version_hash_before or version_hash(latest.content_before))
+    session.pending_change_summaries.clear()
     session.patch_history.pop()
     session.conversation.append(
         ChatMessage(
@@ -3726,6 +3740,9 @@ def save_session_skill(session_id: str, req: SaveSessionSkillRequest, upn: str =
     if not session.current_skill.skill_md.strip():
         log_event("skill.save.rejected", level="warning", session_id=session.id, reason="empty_skill_md")
         raise HTTPException(status_code=400, detail="No SKILL.md content to save")
+    if req.change_summary is not None:
+        summary = req.change_summary.strip()
+        session.pending_change_summaries = [summary] if summary else []
     save_skill_dual_write(session, upn, req.name, orphan_action=req.orphan_action)
     persist_session(session)
     return session
@@ -3736,6 +3753,8 @@ def update_session_draft(session_id: str, draft: SkillDraft, upn: str = Depends(
     session = get_session_for_user(session_id, upn)
     # The script only ever comes from a code material or the stored skill, never from an editor.
     draft.script = session.current_skill.script
+    if draft.skill_md != session.current_skill.skill_md:
+        session.pending_change_summaries.clear()
     session.current_skill = draft
     session.current_skill.version_hash = compute_hash(session.current_skill.skill_md)
     session.touch()
@@ -4198,6 +4217,8 @@ def _apply_neighbor_edit_proposal(session: Session, args: dict[str, Any]) -> dic
     base_label = (str(args.get("label") or "").strip() or "Agent edit")
     version = NeighborVersion(
         label=f"{base_label} #{seq}",
+        change_summary=str(args.get("change_summary") or args.get("label") or "").strip(),
+        parent_version_id=matched.version_id,
         skill_md=new_md,
         version_hash=compute_hash(new_md),
         origin="agent_proposed",
@@ -4254,6 +4275,22 @@ def _neighbor_version(ne: NeighborEdit, version_id: str) -> NeighborVersion | No
     return next((v for v in ne.versions if v.version_id == version_id), None)
 
 
+def _neighbor_change_summary(ne: NeighborEdit, version: NeighborVersion) -> str:
+    summaries: list[str] = []
+    visited: set[str] = set()
+    current: NeighborVersion | None = version
+    while current is not None and current.version_id != ne.saved_version_id:
+        if current.version_id in visited:
+            return ""
+        visited.add(current.version_id)
+        if current.change_summary.strip():
+            summaries.append(current.change_summary.strip())
+        current = _neighbor_version(ne, current.parent_version_id)
+    if current is None:
+        return f"Switch to selected version: {version.label or version.version_id}."
+    return "\n".join(reversed(summaries))
+
+
 @app.post("/api/sessions/{session_id}/neighbor-edits/{skill}/open")
 def neighbor_edit_open(session_id: str, skill: str, upn: str = Depends(require_upn)) -> Session:
     """Open a neighbor skill for user editing: load its current Blob content as
@@ -4282,6 +4319,8 @@ def neighbor_edit_propose(session_id: str, skill: str, req: NeighborProposeReque
     ne = _get_or_init_neighbor_edit(session, skill)
     version = NeighborVersion(
         label=req.label or f"Edit {len(ne.versions)}",
+        change_summary=req.change_summary.strip(),
+        parent_version_id=ne.selected_version_id,
         skill_md=req.skill_md,
         version_hash=compute_hash(req.skill_md),
         origin=req.origin,
@@ -4331,7 +4370,10 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
         }) from exc
     files = SkillFiles(name=ne.skill_name, skill_md=versioned_md, version_hash=compute_hash(versioned_md))
     try:
-        saved = store.save_skill(files, ne.remote_version_hash, captured_by=upn)
+        saved = store.save_skill(
+            files, ne.remote_version_hash, captured_by=upn,
+            change_summary=_neighbor_change_summary(ne, version),
+        )
     except SkillBackupError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except VersionConflict as exc:
@@ -4357,6 +4399,7 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
         version = NeighborVersion(
             label=f"{version.label} (saved)", skill_md=saved.skill_md,
             version_hash=compute_hash(saved.skill_md), origin=version.origin,
+            parent_version_id=version.version_id,
         )
         ne.versions.append(version)
         ne.selected_version_id = version.version_id
