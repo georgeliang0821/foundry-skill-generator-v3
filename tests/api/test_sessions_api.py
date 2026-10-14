@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+
+def test_e2e_reset_refuses_application_session_directory(client, backend_main, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_E2E_MODE", "1")
+    monkeypatch.setenv("SGV2_SESSION_DIR", str(backend_main.FRONTEND_DIR.parent / ".sessions"))
+    original_store = backend_main.store
+    original_sessions = backend_main.sessions
+    original_session_store = backend_main.session_store
+    response = client.post("/api/e2e/reset")
+    assert response.status_code == 409
+    assert "refuses to clear" in response.json()["detail"]
+    assert backend_main.store is original_store
+    assert backend_main.sessions is original_sessions
+    assert backend_main.session_store is original_session_store
+
 import pytest
 
 

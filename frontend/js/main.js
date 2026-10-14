@@ -5004,9 +5004,24 @@ async function acceptTool(call, result) {
       }
       throw innerErr;
     }
+    const patchSync = call.tool === "propose_patch" && result.action === "accept"
+      ? [...(session.conversation || [])].reverse()
+        .find((message) => message.metadata?.patch_sync?.call_id === call.call_id)?.metadata.patch_sync
+      : null;
     if (runningNode && call.tool !== "request_test_run") {
-      markConversationStatus(runningNode, "Saved to Blob + SQL.");
-      window.setTimeout(() => removeConversationStatus(runningNode), 1400);
+      const saved = call.tool !== "propose_patch" || patchSync?.status === "saved";
+      const detail = patchSync?.detail;
+      const reason = typeof detail === "string" ? detail : detail?.message;
+      markConversationStatus(runningNode, saved
+        ? "Saved to Blob + SQL."
+        : patchSync?.status === "failed"
+          ? `Patch applied locally, but not synced to Blob + SQL.${reason ? ` ${reason}` : ""}`
+          : "Patch applied locally. Save before running skill-selection tests.",
+      patchSync?.status === "failed");
+      if (saved) {
+        const savedNode = runningNode;
+        window.setTimeout(() => removeConversationStatus(savedNode), 1400);
+      }
       runningNode = null;
     }
     if (call.tool === "propose_skill_draft" && result.action === "accept") localEditorDirty = false;
@@ -5028,6 +5043,10 @@ async function acceptTool(call, result) {
       await sendChatPayload(testAnalysisPrompt(), []);
     }
     if (call.tool === "propose_patch" && result.action === "accept") {
+      if (patchSync?.status !== "saved") {
+        if (isLintFailure(patchSync?.detail)) await reportLintFailure(patchSync.detail);
+        return;
+      }
       const remaining = openFixItems();
       if (remaining.length) {
         appendStatus(`Patch applied. ${remaining.length} fix item(s) still open — asking for the next patch.`);

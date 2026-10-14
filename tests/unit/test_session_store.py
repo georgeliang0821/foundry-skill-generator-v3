@@ -6,6 +6,26 @@ from backend.models import Material, Session
 from backend.session_store import LocalSessionStore
 
 
+def test_explicit_session_root_overrides_environment(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SGV2_SESSION_DIR", str(tmp_path / "configured"))
+    store = LocalSessionStore(tmp_path / "explicit")
+    assert store.root == tmp_path / "explicit"
+    assert LocalSessionStore().root == tmp_path / "configured"
+
+
+def test_e2e_startup_preserves_explicit_session_directory(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    environment = dict(os.environ, SGV2_E2E_MODE="1", SGV2_E2E_FAKE_AGENT="1", SGV2_SKILL_STORE="local", SGV2_SESSION_DIR=str(tmp_path / "isolated"))
+    result = subprocess.run(
+        [sys.executable, "-c", "import os; import backend.main as app; assert str(app.session_store.root) == os.environ['SGV2_SESSION_DIR']; assert app.session_store.root.name == 'isolated'"],
+        env=environment, cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_session_store_save_load_and_list(tmp_path: Path) -> None:
     store = LocalSessionStore(tmp_path)
     session = Session(target_skill_id="demo-skill", materials=[Material(content="reference")])

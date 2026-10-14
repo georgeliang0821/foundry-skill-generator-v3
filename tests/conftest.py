@@ -216,7 +216,7 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     module.oauth_states = {}
     from backend import neighbor_notice_repo
     monkeypatch.setattr(neighbor_notice_repo, "_local_repo", neighbor_notice_repo.LocalNeighborNoticeRepo())
-    # Import ran load_dotenv(override=True), which restores a real MCP_ENDPOINT / ACA_* from .env.
+    # Unset MCP_ENDPOINT / ACA_* values can still come from .env during import.
     # The fake keeps whatever aca_env_result the session already has; tests needing flags set it.
     monkeypatch.setattr(module, "load_aca_env_for_session", lambda session, *, reason="manual": None)
     from backend import state_machine

@@ -78,7 +78,7 @@ class _SessionSummaryMixin:
 class LocalSessionStore(_SessionSummaryMixin):
     def __init__(self, root: Path | None = None) -> None:
         configured = os.getenv("SGV2_SESSION_DIR", "").strip()
-        self.root = Path(configured) if configured else root or Path(__file__).resolve().parents[1] / ".sessions"
+        self.root = root or (Path(configured) if configured else Path(__file__).resolve().parents[1] / ".sessions")
         self.root.mkdir(parents=True, exist_ok=True)
         log_event("session_store.ready", root=str(self.root), configured=bool(configured))
 

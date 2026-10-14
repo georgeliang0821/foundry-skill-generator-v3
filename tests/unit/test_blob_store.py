@@ -18,6 +18,7 @@ from backend.blob_store import (
     blob_prefix_of,
     infer_skill_kind,
     parse_frontmatter,
+    prepare_skill_version,
     replace_frontmatter_name,
     safe_skill_name,
     script_blob_path_of,
@@ -46,6 +47,68 @@ def test_parse_frontmatter_recovers_description_with_colon() -> None:
 
 def test_parse_frontmatter_without_delimiters_returns_empty() -> None:
     assert parse_frontmatter("no frontmatter here") == ("", "")
+
+
+def _versioned_md(version: str, body: str = "Original") -> str:
+    return f'---\nname: demo\nmetadata:\n  version: "{version}"\n---\n{body}'
+
+
+@pytest.mark.parametrize(
+    "stored, requested, expected",
+    [
+        ("1.6", "1.6", "1.6.1"),
+        ("1.6.99", "1.6.99", "1.6.100"),
+        ("1.6.3", "1.6.700", "1.6.4"),
+        ("1.6.3", "1.5.0", "1.6.4"),
+        ("1.6.3", "1.7", "1.7.0"),
+        ("1.6.3", "2.0.0", "2.0.0"),
+    ],
+)
+def test_prepare_skill_version_uses_stored_revision(stored, requested, expected) -> None:
+    original = _versioned_md(stored)
+    updated = _versioned_md(requested, "Changed")
+    assert prepare_skill_version(updated, original) == _versioned_md(expected, "Changed")
+    assert prepare_skill_version(_versioned_md(expected, "Changed"), original) == _versioned_md(expected, "Changed")
+
+
+def test_prepare_skill_version_normalizes_first_save_and_preserves_noop() -> None:
+    assert prepare_skill_version(_versioned_md("1.6")) == _versioned_md("1.6.0")
+    original = _versioned_md("1.6")
+    assert prepare_skill_version(original, original) == original
+    assert prepare_skill_version(_versioned_md("1.6.99"), original) == original
+    assert prepare_skill_version(original, original, other_files_changed=True) == _versioned_md("1.6.1")
+
+
+def test_prepare_skill_version_preserves_other_bytes() -> None:
+    original = '\ufeff---\r\nname: demo\r\ndescription: >\r\n  version: example\r\nmetadata: {author: test, version: 1.6} # keep\r\n---\r\nOriginal\r\n'
+    updated = original.replace("Original", "Changed")
+    assert prepare_skill_version(updated, original) == updated.replace('version: 1.6}', 'version: "1.6.1"}')
+
+
+def test_prepare_skill_version_leaves_unversioned_skills_alone() -> None:
+    original = "---\nname: demo\n---\nOriginal"
+    assert prepare_skill_version(original) == original
+    with pytest.raises(ValueError, match="Keep the stored"):
+        prepare_skill_version(original, _versioned_md("1.6"))
+
+
+@pytest.mark.parametrize("version", ["v1.6", "1.6-beta", "1.6.0.1", "1.06", ""])
+def test_prepare_skill_version_rejects_invalid_versions(version) -> None:
+    with pytest.raises(ValueError, match="MAJOR.MINOR.PATCH"):
+        prepare_skill_version(_versioned_md(version))
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        'shared: &v "1.6"\nmetadata:\n  version: *v',
+        'metadata:\n  version: &v "1.6"\nshared: *v',
+        'shared: &meta {version: "1.6"}\nmetadata: *meta',
+    ],
+)
+def test_prepare_skill_version_rejects_aliases_without_touching_other_fields(metadata) -> None:
+    with pytest.raises(ValueError, match="alias|anchor"):
+        prepare_skill_version(f"---\nname: demo\n{metadata}\n---\nOriginal")
 
 
 @pytest.mark.parametrize(

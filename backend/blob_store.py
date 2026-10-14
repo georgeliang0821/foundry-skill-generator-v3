@@ -203,6 +203,65 @@ def infer_skill_kind(skill_md: str) -> SkillKind:
     return SkillKind.CAPABILITY
 
 
+def _metadata_version_span(skill_md: str) -> tuple[int, int, str] | None:
+    match = re.match(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", skill_md, re.DOTALL)
+    if not match:
+        return None
+    try:
+        root = yaml.compose(match.group(1), Loader=yaml.SafeLoader)
+    except yaml.YAMLError as exc:
+        raise ValueError("metadata.version requires valid YAML frontmatter.") from exc
+    if not isinstance(root, yaml.MappingNode):
+        return None
+    for key, metadata in root.value:
+        if key.value != "metadata" or not isinstance(metadata, yaml.MappingNode):
+            continue
+        if metadata.start_mark.index < key.end_mark.index:
+            raise ValueError("metadata must not use a YAML alias when versioning a skill.")
+        for field, value in metadata.value:
+            if field.value == "version":
+                if not isinstance(value, yaml.ScalarNode) or value.style in ("|", ">"):
+                    raise ValueError("metadata.version must be a single numeric version string.")
+                if value.start_mark.index < field.end_mark.index or match.group(1)[value.start_mark.index:].startswith("&"):
+                    raise ValueError("metadata.version must not use YAML aliases or anchors.")
+                start = match.start(1) + value.start_mark.index
+                end = match.start(1) + value.end_mark.index
+                return start, end, value.value
+    return None
+
+
+def prepare_skill_version(skill_md: str, previous_skill_md: str | None = None, *, other_files_changed: bool = False) -> str:
+    """Version new content against the stored revision, leaving backups untouched."""
+    current = _metadata_version_span(skill_md)
+    previous = _metadata_version_span(previous_skill_md) if previous_skill_md is not None else None
+    if current is None:
+        if previous is not None:
+            raise ValueError("Keep the stored skill's metadata.version when editing it.")
+        return skill_md
+
+    def parts(value: str) -> tuple[int, int, int]:
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?", value):
+            raise ValueError("metadata.version must use MAJOR.MINOR.PATCH (a stored MAJOR.MINOR is also accepted).")
+        numbers = [int(part) for part in value.split(".")]
+        return numbers[0], numbers[1], numbers[2] if len(numbers) == 3 else 0
+
+    def replace(text: str, span: tuple[int, int, str], value: str) -> str:
+        return text[:span[0]] + f'"{value}"' + text[span[1]:]
+
+    requested = parts(current[2])
+    chosen = requested
+    if previous is not None:
+        stored = parts(previous[2])
+        changed = other_files_changed or replace(skill_md, current, "0.0.0") != replace(previous_skill_md or "", previous, "0.0.0")
+        if requested[:2] > stored[:2]:
+            chosen = requested
+        elif changed:
+            chosen = stored[0], stored[1], stored[2] + 1
+        else:
+            return skill_md if current[2] == previous[2] else replace(skill_md, current, previous[2])
+    return replace(skill_md, current, ".".join(str(part) for part in chosen))
+
+
 def _normalize_prefix(prefix: str) -> str:
     return "/".join(part for part in (prefix or "").strip("/").split("/") if part)
 

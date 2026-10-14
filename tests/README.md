@@ -51,9 +51,13 @@ uv run pytest --cov=backend --cov-report=term-missing
 
 ### Pytest never reaches ACA / MCP
 
-`backend.main` runs `load_dotenv(override=True)` on import, so a real
-`MCP_ENDPOINT` / `ACA_*` from `.env` wins over anything the test set. Two
-fixtures in [conftest.py](./conftest.py) keep pytest local:
+Test processes explicitly enabling `E2E_MODE` or `SGV2_E2E_MODE` keep their
+environment values when `backend.main` loads `.env`. Pytest uses a temporary
+session directory; Playwright uses `.e2e-sessions`. An explicit
+`LocalSessionStore(root=...)` takes precedence over environment configuration,
+and the E2E reset endpoint refuses the application's `.sessions` directory.
+Unset values can still come from `.env`, so two fixtures in
+[conftest.py](./conftest.py) keep ACA / MCP local:
 
 - An autouse fixture sets `state_machine.PostTransitionHook = None` for every
   test. Once any test has imported `backend.main`, its PREPARE-entry hook (ACA

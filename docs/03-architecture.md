@@ -97,13 +97,15 @@ sequenceDiagram
 
 ### 2.2 儲存（接受 patch / 按下儲存）
 
-接受 patch 後在記憶體更新 `SKILL.md`，並在綁定遠端 Skill 時**雙寫 Blob + SQL**。雙寫完成即生效，**沒有額外的 publish / sync 步驟**：runtime 每次請求都直接從 SQL + Blob 動態解析 skill（Mode B）。
+接受 patch 後在記憶體更新 `SKILL.md`，並在綁定遠端 Skill 時嘗試**雙寫 Blob + SQL**。雙寫完成即生效，**沒有額外的 publish / sync 步驟**：runtime 每次請求都直接從 SQL + Blob 動態解析 skill（Mode B）。
 
 實際寫入時機與流程：【建立 / 修改內容 -> 整理 skill data -> upsert 到 dbo.skills -> 若為既有 skill 修改，更新 updated_at -> 回傳最新資料給系統渲染】。
 
 - **寫入時機**：REFINE 每個被接受的 patch、以及按下「儲存」都會雙寫 Blob + SQL（`save_skill_dual_write`）；DRAFT 被接受也雙寫。
+- **patch 套用與同步結果**：`tool-result` 可以接受 patch、保留本機內容，但同步仍被驗證或服務錯誤擋下。該次 tool message 的 `metadata.patch_sync` 帶入 `call_id` 與 `status: local | saved | failed`；失敗另帶 `detail`。前端只有 `saved` 才顯示「Saved to Blob + SQL」，`local`／`failed` 保留未同步狀態且不自動要求下一次測試；lint 失敗交回 Agent 修正，其他同步錯誤停止自動續跑。
+- **內容版號**：Generator 的一般 session 與鄰近 skill 儲存，使用 `metadata.version` 的三段式 `MAJOR.MINOR.PATCH`。新 skill 宣告 `1.0.0`；首次儲存會將宣告的兩段式版號補成三段式。修改時以目的地已儲存的套件為基準，內容、script 或資產有變更就增加 PATCH，例如 `1.6` → `1.6.1`、`1.6.99` → `1.6.100`；不按修訂次數自動升 MAJOR／MINOR。作者明確提高 MAJOR／MINOR 時保留指定的新版號，Agent 不自行改版號。只改 PATCH 數字不算內容修訂，沒有內容變更的再次儲存不加號；還原內容後儲存則算新修訂，不倒退版號。未宣告版號的套件保持原樣；已有版號不能移除，也不接受非數字、前置零、預發行字尾或 YAML alias／anchor。候選新版號在 EAA lint 前準備，Blob／SQL 成功後才回寫 session；驗證失敗重試仍以同一已儲存版為基準。快照忠實保留覆寫前的原始 bytes，不修改其中版號；manifest 的 UUID、來源 ETag 與檔案 SHA256 是另一組修訂識別。
 - **寫入前的關卡**（依序，任一失敗就不寫）：既有 skill 的建立者權限（改名同時檢查來源，NEW 同名覆寫也適用）→ topology 驗證 → skill 資產檢查（見 [04-agent-mechanism.md 第 7.6 節](04-agent-mechanism.md#76-skill-資產assetsreferences)）→ `input_contract_errors`（含 EAA 會丟棄的 credentials 鍵名與平台 secret）→ 本專案 skill lint 的 error（script 型含 S 規則；有資產時含 F2/F3）→ script 型才有：重新查 ACA 的 EAA script 旗標，關閉就回 409 `script_flags_off`（見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)）→ EAA MCP `lint_skill_package`（見 [2.3](#23-eaa-skill-lint)）。
-- **寫入順序**：`SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ skill 資產（把 session 的完整集合寫到 `skills/<name>/assets/`、`references/`，並移除該資料夾內不在集合裡的檔案）→ script 型才有 `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
+- **寫入順序**：完成關卡與候選版號驗證 → 選用的覆寫前備份 → `SKILL.md`（覆寫本 session 載入的 skill 時帶 `If-Match: remote_version_hash`，不符回 409 `version_conflict`）→ skill 資產（把 session 的完整集合寫到 `skills/<name>/assets/`、`references/`，並移除該資料夾內不在集合裡的檔案）→ script 型才有 `skills/<name>/scripts/<name>.py` → `upsert_skill`（bump `updated_at`）。四個名字一致：SQL `skill_name` = Blob 資料夾 = frontmatter `name` = script 檔名，都來自 `safe_skill_name(frontmatter name)`。script 由 server 端持有，`PUT /draft` 帶來的 script 會被忽略。
 - **覆寫前備份（選用）**：設定 `AZURE_BLOB_HISTORY_CONTAINER` 後，共用 `save_skill()` 在任何正式檔案寫入前，先讀取目的地的舊套件，以來源檔案的 ETag 做條件式讀取，將原始 bytes 寫到獨立歷史容器。一般 session 與鄰近 skill 儲存都帶入已驗證登入者；首次建立與只能建立的改名目的地不備份。正式覆寫仍使用舊 `SKILL.md` 的 ETag 作條件，來源變更回 409；備份讀寫失敗回 503，不寫正式內容。未設定時維持一般儲存流程。
 - **歷史格式與範圍**：路徑為 `<skill-name>/<source-key>/<revision-id>/files/<relative-path>`，其中 `source-key` 是來源 store ID 與實際 Blob 路徑的 SHA256，`revision-id` 是系統產生的 UUID。套件檔案全部完成、並再次檢查來源檔案清單與 ETag 後，最後寫同一版本目錄的 `manifest.json`。manifest 含 schema 版本、版本 ID、技能名稱、來源 store / Blob 路徑 / `SKILL.md` ETag、備份時間與觸發者，以及各檔案路徑、長度與 SHA256；不推定歷史作者。只有 manifest 存在的版本才視為完整備份。備份完成不代表後續正式儲存成功；正式寫入衝突或 SQL 失敗時備份仍保留，備份中途失敗也可能留下沒有 manifest 的檔案。沒有自動清理、查詢或還原 API，改名不串接版本鏈，刪除或改名不移除歷史，也不額外建立快照。逐檔 ETag 檢查不是跨檔案交易，不能保證整包原子一致性或涵蓋 Gatekeeper 等外部寫入。
 - **new vs modify**：new skill 首次儲存是 INSERT（同時寫 `created_by` / `created_at` / `updated_at`）；modify 既有 skill 是覆寫內容的 UPDATE。新建與改名目的地的 Blob 使用只能建立、不可覆寫的條件式寫入，名稱被其他寫入占用時回 409；只有 Blob、沒有 SQL metadata 的名稱也不能被認領。
@@ -118,7 +120,8 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     P[接受 Patch / 儲存] --> MEM[更新記憶體中的 SKILL.md]
-    MEM --> BACKUP[已啟用且覆寫既有技能時<br/>先完成套件備份與 manifest]
+    MEM --> CHECK[驗證內容與候選版號<br/>主 skill 含 EAA lint]
+    CHECK --> BACKUP[已啟用且覆寫既有技能時<br/>先完成套件備份與 manifest]
     BACKUP --> BLOB[(寫入 Azure Blob<br/>SKILL.md 全文、資產、script)]
     BLOB --> SQL[(MERGE dbo.skills ON skill_key<br/>skill_name / owner_upn / is_public / enabled<br/>既有則更新 updated_at)]
     SQL --> GRANT[私有 skill: 補作者 grant]
@@ -280,6 +283,6 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 
 - HTTP 請求一律用 `urllib`（`UrlRequest` / `urlopen` / `HTTPError`），不用 `requests`。
 - 記錄用 `from .diagnostics import log_event, log_exception, now_ms, elapsed_ms`。
-- `main.py` 頂端 `load_dotenv(override=True)`，`.env` 會覆蓋既有環境變數。
+- 一般執行時 `main.py` 的 `.env` 會覆蓋既有環境變數；明確啟用 `SGV2_E2E_MODE` 或 `E2E_MODE` 的測試程序則保留程序的環境設定，尤其是獨立的 session 目錄。`LocalSessionStore(root=...)` 的明確路徑優先於環境變數；`/api/e2e/reset` 拒絕清除專案的正式 `.sessions`，且在拒絕時不變更 store 或記憶體 session。
 - **`prompts/*.md` 是 AI 規則的唯一真實來源**，包含每回合注入的行為守則（`prompts/11_output_rules.md`）。`agent.py` 的 `FOUNDRY_OUTPUT_RULES` / `FOUNDRY_OUTPUT_SHAPE` 由 `_load_output_rules()` 於載入時解析該檔而來，**不再內嵌任何規則字串**。改規則請改 `.md`。
 - 驗證語法：`uv run python -c "import ast; ast.parse(open('backend/<f>.py',encoding='utf-8').read())"`；匯入測試：`uv run python -c "import backend.main"`。

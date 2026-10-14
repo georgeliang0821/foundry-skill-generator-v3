@@ -38,6 +38,7 @@ from .blob_store import (
     make_skill_store,
     parse_frontmatter,
     parse_frontmatter_meta,
+    prepare_skill_version,
     replace_frontmatter_name,
     safe_skill_name,
     script_relpath_of,
@@ -578,7 +579,7 @@ register_post_transition_hook(_post_transition_hook)
 
 from .testing import ModeEchoError, RunAuthError, run_selection_tests
 
-load_dotenv(override=True)
+load_dotenv(override=not (e2e_enabled() or os.getenv("E2E_MODE", "").strip().lower() in {"1", "true", "yes"}))
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 NODE_MODULES_DIR = Path(__file__).resolve().parents[1] / "node_modules"
@@ -1128,8 +1129,28 @@ def save_skill_dual_write(
     if session.current_skill.script is not None:
         _assert_script_flags_on(session)
 
+    previous_name = old_name or (skill_name if existing is not None else "")
+    previous_files = store.load_skill(previous_name) if previous_name else None
+    previous_assets = store.load_assets(previous_name) if previous_name else {}
+    try:
+        versioned_md = prepare_skill_version(
+            session.current_skill.skill_md,
+            previous_files.skill_md if previous_files is not None else None,
+            other_files_changed=bool(previous_files is not None and (
+                session.current_skill.script != previous_files.script
+                or {path: text.encode("utf-8") for path, text in assets.items()} != previous_assets
+            )),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={
+            "kind": "skill_version_invalid", "message": str(exc), "recoverable": True,
+        }) from exc
+
     # The runtime's own lint. Fail closed: no verdict is never a pass.
-    eaa_lint = _eaa_lint(session, skill_name)
+    lint_session = session.model_copy(update={
+        "current_skill": session.current_skill.model_copy(update={"skill_md": versioned_md}),
+    })
+    eaa_lint = _eaa_lint(lint_session, skill_name)
 
     declared_children: list[str] = []
     internal_children: list[str] = []
@@ -1205,7 +1226,7 @@ def save_skill_dual_write(
     is_public = bool(visibility_row.is_public) if visibility_row is not None else False
     files = SkillFiles(
         name=skill_name,
-        skill_md=session.current_skill.skill_md,
+        skill_md=versioned_md,
         version_hash=session.current_skill.version_hash,
         script=script,
         remove_script=script is None and session.script_removed,
@@ -1291,6 +1312,10 @@ def save_skill_dual_write(
     session.target_skill_id = saved.name
     session.remote_skill_id = saved.name
     session.remote_version_hash = saved.version_hash
+    if session.patch_history and session.patch_history[-1].content_after == session.current_skill.skill_md:
+        session.patch_history[-1].content_after = saved.skill_md
+        session.patch_history[-1].version_hash_after = version_hash(saved.skill_md)
+    session.current_skill.skill_md = saved.skill_md
     session.current_skill.version_hash = saved.version_hash
     session.assets_synced = True
     session.children = declared_children
@@ -2834,12 +2859,15 @@ def require_e2e_mode() -> None:
 def e2e_reset() -> dict[str, Any]:
     require_e2e_mode()
     global store, session_store, sessions, auth_tokens, oauth_states, agent
+    reset_store = LocalSessionStore()
+    if reset_store.root.resolve() == (FRONTEND_DIR.parent / ".sessions").resolve():
+        raise HTTPException(status_code=409, detail="E2E reset refuses to clear the application session directory. Set SGV2_SESSION_DIR to an isolated test directory.")
     store = CachedSkillStore(LocalSkillStore())
     if os.getenv("SGV2_SKILL_STORE", "azure").strip().lower() == "local":
         skills_repo.make_skills_repo()
         neighbor_notice_repo.make_notice_repo(local=True)
     acl_mod.get_cache().invalidate()
-    session_store = LocalSessionStore()
+    session_store = reset_store
     for path in session_store.root.glob("*.json"):
         try:
             path.unlink()
@@ -3403,6 +3431,7 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
         log_event("tool_result.missing_call", level="warning", session_id=session.id, call_id=req.tool_call_id)
         raise HTTPException(status_code=404, detail="Tool call not found")
     result = req.result if isinstance(req.result, dict) else {"value": req.result}
+    result_metadata: dict[str, Any] = {"tool": call.tool}
     delegated_token = get_delegated_token(request)
     log_event(
         "tool_result.start",
@@ -3428,6 +3457,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             if session.current_stage == Stage.DRAFT.value:
                 transition(session, Stage.REFINE, "Draft accepted and saved.")
         elif call.tool == "propose_patch" and result.get("action") == "accept":
+            patch_sync: dict[str, Any] = {"call_id": call.call_id, "status": "local"}
+            result_metadata["patch_sync"] = patch_sync
             args = call.args
             target = args["target_file"]
             content = current_content(session, target)
@@ -3460,7 +3491,9 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             if (session.remote_skill_id or "").strip():
                 try:
                     save_skill_dual_write(session, upn)
+                    patch_sync["status"] = "saved"
                 except HTTPException as sync_exc:
+                    patch_sync.update(status="failed", detail=sync_exc.detail)
                     reason = sync_exc.detail.get("message", sync_exc.detail) if isinstance(sync_exc.detail, dict) else sync_exc.detail
                     session.conversation.append(
                         ChatMessage(
@@ -3644,7 +3677,7 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
     try:
         session.pending_tool_calls = [c for c in session.pending_tool_calls if c.call_id != req.tool_call_id]
         session.conversation.append(
-            ChatMessage(role=MessageRole.TOOL, content=json.dumps(req.result, ensure_ascii=False), metadata={"tool": call.tool})
+            ChatMessage(role=MessageRole.TOOL, content=json.dumps(req.result, ensure_ascii=False), metadata=result_metadata)
         )
         session.touch()
         persist_session(session)
@@ -4289,7 +4322,14 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
         raise HTTPException(status_code=400, detail="No selected version to save")
     if not _user_can_modify_skill(upn, ne.skill_name):
         raise HTTPException(status_code=403, detail=f"You cannot modify the skill: {ne.skill_name}")
-    files = SkillFiles(name=ne.skill_name, skill_md=version.skill_md, version_hash=version.version_hash)
+    previous = store.load_skill(ne.skill_name)
+    try:
+        versioned_md = prepare_skill_version(version.skill_md, previous.skill_md)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={
+            "kind": "skill_version_invalid", "message": str(exc), "recoverable": True,
+        }) from exc
+    files = SkillFiles(name=ne.skill_name, skill_md=versioned_md, version_hash=compute_hash(versioned_md))
     try:
         saved = store.save_skill(files, ne.remote_version_hash, captured_by=upn)
     except SkillBackupError as exc:
@@ -4313,6 +4353,13 @@ def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_u
     except Exception as exc:  # noqa: BLE001
         log_exception("session.neighbor_edit.sql_failed", exc, session_id=session.id, skill=ne.skill_name)
         raise HTTPException(status_code=500, detail="Neighbor skill saved to Blob but SQL upsert failed") from exc
+    if saved.skill_md != version.skill_md:
+        version = NeighborVersion(
+            label=f"{version.label} (saved)", skill_md=saved.skill_md,
+            version_hash=compute_hash(saved.skill_md), origin=version.origin,
+        )
+        ne.versions.append(version)
+        ne.selected_version_id = version.version_id
     ne.saved_version_id = version.version_id
     ne.status = "saved"
     session.touch()
