@@ -13,6 +13,11 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
     assert body["tools"]
     assert body["prompts"]
     assert body["transitions"]
+    assert body["diagnostics"]["revision"] == "foundry-phases-v2"
+    assert body["diagnostics"]["process_id"] > 0
+    assert body["diagnostics"]["backend_source"].endswith("main.py")
+    assert body["diagnostics"]["foundry_timeout_seconds"] == 120.0
+    assert body["diagnostics"]["foundry_max_retries"] == 0
     assert [group["key"] for group in body["stage_groups"]] == [
         "PREPARE",
         "DRAFT",

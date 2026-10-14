@@ -148,29 +148,50 @@ def test_is_malformed_json_payload_detects_bad_output() -> None:
     assert _is_malformed_json_payload("") is True
 
 
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail", [None, "client_init", "auth", "responses_create", "timeout"])
 def test_foundry_timing_keeps_request_id_across_threads(monkeypatch, capsys, fail) -> None:
     from backend import agent
     from backend.diagnostics import log_context, log_event
+    from openai import APITimeoutError
+    import httpx2
 
     monkeypatch.setenv("SGV2_DEBUG_LOG", "1")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.test/foundry")
     monkeypatch.setattr(agent, "build_system_prompt", lambda session: "system")
     monkeypatch.setattr(agent, "_build_foundry_user_prompt", lambda session, message: "query")
-    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: object())
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: SimpleNamespace(close=lambda: None))
+
+    def token_provider():
+        if fail == "auth":
+            raise RuntimeError("SDK failed")
+        return "not-a-real-secret"
+
+    monkeypatch.setattr("azure.identity.get_bearer_token_provider", lambda *args: token_provider)
+    client_options = {}
 
     def create_response(**kwargs):
         log_event("test.sdk")
-        if fail:
+        assert client_options["api_key"]() == "not-a-real-secret"
+        if fail == "timeout":
+            raise APITimeoutError(request=httpx2.Request("POST", "https://example.test/responses"))
+        if fail == "responses_create":
             raise RuntimeError("SDK failed")
         return SimpleNamespace(output_text="ok", id="resp-test", _request_id="foundry-test")
 
-    fake_client = SimpleNamespace(responses=SimpleNamespace(create=create_response))
-    fake_project = SimpleNamespace(get_openai_client=lambda: fake_client)
+    fake_client = SimpleNamespace(responses=SimpleNamespace(create=create_response), close=lambda: None)
+
+    def get_openai_client(**kwargs):
+        client_options.update(kwargs)
+        if fail == "client_init":
+            raise RuntimeError("SDK failed")
+        return fake_client
+
+    fake_project = SimpleNamespace(get_openai_client=get_openai_client, close=lambda: None)
     monkeypatch.setattr("azure.ai.projects.AIProjectClient", lambda *args: fake_project)
     with log_context(request_id="chat-thread-test"):
         if fail:
-            with pytest.raises(RuntimeError, match="SDK failed"):
+            expected_error = APITimeoutError if fail == "timeout" else RuntimeError
+            with pytest.raises(expected_error):
                 agent._run_foundry_turn_sync(Session(), "go")
         else:
             assert agent._run_foundry_turn_sync(Session(), "go") == "ok"
@@ -180,9 +201,20 @@ def test_foundry_timing_keeps_request_id_across_threads(monkeypatch, capsys, fai
     assert all(record["request_id"] == "chat-thread-test" for record in records[:-1])
     assert "request_id" not in records[-1]
     assert any(record["event"] == "llm.prompt_build.done" for record in records)
-    assert any(record["event"] == "llm.client_init.done" for record in records)
-    sdk_event = "llm.responses_create.failed" if fail else "llm.responses_create.done"
-    assert next(record for record in records if record["event"] == sdk_event)["duration_ms"] >= 0
+    assert client_options["timeout"] == 120.0
+    assert client_options["max_retries"] == 0
+    assert "not-a-real-secret" not in json.dumps(records)
+    if fail == "client_init":
+        assert any(record["event"] == "llm.client_init.failed" for record in records)
+        assert not any(record["event"] == "llm.responses_create.start" for record in records)
+    else:
+        assert any(record["event"] == "llm.client_init.done" for record in records)
+        auth_event = "llm.auth.failed" if fail == "auth" else "llm.auth.done"
+        assert any(record["event"] == auth_event for record in records)
+        sdk_event = "llm.responses_create.failed" if fail else "llm.responses_create.done"
+        assert next(record for record in records if record["event"] == sdk_event)["duration_ms"] >= 0
+    if fail:
+        assert any(record["event"] == "llm.call.failed" for record in records)
     if not fail:
         received = next(record for record in records if record["event"] == "llm.response.received")
         assert received["foundry_response_id"] == "resp-test"

@@ -8,11 +8,16 @@ import re
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterable
+from contextvars import copy_context
 from typing import Any
 
-from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
+from .diagnostics import DIAGNOSTICS_REVISION, elapsed_ms, env_flag, log_event, log_exception, log_timing, now_ms
 from .models import InputBinding, PendingToolCall, Session
 from .state_machine import build_system_prompt, load_prompt, session_materials_prompt_chars
+
+
+FOUNDRY_TIMEOUT_SECONDS = 120.0
+FOUNDRY_MAX_RETRIES = 0
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -436,6 +441,9 @@ class OrchestratorAgent:
             raise RuntimeError(f"Foundry agent configuration is missing: {', '.join(missing)}")
         log_event(
             "agent.ready",
+            diagnostics_revision=DIAGNOSTICS_REVISION,
+            process_id=os.getpid(),
+            source_file=__file__,
             use_foundry=self.use_foundry,
             foundry_endpoint=env_flag("FOUNDRY_PROJECT_ENDPOINT"),
             foundry_agent_name=os.getenv("FOUNDRY_AGENT_NAME", "") or "skill-generator-agent",
@@ -837,13 +845,14 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     (stage, briefs, tools schema) even if its baked-in instructions are short.
     """
     from azure.ai.projects import AIProjectClient
-    from azure.identity import DefaultAzureCredential
+    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
     project_endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
     agent_name = (os.getenv("FOUNDRY_AGENT_NAME") or "skill-generator-agent").strip()
     agent_version = (os.getenv("FOUNDRY_AGENT_VERSION") or "2").strip()
-    system_prompt = _escape_handlebars(build_system_prompt(session))
-    query = _build_foundry_user_prompt(session, user_message)
+    with log_timing("llm.prompt_build", session_id=session.id):
+        system_prompt = _escape_handlebars(build_system_prompt(session))
+        query = _build_foundry_user_prompt(session, user_message)
 
     started = now_ms()
     log_event(
@@ -863,24 +872,56 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
     )
 
     def _invoke() -> str:
-        project = AIProjectClient(project_endpoint, DefaultAzureCredential())
-        openai_client = project.get_openai_client()
-        resp = openai_client.responses.create(
-            input=[
-                {"type": "message", "role": "system", "content": system_prompt},
-                {"type": "message", "role": "user", "content": query},
-            ],
-            extra_body={
-                "agent_reference": {
-                    "name": agent_name,
-                    "version": agent_version,
-                    "type": "agent_reference",
-                }
-            },
-        )
-        return (getattr(resp, "output_text", "") or "").strip()
+        with log_timing("llm.client_init", session_id=session.id):
+            credential = DefaultAzureCredential()
+            provider = get_bearer_token_provider(credential, "https://ai.azure.com/.default")
 
-    text = await asyncio.to_thread(_invoke)
+            def timed_token_provider() -> str:
+                with log_timing("llm.auth", session_id=session.id):
+                    return provider()
+
+            project = AIProjectClient(project_endpoint, credential)
+            openai_client = project.get_openai_client(
+                api_key=timed_token_provider, timeout=FOUNDRY_TIMEOUT_SECONDS, max_retries=FOUNDRY_MAX_RETRIES,
+            )
+        log_event("llm.client.config", session_id=session.id, timeout_seconds=FOUNDRY_TIMEOUT_SECONDS, max_retries=FOUNDRY_MAX_RETRIES)
+        try:
+            with log_timing("llm.responses_create", session_id=session.id):
+                resp = openai_client.responses.create(
+                    input=[
+                        {"type": "message", "role": "system", "content": system_prompt},
+                        {"type": "message", "role": "user", "content": query},
+                    ],
+                    extra_body={
+                        "agent_reference": {
+                            "name": agent_name,
+                            "version": agent_version,
+                            "type": "agent_reference",
+                        }
+                    },
+                )
+            log_event(
+                "llm.response.received", session_id=session.id,
+                foundry_response_id=getattr(resp, "id", None),
+                foundry_request_id=getattr(resp, "_request_id", None),
+            )
+            return (getattr(resp, "output_text", "") or "").strip()
+        finally:
+            for resource in (openai_client, project, credential):
+                try:
+                    with log_timing("llm.client_close", session_id=session.id, client_type=type(resource).__name__):
+                        resource.close()
+                except Exception as exc:
+                    log_exception("llm.cleanup.failed", exc, session_id=session.id)
+
+    try:
+        text = await asyncio.to_thread(_invoke)
+    except Exception as exc:
+        log_exception(
+            "llm.call.failed", exc, session_id=session.id,
+            duration_ms=elapsed_ms(started),
+        )
+        raise
     log_event(
         "llm.call.done",
         agent_name=agent_name,
@@ -894,5 +935,6 @@ async def _run_foundry_turn(session: Session, user_message: str) -> str:
 
 
 def _run_foundry_turn_sync(session: Session, user_message: str) -> str:
+    context = copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _run_foundry_turn(session, user_message)).result()
+        return pool.submit(context.run, asyncio.run, _run_foundry_turn(session, user_message)).result()

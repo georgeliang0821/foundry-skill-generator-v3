@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from .agent import FOUNDRY_OUTPUT_RULES, FOUNDRY_OUTPUT_SHAPE, TOOL_SCHEMAS, OrchestratorAgent
+from .agent import FOUNDRY_MAX_RETRIES, FOUNDRY_OUTPUT_RULES, FOUNDRY_OUTPUT_SHAPE, FOUNDRY_TIMEOUT_SECONDS, TOOL_SCHEMAS, OrchestratorAgent
 from .auth_store import _expired as auth_record_expired, make_auth_store
 from .blob_store import (
     MAX_SKILL_NAME_LEN,
@@ -43,7 +43,7 @@ from .blob_store import (
     safe_skill_name,
     script_relpath_of,
 )
-from .diagnostics import elapsed_ms, env_flag, log_event, log_exception, now_ms
+from .diagnostics import DIAGNOSTICS_REVISION, elapsed_ms, env_flag, log_context, log_event, log_exception, log_timing, now_ms
 from .e2e import (
     FakeE2EAgent,
     e2e_enabled,
@@ -322,7 +322,8 @@ def _load_selected_neighbor_full_md(session) -> None:
     loaded: dict[str, str] = {}
     session.neighbor_edit_policy = {}
     for name in names:
-        row = skills_repo.get_skill(name)
+        with log_timing("neighbor_full_md.sql", session_id=session.id, skill_name=name):
+            row = skills_repo.get_skill(name)
         session.neighbor_edit_policy[name] = "editable" if row and (row.created_by or "").strip().lower() == session.owner_upn else "notify_creator" if row and row.created_by else "skip_missing_creator"
         if row is None or (row.created_by or "").strip().lower() != session.owner_upn:
             continue
@@ -336,7 +337,8 @@ def _load_selected_neighbor_full_md(session) -> None:
                 loaded[name] = md
                 continue
         try:
-            files = store.load_skill(name)
+            with log_timing("neighbor_full_md.blob", session_id=session.id, skill_name=name):
+                files = store.load_skill(name)
         except Exception as exc:  # noqa: BLE001 - one missing neighbor must not fail the batch.
             log_event(
                 "neighbor_full_md.load_missing",
@@ -3310,11 +3312,20 @@ def auth_logout(request: Request):
 
 @app.post("/api/sessions/{session_id}/chat")
 async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn)) -> dict[str, Any]:
+    with log_context(
+        request_id=secrets.token_hex(8), session_id=session_id,
+        diagnostics_revision=DIAGNOSTICS_REVISION, process_id=os.getpid(), source_file=__file__,
+    ):
+        return await _chat_turn(session_id, req, upn)
+
+
+async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, Any]:
     # Non-streaming: collect every agent event into a list and return JSON.
     # The frontend replays the batch through the same onEvent dispatcher it
     # would otherwise use for SSE.
     started = now_ms()
-    session = get_session_for_user(session_id, upn)
+    with log_timing("chat.phase", phase="session_load"):
+        session = get_session_for_user(session_id, upn)
     log_event(
         "chat.start",
         session_id=session.id,
@@ -3335,17 +3346,25 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
             ChatMessage(role=MessageRole.USER, content=req.message, metadata=msg_meta)
         )
     session.touch()
-    persist_session(session)
+    with log_timing("chat.phase", phase="initial_persist"):
+        persist_session(session)
 
     # Refresh the full SKILL.md of the selected neighbor skills so the agent can
     # edit them with a patch this turn without asking the user for the text.
-    _load_selected_neighbor_full_md(session)
+    with log_timing("chat.phase", phase="neighbor_load"):
+        _load_selected_neighbor_full_md(session)
 
     events: list[dict[str, Any]] = []
     assistant_chunks: list[str] = []
     event_counts: dict[str, int] = {}
     try:
-        for event in agent.stream(session, req.message):
+        agent_events = iter(agent.stream(session, req.message))
+        end_of_events = object()
+        while True:
+            with log_timing("chat.phase", phase="agent_next_event"):
+                event = next(agent_events, end_of_events)
+            if event is end_of_events:
+                break
             if not isinstance(event, dict):
                 log_event("chat.event.non_dict", level="warning", session_id=session.id, event_type=type(event).__name__)
                 assistant_chunks.append(str(event))
@@ -3369,7 +3388,8 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
                 try:
                     if data.get("tool") == "propose_material_patch" and (data.get("args") or {}).get("stdout_fix"):
                         _fill_stdout_fix_patch(session, data)
-                    apply_tool_effect(session, data["tool"], data.get("args", {}))
+                    with log_timing("chat.phase", phase="tool_effect", tool=data.get("tool"), call_id=data.get("call_id")):
+                        apply_tool_effect(session, data["tool"], data.get("args", {}))
                 except QualityGateError as qge:
                     log_event(
                         "chat.quality_gate_failed",
@@ -3419,20 +3439,25 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
                         "guidance": guidance,
                         "recovery_action": getattr(rejected, "recovery_action", "ask_user"),
                     }})
-                    persist_session(session)
+                    with log_timing("chat.phase", phase="rejected_tool_persist", call_id=call_id):
+                        persist_session(session)
                     continue
                 if data["tool"] in PASSIVE_TOOL_CALLS:
                     call_id = data.get("call_id")
                     session.pending_tool_calls = [
                         call for call in session.pending_tool_calls if call.call_id != call_id
                     ]
-                persist_session(session)
+                with log_timing("chat.phase", phase="tool_persist", call_id=data.get("call_id")):
+                    persist_session(session)
             events.append({"event": event_name, "data": data})
         assistant_text = "".join(assistant_chunks).strip()
         if assistant_text:
             session.conversation.append(ChatMessage(role=MessageRole.ASSISTANT, content=assistant_text))
             session.touch()
-        persist_session(session)
+        with log_timing("chat.phase", phase="final_persist"):
+            persist_session(session)
+        with log_timing("chat.phase", phase="state_snapshot"):
+            state_snapshot = session.model_dump(mode="json")
         log_event(
             "chat.done",
             session_id=session.id,
@@ -3442,10 +3467,11 @@ async def chat(session_id: str, req: ChatRequest, upn: str = Depends(require_upn
             event_counts=event_counts,
             duration_ms=elapsed_ms(started),
         )
-        events.append({"event": "state_update", "data": session.model_dump(mode="json")})
+        events.append({"event": "state_update", "data": state_snapshot})
         events.append({"event": "done", "data": {}})
     except Exception as exc:
-        persist_session(session)
+        with log_timing("chat.phase", phase="failure_persist"):
+            persist_session(session)
         log_exception("chat.failed", exc, session_id=session.id, stage=session.current_stage, duration_ms=elapsed_ms(started))
         events.append({"event": "error", "data": {"message": str(exc)}})
     return {"events": events}
@@ -4983,6 +5009,13 @@ def inspect_agent() -> dict[str, Any]:
         "tools": TOOL_SCHEMAS,
         "output_shape": FOUNDRY_OUTPUT_SHAPE,
         "output_rules": FOUNDRY_OUTPUT_RULES,
+        "diagnostics": {
+            "revision": DIAGNOSTICS_REVISION,
+            "process_id": os.getpid(),
+            "backend_source": __file__,
+            "foundry_timeout_seconds": FOUNDRY_TIMEOUT_SECONDS,
+            "foundry_max_retries": FOUNDRY_MAX_RETRIES,
+        },
         "prompts": prompts,
         "stage_groups": STAGE_GROUPS_DESCRIPTION,
         "transitions": transitions,

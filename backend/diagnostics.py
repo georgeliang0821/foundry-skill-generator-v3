@@ -12,6 +12,7 @@ from typing import Any, Iterator
 
 SENSITIVE_KEYS = ("authorization", "secret", "password", "token", "key", "credential")
 SAFE_KEYS = ("token_claims", "has_delegated_token")
+DIAGNOSTICS_REVISION = "foundry-phases-v2"
 _log_fields: ContextVar[dict[str, Any]] = ContextVar("log_fields", default={})
 
 

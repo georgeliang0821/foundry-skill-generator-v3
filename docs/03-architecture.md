@@ -95,6 +95,20 @@ sequenceDiagram
     API-->>UI: 回傳事件批次（文字、問題卡、patch、測試結果）
 ```
 
+對話診斷以 JSON log 輸出到啟動 uvicorn 的終端，`SGV2_DEBUG_LOG=1` 啟用（預設開啟），不自動寫入檔案。每回合使用獨立的 `request_id`，跨執行緒傳到 Foundry 呼叫；`diagnostics_revision`、`process_id` 與 `source_file` 標示實際執行版本。`GET /api/inspect` 的 `diagnostics` 也回報版本、PID、後端來源與 SDK timeout／重試設定，可先確認正在跑的服務已載入 `foundry-phases-v2`。
+
+| Log | 計時範圍 |
+| --- | --- |
+| `chat.phase.start/done/failed` | `phase` 區分 session 載入／保存、鄰居載入、取得下一個 Agent 事件、工具套用／保存與狀態快照 |
+| `neighbor_full_md.sql.*` / `neighbor_full_md.blob.*` | 每個鄰居的 SQL 查詢與 Skill store 讀取，附 `skill_name`；store 可能命中快取 |
+| `llm.prompt_build.*` / `llm.client_init.*` | prompt 組裝與 SDK／credential 初始化 |
+| `llm.auth.*` | SDK 呼叫 token provider 的耗時，不記錄 token 內容；可能使用 credential 快取，不代表每次都向 Entra 發請求 |
+| `llm.responses_create.*` / `llm.call.failed` | SDK 請求與失敗；請求時間包含驗證、網路及遠端處理，不能直接當成 Foundry trace 的 Agent 執行時間 |
+| `llm.response.received` | `foundry_response_id` 與 SDK 提供的 `foundry_request_id`（若有），用於對照遠端回應 |
+| `llm.client.config` | SDK timeout 為 120 秒，SDK 自動重試為 0 次；模型輸出 JSON 格式修復的單次重試是另一層機制 |
+
+完成或失敗紀錄帶 `duration_ms`。卡住時依同一個 `request_id` 找最後一筆尚無 `.done`／`.failed` 的 `.start`；父子階段互相包含，不應將所有耗時相加。SDK timeout 是 HTTP I/O 等待設定，不是整個回合的硬性期限，初始化與驗證可能另花時間。前端 180 秒 timeout 不代表後端已取消，亦不能證明模型正在運算。Session 訊息時間差不是 Agent 執行時間。上述 chat 計時不涵蓋相依登入驗證、HTTP 回應編碼／傳輸及瀏覽器渲染。
+
 ### 2.2 儲存（接受 patch / 按下儲存）
 
 接受 patch 後在記憶體更新 `SKILL.md`，並在綁定遠端 Skill 時嘗試**雙寫 Blob + SQL**。雙寫完成即生效，**沒有額外的 publish / sync 步驟**：runtime 每次請求都直接從 SQL + Blob 動態解析 skill（Mode B）。
@@ -219,7 +233,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `material_patch.py` | `propose_material_patch` 的防線：以 AST 取出素材的外部呼叫（非 stdlib 或 I/O stdlib 的 import 起點 + 屬性鏈，不看變數名），patch 不得刪改任何一個，且邊界語句（import、只呼叫 print / json.dumps / argparse / exit 的語句、輸入綁定）以外的原始行改動（忽略縮排）不得超過 `MAX_CHANGED_RATIO`。patch 後仍有 script-form 問題的檢查在 `main._checked_material_patch()`；機械式 stdout 修正（`stdout_fix=true`）由 `skill_lint.stdout_to_stderr()` 計算、`main._checked_stdout_fix()` 把關 |
 | `mcp_jsonrpc.py` | MCP JSON-RPC client（讀取 ACA 環境變數等）。以 `MICROSOFT_*` App Registration 對自己做 client credentials 取得 app-only token（audience 預設從 `MICROSOFT_OBO_SCOPE` 推導），並快取至過期前 60 秒；audience 推導不出來則退回匿名呼叫 |
 | `db.py` | Azure SQL 連線輔助（`mssql-python`，AAD 驗證策略）；同一執行緒的巢狀查詢共用外層交易，避免通知處理中的建立者查詢提前 commit，暫時性失敗重試整筆交易 |
-| `diagnostics.py` | 結構化記錄輔助（`log_event` / `log_exception`），會把疑似機密的值遮罩成 `***` |
+| `diagnostics.py` | 結構化記錄（`log_event` / `log_exception`）、追蹤上下文（`log_context`）與分段計時（`log_timing`），會遮罩疑似機密的值 |
 | `e2e.py` | 本機 E2E 測試掛鉤（搭配 `SGV2_E2E_MODE`）：fake agent、fake 路由測試（script 型會附上 `requested_scripts`）、fake ACA 查詢（scenario `script_flags_on` 與 `material_patch` 才開啟 script 旗標；`material_patch` 在 PREPARE 對 code 素材提出固定的 `propose_material_patch`） |
 
 ---
