@@ -7,13 +7,13 @@
 
 ## 重大變更 (What's New) 2026-10
 
-### Skill 覆寫前自動備份
+### Skill 覆寫與刪除前備份
 
 啟用後，Generator 每次覆寫既有 skill 前，會先將 Blob 上的舊 `SKILL.md`、script 與所有附帶檔案保存到獨立歷史容器，再執行正常儲存。每份備份附有 `manifest.json`，記錄來源版本、備份觸發者與時間，以及各檔案的 SHA256；首次建立不備份，NEW session 再次儲存與鄰近 skill 儲存也適用。
 
-**啟用方式**：在同一 Storage Account 預先建立獨立、非匿名的歷史容器（例如 `skill-history`），授予 Generator 使用的 Blob 身分所需讀寫權限，設定 `AZURE_BLOB_HISTORY_CONTAINER` 後重新啟動。留空不啟用；啟用後備份失敗會回 HTTP 503 並停止覆寫，版本衝突仍回 409。
+**啟用方式**：在同一 Storage Account 預先建立獨立、非匿名的歷史容器（例如 `skill-history`），授予 Generator 使用的 Blob 身分所需讀寫權限，設定 `AZURE_BLOB_HISTORY_CONTAINER` 後重新啟動。留空不啟用覆寫備份，也無法使用 Manage Skills 的刪除功能；備份失敗會回 HTTP 503 並停止覆寫或刪除，覆寫版本衝突仍回 409。
 
-**功能範圍**：歷史不自動清理，刪除或改名也不移除已有備份；目前不提供歷史清單、差異比較或還原介面，也不另替刪除或改名建立備份。備份不保證跨檔案原子一致性，亦非所有外部寫入的完整稽核紀錄。
+**功能範圍**：Manage Skills 刪除前必須成功備份最後版本的完整套件，備份標記為 `operation: delete`；完成後重新檢查相依關係與來源版本，才刪除正式檔案與 SQL 登錄。歷史不自動清理，刪除或改名也不移除已有備份；改名不額外建立備份，目前不提供歷史清單、差異比較或還原介面。備份不保證跨檔案原子一致性，亦非所有外部寫入的完整稽核紀錄。
 
 容器與權限設定見 [02-setup.md 第 2.5 節](docs/02-setup.md#25-azure-blob)，備份格式與儲存流程見 [03-architecture.md 第 2.2 節](docs/03-architecture.md#22-儲存接受-patch--按下儲存)。
 
