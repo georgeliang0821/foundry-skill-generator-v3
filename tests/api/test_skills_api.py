@@ -6,6 +6,42 @@ from backend.models import TestResult as ModelTestResult
 from backend.models import TestRun as ModelTestRun
 
 
+@pytest.mark.parametrize("purpose", ["read", "modify"])
+def test_skill_lists_exclude_private_rows_with_global_blob_names(client, backend_main, fake_sql, purpose):
+    for name in ("global-skill", "private-only"):
+        backend_main.store.save_skill(backend_main.SkillFiles(
+            name=name, skill_md=f"---\nname: {name}\ndescription: Demo\n---\n",
+        ))
+        fake_sql.upsert_skill(name, owner_upn="test@example.com", created_by="test@example.com")
+        fake_sql.add_grant(name, "test@example.com", owner_upn="test@example.com")
+    fake_sql.upsert_skill("global-skill", created_by="test@example.com")
+    fake_sql.add_grant("global-skill", "test@example.com")
+
+    response = client.get(f"/api/skills?purpose={purpose}")
+
+    assert response.status_code == 200, response.text
+    assert [item["name"] for item in response.json()] == ["global-skill"]
+    assert response.json()[0]["skill_scope"] == "global"
+
+
+def test_private_grant_does_not_authorize_same_name_global_skill(client, backend_main, fake_sql):
+    backend_main.store.save_skill(backend_main.SkillFiles(
+        name="same-name", skill_md="---\nname: same-name\ndescription: Global\n---\n",
+    ))
+    fake_sql.upsert_skill("same-name", created_by="other@example.com")
+    fake_sql.upsert_skill("same-name", owner_upn="test@example.com", created_by="test@example.com")
+    fake_sql.add_grant("same-name", "test@example.com", owner_upn="test@example.com")
+
+    assert client.get("/api/skills/same-name").status_code == 403
+    assert client.get("/api/skills").json() == []
+    assert client.get("/api/skills?purpose=modify").json() == []
+
+    fake_sql.add_grant("same-name", "test@example.com")
+    assert client.get("/api/skills/same-name").status_code == 200
+    assert client.get("/api/skills").json()[0]["skill_scope"] == "global"
+    assert client.get("/api/skills?purpose=modify").json() == []
+
+
 def test_save_session_skill_then_list_and_load(client) -> None:
     session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
     client.put(

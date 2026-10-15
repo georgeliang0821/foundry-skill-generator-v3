@@ -100,7 +100,7 @@ class _FakeSqlState:
         return {
             meta["skill_name"]
             for key, meta in self.skills.items()
-            if self._visible(user_upn, key, meta)
+            if meta["owner_upn"] is None and self._visible(user_upn, key, meta)
         }
 
     def user_has_access(self, user_upn, skill_name, owner_upn=None) -> bool:
@@ -133,7 +133,7 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
         return [
             _row(key, meta)
             for key, meta in sorted(state.skills.items())
-            if state._visible(upn, key, meta)
+            if meta["owner_upn"] is None and state._visible(upn, key, meta)
         ]
 
     def _get_skill(name, owner_upn=None):
@@ -169,7 +169,8 @@ def fake_sql(monkeypatch) -> _FakeSqlState:
         skills_repo, "list_skills_created_by",
         lambda upn: [
             _row(key, meta) for key, meta in sorted(state.skills.items())
-            if upn.strip() and meta["enabled"] and meta.get("created_by") == upn.strip().lower()
+            if upn.strip() and meta["owner_upn"] is None and meta["enabled"]
+            and meta.get("created_by") == upn.strip().lower()
         ],
     )
     monkeypatch.setattr(skills_repo, "get_skill", _get_skill)

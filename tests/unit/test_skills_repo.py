@@ -148,6 +148,47 @@ def test_list_skills_for_user_returns_empty_for_blank_upn(fake_db):
     assert skills_repo.list_skills_for_user("") == []
 
 
+@pytest.mark.parametrize("query_name", [
+    "list_skills_for_user", "list_skills_created_by", "list_grants_for_user",
+])
+def test_generator_skill_lists_sql_filter_global_scope(fake_db, query_name):
+    captured = {}
+
+    def behavior(sql, params):
+        captured.update(sql=sql, params=params)
+        return []
+
+    fake_db["execute"] = behavior
+    getattr(skills_repo, query_name)("user@x")
+    assert "s.owner_upn IS NULL" in captured["sql"]
+    assert "s.enabled = 1" in captured["sql"]
+    assert captured["params"] == ("user@x",)
+
+
+def test_generator_skill_lists_local_exclude_granted_private_skills(local_repo):
+    skills_repo.upsert_skill("mine", created_by="user@x")
+    skills_repo.add_grant("mine", "user@x")
+    skills_repo.upsert_skill("public", created_by="other@x", is_public=True)
+    skills_repo.upsert_skill("same-name", created_by="other@x")
+    for name in ("private-only", "same-name"):
+        skills_repo.upsert_skill(name, owner_upn="user@x", created_by="user@x")
+        skills_repo.add_grant(name, "user@x", owner_upn="user@x")
+
+    readable = skills_repo.list_skills_for_user("user@x")
+    assert {row.skill_name for row in readable} == {"mine", "public"}
+    assert all(row.owner_upn is None for row in readable)
+    assert [row.skill_name for row in skills_repo.list_skills_created_by("user@x")] == ["mine"]
+    assert skills_repo.list_grants_for_user("user@x") == {"mine", "public"}
+    assert not skills_repo.user_has_access("user@x", "same-name")
+    assert skills_repo.user_has_access("user@x", "same-name", owner_upn="user@x")
+
+    skills_repo.add_grant("same-name", "user@x")
+    readable = skills_repo.list_skills_for_user("user@x")
+    assert {row.skill_name for row in readable} == {"mine", "public", "same-name"}
+    assert all(row.owner_upn is None for row in readable)
+    assert next(row for row in readable if row.skill_name == "same-name").created_by == "other@x"
+
+
 def test_list_skills_for_user_returns_rows(fake_db):
     from datetime import datetime
     sentinel_at = datetime(2025, 1, 1)

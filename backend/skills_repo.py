@@ -121,7 +121,10 @@ class LocalSkillsRepo:
             return []
         with self._lock:
             now = self._now()
-            rows = [row for row in self._skills.values() if self._is_visible(user_upn, row, now)]
+            rows = [
+                row for row in self._skills.values()
+                if row.owner_upn is None and self._is_visible(user_upn, row, now)
+            ]
             return sorted(
                 rows,
                 key=lambda row: (
@@ -144,7 +147,10 @@ class LocalSkillsRepo:
             return []
         with self._lock:
             return sorted(
-                [row for row in self._skills.values() if row.enabled and row.created_by == creator],
+                [
+                    row for row in self._skills.values()
+                    if row.owner_upn is None and row.enabled and row.created_by == creator
+                ],
                 key=lambda row: row.skill_name,
             )
 
@@ -297,9 +303,9 @@ def catalog_skill_scopes() -> set[tuple[str, str | None]]:
 
 
 def list_skills_for_user(user_upn: str) -> list[SkillRow]:
-    """Skills visible to the user: a live grant OR is_public, enabled-only.
+    """Global skills visible to the user: a live grant OR is_public, enabled-only.
 
-    Reproduces the WHERE clause of dbo.v_my_skills (see module docstring).
+    Applies the visibility rules of dbo.v_my_skills within the Generator's global scope.
     """
     if _local_repo is not None:
         return _local_repo.list_skills_for_user(user_upn)
@@ -313,6 +319,7 @@ def list_skills_for_user(user_upn: str) -> list[SkillRow]:
               AND g.user_upn = ?
               AND (g.expires_at IS NULL OR g.expires_at > SYSUTCDATETIME())
         WHERE s.enabled = 1
+                    AND s.owner_upn IS NULL
           AND (g.user_upn IS NOT NULL OR s.is_public = 1)
         ORDER BY s.updated_at DESC, s.skill_name ASC
     """
@@ -348,7 +355,7 @@ def list_skills_created_by(user_upn: str) -> list[SkillRow]:
         return _local_repo.list_skills_created_by(creator)
     rows = db.fetchall(
         f"SELECT {_SKILL_COLUMNS} FROM dbo.skills s "
-        "WHERE s.enabled = 1 AND s.created_by = ? "
+        "WHERE s.enabled = 1 AND s.owner_upn IS NULL AND s.created_by = ? "
         "ORDER BY s.updated_at DESC, s.skill_name ASC",
         (creator,),
     )
@@ -522,7 +529,7 @@ def list_grants(skill_name: str, owner_upn: str | None = None) -> list[GrantRow]
 
 
 def list_grants_for_user(user_upn: str) -> set[str]:
-    """Skill names the user can currently reach: live grant OR is_public."""
+    """Global skill names the user can currently reach: live grant OR is_public."""
     if _local_repo is not None:
         return _local_repo.list_grants_for_user(user_upn)
     if not user_upn:
@@ -535,6 +542,7 @@ def list_grants_for_user(user_upn: str) -> set[str]:
               AND g.user_upn = ?
               AND (g.expires_at IS NULL OR g.expires_at > SYSUTCDATETIME())
         WHERE s.enabled = 1
+                    AND s.owner_upn IS NULL
           AND (g.user_upn IS NOT NULL OR s.is_public = 1)
     """
     return {r[0] for r in db.fetchall(sql, (user_upn,))}
