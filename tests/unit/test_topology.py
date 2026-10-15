@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
+
+import yaml
 
 from backend.models import Mode, SkillKind
 from backend.topology import (
     METADATA_SIZE_WARN_CHARS,
     Severity,
+    canonicalize_skill_type,
     declared_children,
     has_errors,
     validate_topology,
@@ -49,6 +53,76 @@ def validate(md: str, kind: SkillKind = SkillKind.SCENARIO, **kwargs):
 def test_clean_files_pass() -> None:
     assert validate(SCENARIO_MD) == []
     assert validate(CAPABILITY_MD, SkillKind.CAPABILITY) == []
+
+
+@pytest.mark.parametrize("declared,script,valid", [
+    ("inline", None, True), ("script", "print('ok')", True),
+    ("inline", "print('ok')", False), ("script", None, False),
+    ("unknown", None, False), ("", None, False), (123, None, False),
+    ("code-generation", None, True), ("code-generation", "print('ok')", False),
+])
+def test_declared_type_matches_package(declared, script, valid):
+    import yaml
+
+    md = CAPABILITY_MD.replace("  author: e2e", "  author: e2e\n  skill_type: " + yaml.safe_dump(declared).splitlines()[0])
+    issues = validate(md, SkillKind.CAPABILITY, script=script)
+    assert ("T11" not in rules(issues)) == valid
+
+
+def test_scenario_cannot_bundle_script():
+    assert "T11" in rules(validate(SCENARIO_MD, script="print('ok')"))
+
+
+@pytest.mark.parametrize("script,expected", [(None, "inline"), ("print('ok')", "script")])
+def test_missing_type_is_canonicalized(script, expected):
+    md = canonicalize_skill_type(CAPABILITY_MD, SkillKind.CAPABILITY, script)
+    assert f"skill_type: {expected}" in md
+    assert "## Overview\nOne line." in md
+    assert canonicalize_skill_type(md, SkillKind.CAPABILITY, script) == md
+
+
+def test_type_alias_is_written_as_inline_without_overriding_conflicts():
+    md = CAPABILITY_MD.replace("  author: e2e", "  author: e2e\n  skill_type: code-generation")
+    assert "skill_type: inline" in canonicalize_skill_type(md, SkillKind.CAPABILITY, None)
+    with pytest.raises(ValueError):
+        canonicalize_skill_type(md, SkillKind.CAPABILITY, "print('ok')")
+
+
+def test_canonical_type_preserves_body_and_other_frontmatter_format():
+    md = '---\nname: demo\nmetadata:\n  version: "1.6" # keep this\n  tags: [a, b]\n---\n\nBody without trailing newline'
+    result = canonicalize_skill_type(md, SkillKind.CAPABILITY, None)
+    assert result == md.replace("metadata:\n", "metadata:\n  skill_type: inline\n")
+
+
+@pytest.mark.parametrize("metadata", ["", "metadata: {}\n", "metadata: {author: owner}\n"])
+def test_canonical_type_handles_missing_and_flow_metadata(metadata):
+    md = f"---\nname: demo\n{metadata}---\n\nBody.\n"
+    result = canonicalize_skill_type(md, SkillKind.CAPABILITY, None)
+    assert yaml.safe_load(result.split("---", 2)[1])["metadata"]["skill_type"] == "inline"
+    assert result.split("---", 2)[2] == "\n\nBody.\n"
+    assert canonicalize_skill_type(result, SkillKind.CAPABILITY, None) == result
+
+
+@pytest.mark.parametrize("declaration", ["skill_type: &type code-generation\n  author: *type", "skill_type: >-\n    code-generation\n  author: code-generation"])
+def test_canonical_type_handles_yaml_aliases_and_block_scalars(declaration):
+    md = f"---\nname: demo\nmetadata:\n  {declaration}\n---\nBody.\n"
+    result = canonicalize_skill_type(md, SkillKind.CAPABILITY, None)
+    metadata = yaml.safe_load(result.split("---", 2)[1])["metadata"]
+    assert metadata == {"skill_type": "inline", "author": "code-generation"}
+    assert result.endswith("---\nBody.\n")
+
+
+@pytest.mark.parametrize("path", sorted((Path(__file__).resolve().parents[2] / "skills").glob("*/SKILL.md")), ids=lambda path: path.parent.name)
+def test_example_skill_declares_its_actual_package_type(path):
+    md = path.read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(md.split("---", 2)[1])
+    metadata = frontmatter.get("metadata", {})
+    scripts = sorted((path.parent / "scripts").rglob("*")) if (path.parent / "scripts").exists() else []
+    scripts = [file for file in scripts if file.is_file()]
+    expected = "scenario-orchestration" if metadata.get("children") else "script" if scripts else "inline"
+    assert metadata["skill_type"] == expected
+    if scripts:
+        assert [file.relative_to(path.parent).as_posix() for file in scripts] == [f"scripts/{frontmatter['name']}.py"]
 
 
 # --- T1 / T2 / T3: conservative output shape -------------------------------

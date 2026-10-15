@@ -3,6 +3,7 @@ name: expense-report-draft-v1
 description: "建立費用報銷草稿時使用：引導並執行報銷初始化、預算與費用項目選擇，以及草稿建立。適用於「費用報銷」、「報帳」、「expense reimbursement」與「create expense draft」等請求；不處理請假、會議室或單純建立不連接系統的自訂技能。"
 metadata:
   author: geoliang@microsoft.com
+  skill_type: inline
   tags:
     - expense
     - reimbursement

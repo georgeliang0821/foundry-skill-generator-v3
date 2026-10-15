@@ -3,6 +3,7 @@ name: procurement-requirements-analysis
 description: "Analyze an existing procurement case OCR manifest and its local Markdown corpus into a populated, traceable canonical requirements package — atomic requirements with stable IDs, decision statuses, acceptance criteria, glossary, actors, processes, domain states, data dictionary, UI requirements, notifications, integrations, non-functional requirements, exceptions, assumptions, conflicts, and open questions — ready for downstream specification, tracker, and prototype generation. Use for Chinese or English requests to analyze procurement requirements, review an OCR-complete case, or identify evidence, gaps, conflicts, and open questions by case ID; do not use it to retrieve, download, or OCR procurement documents from SharePoint."
 metadata:
   author: "a-wureeve@microsoft.com"
+  skill_type: inline
   version: "2.0"
   tags:
     - procurement

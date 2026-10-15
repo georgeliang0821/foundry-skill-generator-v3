@@ -218,7 +218,7 @@ def test_eaa_lint_receives_only_skill_md(client, backend_main, grant_skill, fake
 
     def _lint(skill_name, files, **kwargs):
         sent.append(dict(files))
-        return backend_main.EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="test")
+        return backend_main.EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="1.2")
 
     monkeypatch.setattr(backend_main, "lint_skill_package", _lint)
     _seed(backend_main, grant_skill, "demo", {"assets/a.css": "a"})

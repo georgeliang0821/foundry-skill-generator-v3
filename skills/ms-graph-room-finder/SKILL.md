@@ -2,6 +2,7 @@
 name: ms-graph-room-finder
 description: Discover Microsoft 365 conference rooms and room lists from Microsoft Graph Places endpoints, then filter candidates by building, capacity, equipment, and availability-related constraints before handing results to a booking skill. Use this skill when a user wants to find suitable rooms or explore room lists, including bilingual prompts such as "find a room in CLS" or "找 CLS 大樓的會議室", but not when they want to reserve or change a booking.
 metadata:
+  skill_type: script
   author: owner
   version: "3.0"
   tags:

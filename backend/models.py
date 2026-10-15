@@ -63,6 +63,7 @@ class SkillKind(str, Enum):
 
 
 SCENARIO_SKILL_TYPE = "scenario-orchestration"
+GENERATOR_SKILL_TYPES = ("scenario-orchestration", "inline", "script")
 
 
 class MaterialKind(str, Enum):

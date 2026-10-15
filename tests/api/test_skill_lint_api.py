@@ -245,7 +245,7 @@ fetch_skill(skill_name="calendar-child", sections="Required Inputs")
     assert backend_main.store.load_skill("room-flow").skill_md == md
 
 
-def _lint_result(backend_main, *, valid=True, errors=(), warnings=(), ruleset_version="1.0"):
+def _lint_result(backend_main, *, valid=True, errors=(), warnings=(), ruleset_version="1.2"):
     return backend_main.EaaLintResult(
         valid=valid, errors=list(errors), warnings=list(warnings), ruleset_version=ruleset_version
     )
@@ -267,9 +267,10 @@ def test_save_sends_the_skill_package_to_eaa_and_records_the_ruleset(client, bac
     session_id, response = _save_raising_skill(client)
 
     assert response.status_code == 200
-    assert seen == [("raising-skill", {"SKILL.md": RAISING_SKILL})]
-    assert response.json()["eaa_ruleset_version"] == "1.0"
-    assert backend_main.sessions[session_id].eaa_ruleset_version == "1.0"
+    assert seen == [("raising-skill", {"SKILL.md": response.json()["current_skill"]["skill_md"]})]
+    assert "skill_type: inline" in seen[0][1]["SKILL.md"]
+    assert response.json()["eaa_ruleset_version"] == "1.2"
+    assert backend_main.sessions[session_id].eaa_ruleset_version == "1.2"
 
 
 def test_save_is_blocked_by_eaa_lint_errors(client, backend_main, monkeypatch) -> None:

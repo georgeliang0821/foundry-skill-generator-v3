@@ -1,6 +1,6 @@
 """Mechanical inline <-> script move for a MODIFY session.
 
-Only the code moves; nothing is rewritten. Whatever the new form still
+The code moves and metadata.skill_type follows it; the body is not rewritten. Whatever the new form still
 requires shows up in the normal lint and `## Skill Form` conditions for the
 agent and the user to finish.
 """
@@ -14,12 +14,13 @@ from typing import Literal
 from .models import ChatMessage, Material, MaterialKind, MessageRole, Mode, Session, SkillKind
 from .sections import h2_sections, normalize_section
 from .skill_lint import GATEKEEPER_ADDENDUM_SECTION, body_python_fences
+from .topology import canonicalize_skill_type
 
 SAMPLE_CODE_SECTION = "API Reference / Sample Code"
 
 FORM_CONVERTED_MESSAGE = (
-    "The user converted this skill from {old} to {new} form. Only the code moved: {moved} "
-    "SKILL.md was not rewritten, so its sections and wording may still describe the {old} form. "
+    "The user converted this skill from {old} to {new} form. The code moved and metadata.skill_type "
+    "was updated: {moved} SKILL.md's body was not rewritten, so its sections and wording may still describe the {old} form. "
     "Read `## Skill Form` and the lint results, then propose patches that bring SKILL.md in line "
     "with the {new} form. Tell the user plainly what still has to change."
 )
@@ -91,13 +92,19 @@ def convert_session_form(session: Session, target: Literal["inline", "script"]) 
             "This session already has edits. Save or discard them first, then convert the form."
         )
     draft = session.current_skill
+    try:
+        canonicalize_skill_type(draft.skill_md, SkillKind.CAPABILITY, draft.script)
+    except ValueError as exc:
+        raise FormConversionError(str(exc)) from exc
     if target == "script":
         if session.assets:
             raise FormConversionError(
                 f"{len(session.assets)} skill asset(s) are attached; a script skill ships only "
                 "SKILL.md and its script."
             )
-        draft.skill_md, draft.script = inline_to_script(draft.skill_md)
+        skill_md, script = inline_to_script(draft.skill_md)
+        draft.skill_md = canonicalize_skill_type(skill_md, SkillKind.CAPABILITY, script, allow_form_change=True)
+        draft.script = script
         session.script_removed = False
         # The agent adapts the script's edges through this material; see script_edge_material().
         has_code_material = any(MaterialKind(m.kind) is MaterialKind.CODE for m in session.materials)
@@ -111,7 +118,8 @@ def convert_session_form(session: Session, target: Literal["inline", "script"]) 
     else:
         if draft.script is None:
             raise FormConversionError("This skill has no script to move into SKILL.md.")
-        draft.skill_md = script_to_inline(draft.skill_md, draft.script)
+        skill_md = script_to_inline(draft.skill_md, draft.script)
+        draft.skill_md = canonicalize_skill_type(skill_md, SkillKind.CAPABILITY, None, allow_form_change=True)
         session.materials = [
             m for m in session.materials
             if not (MaterialKind(m.kind) is MaterialKind.CODE and m.content == draft.script)

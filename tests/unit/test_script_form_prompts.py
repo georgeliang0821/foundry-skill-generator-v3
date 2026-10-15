@@ -23,7 +23,7 @@ MD = (FIXTURE / "SKILL.md").read_text(encoding="utf-8")
 PY = (FIXTURE / "scripts" / "ms-graph-room-finder.py").read_text(encoding="utf-8")
 FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
 FLAGS_OFF = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "false"}}
-# sha256 of each inline prompt, captured before Phase 3 added any script-form prompt text.
+# sha256 of each inline prompt, including the Generator skill-type contract.
 BASELINE = json.loads((Path(__file__).parent / "inline_prompt_baseline.json").read_text(encoding="utf-8"))
 
 
@@ -46,7 +46,7 @@ def _session(stage: Stage, *, mode: str = "new", kind: str = "capability", aca=F
         skill_form=form,
     )
     if stage is not Stage.PREPARE:
-        session.current_skill.skill_md = MD
+        session.current_skill.skill_md = MD.replace("skill_type: script", "skill_type: inline") if form == "inline" else MD
         session.current_skill.version_hash = "golden-hash"
     return session
 

@@ -25,7 +25,7 @@ def _skill_md(name: str) -> str:
     return f"---\nname: {name}\ndescription: Does a thing.\n---\n\n## Overview\n\nBody.\n"
 
 
-def _lint_recorder(backend_main, monkeypatch, ruleset: str = "1.1"):
+def _lint_recorder(backend_main, monkeypatch, ruleset: str = "1.2"):
     calls: list[dict] = []
 
     def _lint(skill_name, files, **kwargs):
@@ -59,7 +59,8 @@ def test_save_writes_the_script_and_lints_it_under_its_skill_name(client, backen
 
     assert response.status_code == 200
     assert backend_main.store.load_skill("room-finder").script == SCRIPT
-    assert calls[0]["files"] == {"SKILL.md": _skill_md("room-finder"), "scripts/room-finder.py": SCRIPT}
+    assert calls[0]["files"] == {"SKILL.md": response.json()["current_skill"]["skill_md"], "scripts/room-finder.py": SCRIPT}
+    assert "  skill_type: script\n" in calls[0]["files"]["SKILL.md"]
     assert "room-finder" in fake_sql.skills
 
 
@@ -70,7 +71,7 @@ def test_script_save_is_refused_when_eaa_lint_predates_script_checks(client, bac
     response = client.post(f"/api/sessions/{session.id}/save", json={})
 
     assert response.status_code == 503
-    assert "1.1" in response.json()["detail"]
+    assert "1.2" in response.json()["detail"]
     assert fake_sql.skills == {}
 
 
@@ -83,6 +84,64 @@ def test_inline_session_cannot_overwrite_a_script_skill(client, backend_main, gr
     assert response.status_code == 409
     assert response.json()["detail"]["kind"] == "script_form_mismatch"
     assert backend_main.store.load_skill("room-finder").script == SCRIPT
+
+
+@pytest.mark.parametrize("declared", [None, "inline", "code-generation"])
+def test_inline_save_writes_canonical_type_and_is_idempotent(client, backend_main, monkeypatch, declared) -> None:
+    calls = _lint_recorder(backend_main, monkeypatch)
+    session = _script_session(backend_main, "demo", script=None)
+    if declared is not None:
+        session.current_skill.skill_md = session.current_skill.skill_md.replace("description:", f"metadata:\n  skill_type: {declared}\ndescription:")
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+    assert response.status_code == 200, response.text
+    saved = backend_main.store.load_skill("demo")
+    assert "skill_type: inline" in saved.skill_md
+    assert "code-generation" not in saved.skill_md
+    assert saved.script is None
+    assert calls[0]["files"] == {"SKILL.md": saved.skill_md}
+    assert client.post(f"/api/sessions/{session.id}/save", json={}).status_code == 200
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
+
+
+@pytest.mark.parametrize("script, declared", [(None, "script"), (SCRIPT, "inline"), (None, "unknown"), (SCRIPT, "code-generation")])
+def test_type_conflict_is_rejected_without_writes(client, backend_main, fake_sql, monkeypatch, script, declared) -> None:
+    calls = _lint_recorder(backend_main, monkeypatch)
+    session = _script_session(backend_main, "demo", script=script)
+    session.current_skill.skill_md = session.current_skill.skill_md.replace("description:", f"metadata:\n  skill_type: {declared}\ndescription:")
+    original = session.current_skill.skill_md
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+    assert response.status_code == 400
+    assert "T11" in response.json()["detail"]
+    assert not fake_sql.skills and not backend_main.store.list_skills() and not calls
+    assert session.current_skill.skill_md == original
+
+
+@pytest.mark.parametrize("script, declared", [(None, "script"), (SCRIPT, "inline")])
+def test_modify_rejects_explicit_type_conflict(client, backend_main, grant_skill, script, declared) -> None:
+    saved = _seed(backend_main, grant_skill, "demo", script=script)
+    saved.skill_md = saved.skill_md.replace("description:", f"metadata:\n  skill_type: {declared}\ndescription:")
+    backend_main.store.save_skill(saved)
+    response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["kind"] == "skill_type_invalid"
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
+
+
+@pytest.mark.parametrize("ruleset", ["1.0", "1.1", "unknown", ""])
+def test_inline_save_requires_type_aware_lint(client, backend_main, fake_sql, monkeypatch, ruleset) -> None:
+    _lint_recorder(backend_main, monkeypatch, ruleset=ruleset)
+    session = _script_session(backend_main, "demo", script=None)
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+    assert response.status_code == 503
+    assert not fake_sql.skills and not backend_main.store.list_skills()
+
+
+def test_patch_cannot_drop_an_explicit_type(backend_main) -> None:
+    session = _script_session(backend_main, "demo", script=None)
+    original = session.current_skill.skill_md
+    session.current_skill.skill_md = original.replace("description:", "metadata:\n  skill_type: inline\ndescription:")
+    with pytest.raises(ValueError, match="keep metadata.skill_type intact"):
+        backend_main._assert_topology_preserved(session, original, tool="propose_patch")
 
 
 def test_modify_session_loads_the_script(client, backend_main, grant_skill) -> None:
@@ -407,6 +466,36 @@ def test_neighbor_save_leaves_the_script_untouched(client, backend_main, grant_s
 
     assert response.status_code == 200
     assert backend_main.store.load_skill("peer-skill").script == SCRIPT
+    assert "skill_type: script" in backend_main.store.load_skill("peer-skill").skill_md
+
+
+def test_neighbor_save_rejects_type_conflict(client, backend_main, grant_skill) -> None:
+    saved = _seed(backend_main, grant_skill, "peer-skill")
+    session_id = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+    changed = saved.skill_md.replace("description:", "metadata:\n  skill_type: inline\ndescription:")
+    client.post(f"/api/sessions/{session_id}/neighbor-edits/peer-skill/propose", json={"skill_md": changed})
+    response = client.post(f"/api/sessions/{session_id}/neighbor-edits/peer-skill/save")
+    assert response.status_code == 400
+    assert backend_main.store.load_skill("peer-skill").skill_md == saved.skill_md
+    assert backend_main.store.load_skill("peer-skill").script == SCRIPT
+
+
+@pytest.mark.parametrize("neighbor", [False, True])
+def test_save_never_discards_unexpected_script_files(client, backend_main, grant_skill, neighbor) -> None:
+    saved = _seed(backend_main, grant_skill, "peer-skill")
+    backend_main.store.store._assets["peer-skill"] = {"scripts/helper.py": b"print(1)\n"}
+    if neighbor:
+        sid = client.post("/api/sessions", json={"mode": "new"}).json()["id"]
+        client.post(f"/api/sessions/{sid}/neighbor-edits/peer-skill/propose", json={"skill_md": saved.skill_md + "\nEdited.\n"})
+        endpoint = f"/api/sessions/{sid}/neighbor-edits/peer-skill/save"
+    else:
+        session = _script_session(backend_main, "peer-skill")
+        endpoint = f"/api/sessions/{session.id}/save"
+    response = client.post(endpoint, json={})
+    assert response.status_code == 400
+    assert "unexpected scripts/" in response.json()["detail"]["message"]
+    assert backend_main.store.load_skill("peer-skill").skill_md == saved.skill_md
+    assert backend_main.store.load_assets("peer-skill") == {"scripts/helper.py": b"print(1)\n"}
 
 
 def test_session_lint_and_save_use_the_script_form_rules(client, backend_main, fake_sql, monkeypatch) -> None:

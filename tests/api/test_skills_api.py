@@ -102,10 +102,12 @@ def test_new_session_second_save_captures_previous_content(client, backend_main)
     client.put(f"/api/sessions/{sid}/draft", json={"skill_md": original})
     assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
     assert not local.history
+    first_saved = backend_main.store.load_skill("demo-skill").skill_md
+    assert "skill_type: inline" in first_saved
     client.put(f"/api/sessions/{sid}/draft", json={"skill_md": original.replace("Original", "Changed")})
     assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
     backup = next(iter(local.history.values()))
-    assert backup["files"]["SKILL.md"] == original.encode("utf-8")
+    assert backup["files"]["SKILL.md"] == first_saved.encode("utf-8")
     assert backup["manifest"]["captured_by"] == "test@example.com"
 
 
@@ -127,7 +129,7 @@ def test_save_versions_new_content_but_preserves_old_snapshot(client, backend_ma
 
     response = client.post(endpoint, json={} if neighbor else {"change_summary": "Update the instructions."})
     assert response.status_code == 200, response.text
-    expected = changed.replace('"1.6"', '"1.6.1"')
+    expected = changed.replace('"1.6"', '"1.6.1"').replace("metadata:\n", "metadata:\n  skill_type: inline\n")
     assert backend_main.store.load_skill("demo-skill").skill_md == expected
     backup = next(iter(local.history.values()))
     assert backup["files"]["SKILL.md"] == original.encode("utf-8")
@@ -184,7 +186,7 @@ def test_failed_lint_does_not_advance_version_or_create_snapshot(client, backend
 
     def lint(name, files):
         calls.append(files["SKILL.md"])
-        return backend_main.EaaLintResult(valid=len(calls) > 1, errors=["Rejected"] if len(calls) == 1 else [], warnings=[], ruleset_version="1.1")
+        return backend_main.EaaLintResult(valid=len(calls) > 1, errors=["Rejected"] if len(calls) == 1 else [], warnings=[], ruleset_version="1.2")
 
     monkeypatch.setattr(backend_main, "lint_skill_package", lint)
     first = client.post(f"/api/sessions/{sid}/save", json={})
@@ -194,7 +196,7 @@ def test_failed_lint_does_not_advance_version_or_create_snapshot(client, backend
     assert backend_main.sessions[sid].current_skill.skill_md == changed
     second = client.post(f"/api/sessions/{sid}/save", json={})
     assert second.status_code == 200, second.text
-    expected = changed.replace('"1.6"', '"1.6.1"')
+    expected = changed.replace('"1.6"', '"1.6.1"').replace("metadata:\n", "metadata:\n  skill_type: inline\n")
     assert calls == [expected, expected]
     assert backend_main.store.load_skill("demo-skill").skill_md == expected
     assert len(local.history) == 1
@@ -206,7 +208,7 @@ def test_first_save_normalizes_declared_version(client, backend_main) -> None:
     client.put(f"/api/sessions/{sid}/draft", json={"skill_md": draft})
     response = client.post(f"/api/sessions/{sid}/save", json={})
     assert response.status_code == 200, response.text
-    assert response.json()["current_skill"]["skill_md"] == draft.replace('"1.0"', '"1.0.0"')
+    assert response.json()["current_skill"]["skill_md"] == draft.replace('"1.0"', '"1.0.0"').replace("metadata:\n", "metadata:\n  skill_type: inline\n")
 
 
 def test_create_modify_session_loads_existing_skill(client, backend_main, grant_skill) -> None:

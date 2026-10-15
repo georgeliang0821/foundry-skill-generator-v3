@@ -60,6 +60,7 @@ uv run --no-sync python scripts/sync_reference.py check
 | 本 repo caller | 使用的 reference symbol | 使用方式 | 目的 | Upstream 異動時的處理 |
 | --- | --- | --- | --- | --- |
 | `tests/unit/test_topology_differential.py::_reference_declares_children()` | `skills_provider_factory._declares_children(content)` | 讀取 `reference/skills_provider_factory.py`，用 AST 只抽出該 function 執行；不 import 整個 module。 | 驗證「Generator 接受的 scenario frontmatter，runtime 也判定為 parent」。 | function 被移除、改名、增加 closure/global 依賴、參數或回傳型別改變時，手動更新 differential test。若只是 runtime 接受更多格式，通常不需放寬 Generator。 |
+| `tests/unit/test_topology_differential.py` | `skill_types.classify_skill(content, skill_name=..., scripts=...)` | 測試 fixture 載入 `reference/skill_types.py`，只在測試期間提供 factory helper 的 import 依賴。 | 驗證 Generator 正式三值產物與實際腳本清單都被 runtime 接受，且沒有缺值或別名警告。 | 分類欄位、相容推導、別名、腳本清單或分類契約改變時，檢查 Generator topology、儲存、形式轉換、提示與範例；backend 不直接匯入此檔。 |
 | `reference/test_skill_topology.py::ScenarioFilterDirectionTests.test_only_skills_declaring_children_are_filtered()` | `skills_provider_factory._declares_children(content)` | 直接 import；屬 reference snapshot 自帶測試，不是 production test boundary。 | 確認只有自己宣告 `metadata.children` 的 parent 被排除於 internal-agent materialize。 | 與 factory 同 commit 整體同步；不要單獨保留舊測試。 |
 
 單向相容條件是：
@@ -70,10 +71,11 @@ uv run --no-sync python scripts/sync_reference.py check
 
 ### 2.3 Generator 重寫的 runtime 常數（`restated`）
 
-`backend/eaa_platform.py` 把 EAA 的幾個常數重寫成自己的版本（不能 import `reference/`），D4–D8、A15 lint 與 MCP 過濾都靠它們。`code_executor.py`、`mi_proxy.py` 因此也進了 snapshot，manifest 的 `restated` 列出每一組對應：
+`backend/models.py` 保存 Generator 的三值分類集合；`backend/eaa_platform.py` 保存 D4–D8、A15 lint 與 MCP 過濾依賴的平台常數。這些定義不能 import `reference/`，因此 `skill_types.py`、`code_executor.py`、`mi_proxy.py` 都納入 snapshot，manifest 的 `restated` 列出每一組對應：
 
 | Upstream | Generator | 關係 |
 | --- | --- | --- |
+| `skill_types.GENERATOR_SKILL_TYPES` | `backend.models.GENERATOR_SKILL_TYPES` | `equal` |
 | `code_executor.SUBPROCESS_ENV_DENYLIST` | `PLATFORM_SECRET_DENYLIST` | `equal` |
 | `code_executor._RESERVED_EXEC_ENV_NAMES` / `_PREFIXES` | `_RESERVED_CREDENTIAL_NAMES` / `_PREFIXES` | `superset`（Generator 多擋 `EAA_VERIFIED_`） |
 | `mi_proxy.MI_ENV_KEYS` | `MI_ENV_KEYS` | `equal` |
@@ -130,7 +132,7 @@ uv run --no-sync python scripts/sync_reference.py check
 
 | Function / class | Generator 對應面 | 需要手動審查或更新的變更 |
 | --- | --- | --- |
-| `_declares_children(content)` | `backend.topology.declared_children()`、`tests/unit/test_topology_differential.py` | Parser fence/YAML 規則、`metadata.children` 所在位置、可接受型別、空值語意、回傳型別、改名或移除。這是目前唯一由本 repo 測試直接執行的 reference function。 |
+| `_declares_children(content)` | `backend.topology.declared_children()`、`tests/unit/test_topology_differential.py` | Parser fence/YAML 規則、`metadata.children` 所在位置、可接受型別、空值語意、回傳型別、改名或移除；此函式依賴 `skill_types.classify_skill()`，兩份快照需同 commit 同步。 |
 | `_declared_child_names(content)`（upstream 1.14 新增） | `backend.topology.declared_children()`、scenario 產生/修改流程 | 若 runtime 不只判斷 parent，而開始消費 children 名單作白名單，需檢查 Generator 是否產出完整、正確、可解析的 child/dependency 名單。 |
 | `_dedupe_private_over_global(metas)` | `backend.skills_repo.list_skills_for_user()`、private/global skill 規則 | 同名 skill precedence、`skill_key`、owner/public/grant 語意改變。Generator 的 SQL 查詢複刻 `v_my_skills` WHERE，不能只更新 snapshot。 |
 | `SkillsProviderFactory._fetch_allowed_skills(sql_token)` | `backend.skills_repo.py`、EAA repo 的 SQL schema | `v_my_skills` SELECT 欄位、RLS predicate、token principal、`is_internal`、`blob_path/blob_prefix`、cache key 改變。Schema migration 必須先於 runtime code。 |
@@ -326,7 +328,7 @@ uv run --no-sync python scripts/sync_reference.py sync --commit $sha
 
 1. 直接用 `git show <commit>:<path>` 從 manifest 固定的 commit 讀取來源，不受 upstream 工作目錄目前 checkout 或未提交修改影響。
 2. 在寫入前驗證 manifest 中的已知 function signature 與必要欄位。
-3. 從同一 commit 整檔覆蓋三個 `reference/` snapshot。
+3. 從同一 commit 整檔覆蓋 manifest 列出的所有 `reference/` snapshot。
 4. 自動更新 `reference/manifest.json` 的 commit、日期、版本與 SHA-256。
 5. 自動執行 manifest 中列出的 focused compatibility tests。
 
@@ -371,7 +373,7 @@ uv run --no-sync python scripts/sync_reference.py sync --commit $sha
 - `core_handler.run_workflow()` 與 `fetch_skill()` 的參數契約。
 - scenario child parser、materialize 與 provider scope 的 signature。
 - `GatekeeperDecision` 中 Generator 關心的必要欄位。
-- Generator 接受的 scenario frontmatter 必須仍被 runtime 視為 parent。
+- Generator 接受的 scenario frontmatter 必須仍被 runtime 視為 parent，三種正式類型的宣告與腳本清單必須被 runtime 分類器接受。
 - `backend/` 不得 import `reference/`。
 - **Wire coverage**：`manifest.json` 的 `wire` 區塊宣告每個 runtime 參數必須由哪個 Generator 檔案送出。`dict_key` 比對 payload 字典鍵，`text` 比對字串常數內是否出現該參數名。
 - **Response coverage**：`manifest.json` 的 `response_wire` 區塊把 `RESPONSE_BOUNDARY_WHITELIST` 的每個欄位分成 `required`（Generator 必須讀）與 `ignored`（附理由，明確宣告本專案不用）。upstream 新增欄位時它會落在兩邊之外而被點名；`required` 卻沒被讀、或 `ignored` 的欄位已被 upstream 刪除，也同樣點名。

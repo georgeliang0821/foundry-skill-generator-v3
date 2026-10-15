@@ -3,6 +3,7 @@ name: procurement-sharepoint-ocr
 description: "Retrieve and OCR-process documents for a procurement case from the fixed SharePoint Procurement library, producing local Markdown files and a manifest summary. Use for Chinese or English requests to load, extract, or convert procurement-case documents by case ID; use `html-ppt` instead when the request is to create a technical overview presentation."
 metadata:
   author: "a-wureeve@microsoft.com"
+  skill_type: inline
   mi_scopes:
     - https://cognitiveservices.azure.com
   tags:

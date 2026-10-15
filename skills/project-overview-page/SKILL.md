@@ -1,5 +1,7 @@
 ---
 name: project-overview-page
+metadata:
+   skill_type: inline
 description: 產生「技術專案總覽單頁 HTML」。當使用者要求製作專案總覽、架構說明頁、產品/方案 one-pager、workshop 說明頁，或說「用總覽頁風格」「做一頁 HTML 說明」時使用。輸出單一自給自足（inline CSS + inline SVG、無外部相依）的 HTML 檔。
 ---
 

@@ -3,6 +3,7 @@ name: procurement-deliverables-generator
 description: "Generate, validate, manifest, and publish a controlled procurement deliverables set from an existing canonical requirements package. Use for Chinese or English requests to produce synchronized Word specifications, Excel test trackers, and HTML prototypes by procurement case ID; do not use for OCR retrieval, upstream canonical-requirements analysis, or a generic standalone project overview page."
 metadata:
   author: "a-wureeve@microsoft.com"
+  skill_type: inline
   tags:
     - procurement
     - deliverables

@@ -664,7 +664,8 @@ def test_scenario_prompt_uses_scenario_draft_and_format_spec() -> None:
     assert "scenario-orchestration" in scenario_prompt
     assert "# Stage: DRAFT (scenario skill)" in scenario_prompt
     assert "# Stage: DRAFT (scenario skill)" not in capability_prompt
-    assert "scenario-orchestration" not in capability_prompt
+    assert "  skill_type: inline" in capability_prompt
+    assert "  skill_type: scenario-orchestration" not in capability_prompt
 
 
 def test_scenario_prepare_uses_plain_language_for_child_input_fields() -> None:

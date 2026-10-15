@@ -506,6 +506,8 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 一份 Tier 1 `code` 素材除了被重現成 inline sample code，也可以**原樣**成為 skill 附帶的 `scripts/<name>.py`（script 形式）。v1 固定為 `SKILL.md` 加上**恰好一支** script，檔名等於 frontmatter `name`。
 
+**產物類型與內部形式**：`metadata.skill_type` 必填，對應為 scenario → `scenario-orchestration`、capability 無 script → `inline`、capability 有 script → `script`。scenario 判定優先於內部形式的 inline 預設值；`inline` 可只有指令或資源，不能以是否有 Python 區塊判定類型。共用 `10_format_spec.md` 宣告 `inline`，script addendum 明確覆蓋為 `script`，scenario 使用既有的獨立格式規格。REFINE 保留已宣告類型與 scenario 的 children；只有明確的 Convert form 動作同步搬移程式碼與類型。`code-generation` 只作 inline 相容別名讀入，產物不寫此值。平台另有由 `generate-custom-skill` 產出的 `instruction-only`，不屬本 Generator 的產出集合。
+
 **成為 script 的條件**（`evaluate_skill_form()`，全部成立才是 script，否則 inline 並列出每一項未滿足的 `check`）：
 
 | check | 條件 |
@@ -526,7 +528,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 
 MODIFY 開 session 時可選 `start_stage`：`refine`（前端的 quick edit，預設）直接在已載入的 skill 上從 REFINE 開始，不經 PREPARE 關卡；`prepare`（re-plan）從 PREPARE 開始。MODIFY 回到 PREPARE 時保留已載入的 `SKILL.md`。要換 script，在 Materials 加入新版 code 素材即可（MODIFY 沒有舊素材需要移除）；檢查與 NEW 相同，通過後才替換。
 
-**MODIFY 的形式轉換**：`POST /api/sessions/{id}/convert-form`（body `{"target": "inline" | "script"}`）由 `form_conversion.convert_session_form()` 只搬程式碼，不改寫 `SKILL.md`。inline → script 要求 `SKILL.md` 正文（不含 `## Gatekeeper Addendum`）剛好一個可解析的 Python 區塊，區塊搬到 `current_skill.script`，且 session 不能有 skill 資產；script → inline 把 script 放進 `## API Reference / Sample Code`（沒有就新增在 Gatekeeper Addendum 之前）並設 `script_removed`，下次儲存時 `SkillFiles.remove_script` 會刪掉 Blob 上的 script。兩個方向都只允許 MODIFY capability skill、session 尚無 patch；轉成 script 會先重查 EAA 旗標（關閉回 409 `script_flags_off`）；其餘拒絕回 409 `form_conversion_refused`。轉換只改 session，不寫 Blob（第一個被接受的 `propose_patch` 會依既有行為同步到 Blob），並寫入一則 system 訊息要 Agent 依 `## Skill Form` 與 lint 結果修正 `SKILL.md`；檢查與缺口都走既有的儲存 lint 與 `GET /skill-form`。inline → script 時，若 session 沒有任何 `code` 素材，會同時加入一份內容等於 script 的 `code` 素材，讓 Agent 可以用 `propose_material_patch` 調整它的邊界（見下方）；script → inline 時移除內容等於 script 的 `code` 素材。
+**MODIFY 的形式轉換**：`POST /api/sessions/{id}/convert-form`（body `{"target": "inline" | "script"}`）由 `form_conversion.convert_session_form()` 搬移程式碼並同步 `metadata.skill_type`，不改寫正文；原宣告若與現有套件矛盾則拒絕轉換，session 保持不變。inline → script 要求 `SKILL.md` 正文（不含 `## Gatekeeper Addendum`）剛好一個可解析的 Python 區塊，區塊搬到 `current_skill.script`，且 session 不能有 skill 資產；script → inline 把 script 放進 `## API Reference / Sample Code`（沒有就新增在 Gatekeeper Addendum 之前）並設 `script_removed`，下次儲存時 `SkillFiles.remove_script` 會刪掉 Blob 上的 script。兩個方向都只允許 MODIFY capability skill、session 尚無 patch；轉成 script 會先重查 EAA 旗標（關閉回 409 `script_flags_off`）；其餘拒絕回 409 `form_conversion_refused`。轉換只改 session，不寫 Blob（第一個被接受的 `propose_patch` 會依既有行為同步到 Blob），並寫入一則 system 訊息要 Agent 依 `## Skill Form` 與 lint 結果修正 `SKILL.md`；檢查與缺口都走既有的儲存 lint 與 `GET /skill-form`。inline → script 時，若 session 沒有任何 `code` 素材，會同時加入一份內容等於 script 的 `code` 素材，讓 Agent 可以用 `propose_material_patch` 調整它的邊界（見下方）；script → inline 時移除內容等於 script 的 `code` 素材。
 
 `record_variables` 的 `variables` 可省略：省略時變數不變；帶入的清單會整份取代現有變數。只記錄 `script_covers_operations` 或 `prefer_inline` 時應省略它。
 

@@ -3,6 +3,7 @@ name: hr-leave-requests
 description: "Use when a user wants to check their own HR leave balance, review personal leave requests, or submit an official leave request; common triggers include 請假、假期餘額、假單、leave balance, leave history, and submit leave request. This skill works with the user's Azure SQL HR leave records and formal leave workflow, not Microsoft 365 calendar viewing, free/busy checks, meeting scheduling, or event management."
 metadata:
   author: admin@mngenvmcap352952.onmicrosoft.com
+  skill_type: inline
   tags:
     - hr
     - leave

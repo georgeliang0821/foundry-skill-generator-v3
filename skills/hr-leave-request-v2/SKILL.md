@@ -3,6 +3,7 @@ name: hr-leave-request-v2
 description: "查詢員工本人的 HR 假期餘額與請假紀錄，或在行事曆衝突已檢查並取得必要確認後提交本人假單時使用。適用於「剩餘假期」、「請假紀錄」、「申請病假／年假」等中文或 English leave balance, leave history, submit leave request 意圖；不適用於將已擷取的 Teams 會議 follow-up action items 批次寫入 Azure SQL。"
 metadata:
   author: "George Liang"
+  skill_type: inline
   version: "1.0"
   tags:
     - "hr"

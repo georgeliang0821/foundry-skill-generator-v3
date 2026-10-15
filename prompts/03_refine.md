@@ -70,8 +70,12 @@ content and the metadata always stay consistent.
   no leading or trailing hyphen, at most 64 characters). Skills that reference
   the old name are NOT updated, so say so when you propose the rename.
 - Do NOT emit `propose_skill_draft` in REFINE.
-- **Never remove or rewrite `metadata.children` or `metadata.skill_type` in a
-  patch.** They define which layer the skill belongs to. A patch whose applied
+- **Preserve `metadata.skill_type` in every patch.** It is `inline` or `script`
+  for a capability skill, matching its current form. The explicit Convert form
+  action updates this declaration together with the code; do not simulate a
+  form conversion by patching the declaration alone.
+- **Never remove or rewrite a scenario's `metadata.children` or
+  `metadata.skill_type` in a patch.** They define its layer. A patch whose applied
   result drops or reshapes either of them is rejected. If the user genuinely
   wants to change the dependency whitelist, change the list contents -- keep the
   key, keep it a non-empty YAML list, and keep `metadata.skill_type:

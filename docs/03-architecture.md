@@ -115,6 +115,7 @@ sequenceDiagram
 
 實際寫入時機與流程：【建立 / 修改內容 -> 整理 skill data -> upsert 到 dbo.skills -> 若為既有 skill 修改，更新 updated_at -> 回傳最新資料給系統渲染】。
 
+- **類型宣告**：每份產物都保存 `metadata.skill_type`：scenario 為 `scenario-orchestration`，且保留非空 `metadata.children`、不能有自己的 script；capability 有 script 時為 `script`，否則為 `inline`。內部仍分開使用 `SkillKind` 與 `skill_form`，不新增 SQL 欄位。T11 阻擋未知值、頂層宣告及類型與套件矛盾；不能只改宣告來轉換形式。未宣告類型的 capability 與相容別名 `code-generation` 可載入，儲存時才補齊正式值或正規化為 `inline`，不在讀取時改檔，也不覆寫明確矛盾的宣告。一般 session 與鄰近儲存都在版號計算與 EAA lint 前準備候選內容，成功後才回寫；既有額外 `scripts/` 檔案拒絕儲存而不自動刪除。分類不修改 ACL、`enabled`、`is_internal` 或後端候選過濾。
 - **寫入時機**：REFINE 每個被接受的 patch、以及按下「儲存」都會雙寫 Blob + SQL（`save_skill_dual_write`）；DRAFT 被接受也雙寫。
 - **patch 套用失敗**：V4A 解析、錨點缺失或不唯一等 `PatchError` 不修改草稿，也不新增 patch history；該次 `propose_patch` 從待確認工具清單移除，錯誤與 `call_id` 保存在 system message 的 `metadata.patch_error`。前端將卡片標為「Not applied」，停用 Accept／Reject 且不提供 Undo，仍可展開差異；接著請 Agent 提出修正版，由使用者另行確認。重新產生失敗也不會重新啟用原卡。載入 session 時只清理有相同 `call_id` 套用失敗紀錄的 patch 待辦，保留其他待辦；重新開啟對話會顯示未套用紀錄，而非可再次接受的失敗卡。
 - **patch 套用與同步結果**：`tool-result` 可以接受 patch、保留本機內容，但同步仍被驗證或服務錯誤擋下。該次 tool message 的 `metadata.patch_sync` 帶入 `call_id` 與 `status: local | saved | failed`；失敗另帶 `detail`。前端只有 `saved` 才顯示「Saved to Blob + SQL」，`local`／`failed` 保留未同步狀態且不自動要求下一次測試；lint 失敗交回 Agent 修正，其他同步錯誤停止自動續跑。
@@ -135,7 +136,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     P[接受 Patch / 儲存] --> MEM[更新記憶體中的 SKILL.md]
-    MEM --> CHECK[驗證內容與候選版號<br/>主 skill 含 EAA lint]
+    MEM --> CHECK[驗證內容、類型與候選版號<br/>EAA lint]
     CHECK --> BACKUP[已啟用且覆寫既有技能時<br/>先完成套件備份與 manifest]
     BACKUP --> BLOB[(寫入 Azure Blob<br/>SKILL.md 全文、資產、script)]
     BLOB --> SQL[(MERGE dbo.skills ON skill_key<br/>skill_name / owner_upn / is_public / enabled<br/>既有則更新 updated_at)]
@@ -165,7 +166,7 @@ flowchart LR
 
 儲存（`save_skill_dual_write()`）在寫入 Blob 前，先跑本專案的 skill lint，再透過 `MCP_ENDPOINT` 呼叫 EAA 的 MCP tool `lint_skill_package`，用 EAA 自己的規則檢核整個 skill package（實作：`backend/eaa_platform.py`、`backend/mcp_jsonrpc.py`）。本機不需要 EAA repo。
 
-- Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。有 script 但 EAA 回報的 `ruleset_version` 低於 `1.1`（還沒有 script 檢核）時回 **HTTP 503** 拒絕儲存，因為無法驗證。
+- Script 型 skill 在同一次呼叫一起送 `SKILL.md` 與 `scripts/<name>.py`，MI scope 等跨檔檢核才準。所有類型都要求 EAA 回報的 `ruleset_version >= 1.2`，確保已檢查類型宣告與套件一致性；低於門檻或版號無法辨識時回 **HTTP 503** 拒絕儲存。
 - **fail-closed**：未設 `MCP_ENDPOINT`、token 取不到、連線失敗或回應解析不出判定，都回 **HTTP 503** 並擋下儲存。
 - `status == "failed"`（request 或 package 不合法）回 **HTTP 400**，訊息列出 EAA 的 `error`。
 - 本機 skill lint 或 EAA lint 有 ERROR 時回 **HTTP 400**，`detail` 為 `{kind: "skill_lint_failed" | "eaa_lint_failed", recoverable: true, message, issues}`。前端不顯示原始規則文字，而是告知使用者「未儲存、已請 Agent 修正」，並把 `issues` 送回 Agent：DRAFT 尚未儲存時重送完整 `propose_skill_draft`，之後則用 `propose_patch`。
@@ -174,7 +175,7 @@ flowchart LR
 - 本機 lint 的 **denylist 檢查刻意掃全文**，包含說明文字，因為 EAA 的模型也會照著說明文字做；這不是誤報，不要放寬。
 - 本機 **N1 具名引用檢查**以完整已登錄 catalog 為字彙，包含未授權、內部與停用的 skill；名稱只留在伺服器，不回傳 catalog 或命中的名稱。`description` 與整份內文不得引用其他 skill 的名稱，自身名稱不受限。結構化依賴宣告及 scenario 已宣告依賴的實際 `fetch_skill(skill_name=...)` 參數保留；description、停止條件與一般依賴說明不享有例外。草稿提案與 SKILL.md patch 在修改內容、版號雜湊與 patch history 前先檢查，拒絕時不寫入；直接儲存也檢查，catalog 無法取得時回 HTTP 503 並停止。
 - pytest 的 `backend_main` fixture 把 `lint_skill_package` 改成永遠通過；Playwright 設 `SGV2_E2E_FAKE_LINT=1`（需搭配 `SGV2_E2E_MODE`），不會呼叫真的 MCP。
-- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）在寫入前執行 N1，但不走 `save_skill_dual_write()` 的完整本機與 EAA package lint。
+- 鄰居 skill 編輯（`/neighbor-edits/{skill}/save`）在寫入前執行 N1 與原層級的分類驗證，以 Blob 保留的 script 準備候選宣告及版號，再呼叫相同的 EAA package lint；不走 `save_skill_dual_write()` 的完整本機 lint、資產或 ACA 旗標流程，不變更原有 script 與資產。
 
 ### 2.4 呼叫 EAA MCP 的身分
 
@@ -234,7 +235,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `auth_store.py` | 登入狀態保存：`LocalAuthStore`（記憶體）與選用的 `AzureBlobAuthStore`（共用 / 多實例） |
 | `session_store.py` | 撰寫 session 的 JSON 持久化（本機檔案，或 `SGV2_SESSION_STORE=blob` 改存 Blob）；以 `PERSIST_CONTEXT` 序列化，skill 資產全文只在這裡寫出 |
 | `blob_store.py` | Azure Blob 版 Skill 儲存與 `SKILL.md` frontmatter 解析（含含冒號 description 的容錯）；script 型 skill 另存 `scripts/<name>.py`，列表以 `has_script` 標示，`SkillFiles.remove_script` 會刪除既有 script；skill 資產的寫入、清掃、讀取（`load_assets`），刪除 skill 時刪整個 prefix；選用的覆寫前完整套件備份與 manifest（獨立歷史容器，不隨 skill 刪除） |
-| `form_conversion.py` | MODIFY session 的 inline ↔ script 機械轉換（`convert_session_form`）：只搬程式碼，不改寫 `SKILL.md` |
+| `form_conversion.py` | MODIFY session 的 inline ↔ script 機械轉換（`convert_session_form`）：搬移程式碼並同步 `metadata.skill_type`，不改寫正文 |
 | `skill_assets.py` | Skill 資產的檢查（`check_asset`、`check_asset_set`、`assets_blocked_reason`）：只接受或拒收，不轉換 |
 | `skills_repo.py` | Azure SQL 的 DAO：`dbo.skills` 與 `dbo.user_skill_grants` 的查詢 / upsert / 授權 / 可見性 / 刪除（一律以 `skill_key` 為鍵） |
 | `neighbor_notice_repo.py` | 相鄰關係通知 DAO：未結案去重、來源 key 合併、SQL-only 未結案計數、收件隔離與立即結案；本機使用記憶體 store，Azure 使用 SQL 交易 |

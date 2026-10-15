@@ -67,6 +67,7 @@ def test_convert_inline_session_to_script() -> None:
     convert_session_form(session, "script")
 
     assert (session.skill_form, session.current_skill.script) == ("script", CODE)
+    assert "skill_type: script" in session.current_skill.skill_md
     assert "```" not in session.current_skill.skill_md
     assert [(m.kind, m.content) for m in session.materials] == [("code", CODE)]
     assert session.conversation[-1].role == "system" and "inline to script" in session.conversation[-1].content
@@ -87,6 +88,7 @@ def test_converting_back_and_forth_leaves_no_stray_material() -> None:
     convert_session_form(session, "inline")
 
     assert session.materials == [] and session.current_skill.script is None
+    assert "skill_type: inline" in session.current_skill.skill_md
 
 
 def test_convert_script_session_to_inline_marks_the_script_for_removal() -> None:
@@ -97,6 +99,7 @@ def test_convert_script_session_to_inline_marks_the_script_for_removal() -> None
     convert_session_form(session, "inline")
 
     assert (session.skill_form, session.current_skill.script, session.script_removed) == ("inline", None, True)
+    assert "skill_type: inline" in session.current_skill.skill_md
     assert CODE.strip() in session.current_skill.skill_md
 
 
@@ -125,6 +128,28 @@ def test_script_to_inline_needs_a_script() -> None:
 
     with pytest.raises(FormConversionError, match="no script"):
         convert_session_form(session, "inline")
+
+
+@pytest.mark.parametrize("declared", ["inline", "code-generation"])
+def test_conversion_updates_explicit_type_without_changing_code(declared) -> None:
+    session = _session()
+    session.current_skill.skill_md = INLINE_MD.replace("name: demo\n", f"name: demo\nmetadata:\n  skill_type: {declared}\n")
+    convert_session_form(session, "script")
+    assert "skill_type: script" in session.current_skill.skill_md
+    assert session.current_skill.script == CODE
+    convert_session_form(session, "inline")
+    assert "skill_type: inline" in session.current_skill.skill_md
+    assert session.current_skill.script is None
+    assert CODE in session.current_skill.skill_md
+
+
+def test_conversion_does_not_repair_a_conflicting_type() -> None:
+    session = _session()
+    session.current_skill.skill_md = INLINE_MD.replace("name: demo\n", "name: demo\nmetadata:\n  skill_type: script\n")
+    original = session.model_dump()
+    with pytest.raises(FormConversionError, match="must be `inline`"):
+        convert_session_form(session, "script")
+    assert session.model_dump() == original
 
 
 def test_local_store_removes_the_script_on_request() -> None:

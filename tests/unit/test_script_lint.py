@@ -76,9 +76,10 @@ def test_inline_lint_is_unchanged(name: str) -> None:
     expected = BASELINE[name]
     kind = SkillKind(expected["kind"])
     if name.endswith("+code_override"):
-        issues = lint_skill(MD, kind, code_override=PY)
+        issues = lint_skill(MD.replace("skill_type: script", "skill_type: inline"), kind, code_override=PY)
     else:
         md = (REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+        md = md.replace("skill_type: script", "skill_type: inline")
         issues = lint_skill(md, kind)
         topology = validate_topology(md, kind, mode=Mode.NEW, expected_name=name)
         assert [
@@ -106,7 +107,7 @@ def test_a4_and_c2_require_only_the_needs_info_row() -> None:
     assert _hits(_lint(md=md), "A4") == [("error", "Reading the Result")]
     issues = validate_topology(md, SkillKind.CAPABILITY, mode=Mode.NEW, script=PY)
     assert [i.rule for i in issues] == ["C2"]
-    assert validate_topology(md, SkillKind.CAPABILITY, mode=Mode.NEW) == []
+    assert validate_topology(md.replace("skill_type: script", "skill_type: inline"), SkillKind.CAPABILITY, mode=Mode.NEW) == []
 
 
 def test_an_exit_0_row_that_names_needs_info_also_counts() -> None:

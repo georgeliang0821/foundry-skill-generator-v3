@@ -47,6 +47,9 @@ violation is rejected at save time.
   the child capability skill.
 - **T10** -- `metadata.skill_type: scenario-orchestration` and a non-empty
   `metadata.children` list imply each other. Declare both or neither.
+- **T11** -- A scenario declares `scenario-orchestration` and has no script of
+  its own. This Generator's other output types are `inline` and `script` for
+  capability skills; never change a scenario to either by patching its type.
 
 ## Pointer Rules (hard requirements)
 

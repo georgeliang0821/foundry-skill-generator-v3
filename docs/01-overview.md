@@ -153,5 +153,6 @@ flowchart TD
 | **OBO Token** | On-Behalf-Of 權杖；Skill 執行時代表使用者去呼叫下游系統所需的權杖。 |
 | **RLS** | Row-Level Security，資料列級隔離；以使用者 email 比對 `dbo.user_skill_grants`。 |
 | **Patch（V4A）** | AI 對 `SKILL.md` 的差異修改格式，可預覽、接受、還原。 |
-| **Skill 形式（inline / script）** | inline：程式碼以 sample code 寫在 `SKILL.md` 裡；script：`SKILL.md` 加上原樣出貨的 `scripts/<name>.py`。一個 skill 的形式進 DRAFT 後就固定；NEW session 不能互轉，MODIFY session 可用 Convert form 把程式碼在 `SKILL.md` 與 script 之間搬移（只搬程式碼，其餘交給後續標準 modify 流程）。 |
+| **Skill 類型（metadata.skill_type）** | 本 Generator 產出三種值：`scenario-orchestration` 由 Host 編排已宣告的 children；`inline` 由 EAA 依內文指令生成程式碼；`script` 執行附帶的固定腳本。這是 Generator 的產出集合，不是整個平台的類型全集；類型不代表使用或修改權限。 |
+| **Skill 形式（inline / script）** | capability 的 inline 形式可包含指令、sample code 與資源，但沒有附帶腳本；script 形式為 `SKILL.md` 加上原樣出貨的 `scripts/<name>.py`。形式進 DRAFT 後固定；NEW session 不能互轉，MODIFY session 可用 Convert form 搬移程式碼並同步類型宣告，正文其餘調整交給後續標準 modify 流程。 |
 | **EAA script 旗標** | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED`；兩者皆為 `true` 才能產出與儲存 script 型 skill。見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。 |

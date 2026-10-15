@@ -983,28 +983,21 @@ async def _resolve_and_refresh_skill_dir(
 # `children:` 下接 block-style list 時只會拿到空字串,偵測會静静失效。
 # 這裡的判斷結果會決定要不要寫回 skill,偵測失效的代價太大。
 def _is_orchestration_skill(skill_dir: str) -> bool:
-    """該 skill 的 frontmatter 是否宣告了 metadata.children。"""
+    """Exclude orchestration and invalid declarations from refinement."""
     skill_md_path = os.path.join(skill_dir, "SKILL.md")
     try:
         with open(skill_md_path, "r", encoding="utf-8") as f:
             content = f.read()
-        if not content.startswith("---"):
-            return False
-        end = content.find("---", 3)
-        if end == -1:
-            return False
-        parsed = yaml.safe_load(content[3:end])
-        if not isinstance(parsed, dict):
-            return False
-        metadata = parsed.get("metadata")
-        return isinstance(metadata, dict) and bool(metadata.get("children"))
+        from skill_types import classify_skill
+        classification = classify_skill(content)
+        if not classification.valid:
+            logger.warning("[Gatekeeper] Invalid skill declaration: %s", classification.errors)
+        return not classification.valid or classification.skill_type == "scenario-orchestration"
     except Exception as e:
-        # 偵測不確定時偷向「不是編排層」—— 保持現行合併行為,不因為
-        # 一個壞掉的 YAML 就讓整個 Gatekeeper 學不到東西。
         logger.warning(
             f"[Gatekeeper] 無法判定 {os.path.basename(skill_dir)} 是否為編排層：{e}"
         )
-        return False
+        return True
 
 
 def write_knowledge_skill(knowledge: Dict, existing_skill_dir: str) -> bool:
@@ -1400,27 +1393,29 @@ def _log_event(event: str, **fields: Any) -> None:
     logger.warning("%s %s", event, json.dumps(fields, ensure_ascii=False, default=str))
 
 
-async def _is_script_skill(skill_name: str) -> bool:
+async def _is_script_skill(skill_name: str) -> bool | None:
     try:
         from skills_sync import blob_skill_has_script
         return await blob_skill_has_script(skill_name)
     except Exception as e:
-        # 判斷不了就當 script 型:誤排除只是少一次 refine,誤放行會把繞過腳本的寫法寫進 SKILL.md
-        logger.warning(f"[Gatekeeper] 無法確認 {skill_name} 是否為 script 型，視為 script 型: {e}")
-        return True
+        logger.warning(f"[Gatekeeper] 無法確認 {skill_name} 的套件類型，排除 refine: {e}")
+        return None
 
 
 async def _excluded_as_script_skill(skill_name: str, payload: GatekeeperPayload) -> bool:
     """script 型 skill 只有在本輪腳本成功執行過(exit_code == 0 且非 [NEEDS_INFO])時才可 refine。"""
-    if not await _is_script_skill(skill_name):
+    is_script = await _is_script_skill(skill_name)
+    if is_script is False:
         return False
 
     runs = [r for r in payload.script_runs if r.get("skill") == skill_name]
-    if any(r.get("exit_code") == 0 and not r.get("needs_input") for r in runs):
+    if is_script is True and any(r.get("exit_code") == 0 and not r.get("needs_input") for r in runs):
         return False
 
     last = runs[-1] if runs else {}
-    if not runs:
+    if is_script is None:
+        reason = "script_status_unknown"
+    elif not runs:
         reason = "script_not_run"
     elif all(r.get("exit_code") == 0 for r in runs):
         reason = "script_needs_input"

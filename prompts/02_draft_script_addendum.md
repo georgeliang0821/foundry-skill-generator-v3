@@ -5,6 +5,10 @@ unchanged, as its bundled script; SKILL.md tells the host how to run that script
 and how to read what it returns. Where this addendum disagrees with the stage
 prompt above or with the Skill Format Spec, this addendum wins.
 
+Declare `metadata.skill_type: script`, overriding the inline declaration in the
+shared format spec. Keep it consistent with the bundled script in `## Bundled
+Script`. Never declare `children` or use `code-generation` for this form.
+
 ## Sections
 
 Write the body with these sections, in this order:

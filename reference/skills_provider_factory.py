@@ -313,6 +313,7 @@ except ValueError:
 @dataclass
 class MaterializeResult:
     mi_scopes_by_skill: dict[str, list[str]] = field(default_factory=dict)
+    catalog_mutating_skills: set[str] = field(default_factory=set)
     unsupported_script_skills: dict[str, str] = field(default_factory=dict)
     script_blob_meta: dict[str, dict] = field(default_factory=dict)
 
@@ -366,7 +367,23 @@ def _declared_child_names(content: str) -> list[str]:
 
 
 def _declares_children(content: str) -> bool:
-    return bool(_declared_child_names(content))
+    from skill_types import classify_skill
+    return classify_skill(content).skill_type == "scenario-orchestration"
+
+
+def _invalidates_skill_catalog(content: str) -> bool:
+    """SKILL.md frontmatter 的 metadata.invalidates_skill_catalog 是否為 true。"""
+    if not content.startswith("---"):
+        return False
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return False
+    try:
+        fm = yaml.safe_load(parts[1])
+    except Exception:
+        return False
+    meta = fm.get("metadata") if isinstance(fm, dict) else None
+    return isinstance(meta, dict) and meta.get("invalidates_skill_catalog") is True
 
 
 # 2026.08.14 George : v1.8 — schema v2 下同一個 skill_name 可能同時存在全域版與
@@ -501,10 +518,14 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         self.loaded_skills: list[str] = []
         # S3:本 turn 已落地 skill 的 metadata.mi_scopes(只列有宣告的),由 factory 指派
         self.mi_scopes_by_skill: dict[str, list[str]] = {}
+        # 成功執行後需清 RLS 快取的 skill(metadata.invalidates_skill_catalog)
+        self.catalog_mutating_skills: set[str] = set()
         # 2026.08.31 George : route_only — 記錄實際讀取的 resource,(skill, resource)。
         # 路由品質評估需要知道模型除了選對 skill,有沒有照 SKILL.md 的指示把附帶
         # 資源也讀進去 —— 只看 loaded_skills 看不出來。
-        self.loaded_resources: list[tuple[str, str]] = []
+        self.loaded_resources: list[tuple[str, str, str]] = []
+        # (skill, requested, error 前 200 字)
+        self.failed_resources: list[tuple[str, str, str]] = []
         # route_only + SKILL_SCRIPTS_ENABLED:模型要求執行但未執行的腳本
         self.requested_scripts: list[dict] = []
         # script 型 skill 的腳本 blob 稽核資訊 {skill_name: {blob, etag, last_modified}}
@@ -532,24 +553,24 @@ class _TrackingSkillsProvider(PrefixTolerantSkillsProvider):
         return result
 
     async def _read_skill_resource(self, skills, skill_name, resource_name, **kwargs):  # type: ignore[override]
-        # 2026.08.31 George : route_only — 記錄實際讀到的 resource。
-        # 失敗判斷對齊上面的 _load_skill:MAF 回傳 "Error: ..." 字串而不拋例外,
-        # 所以不能用 try/except 偵測。記的是呼叫端要求的名字(而非父類前綴容錯後的
-        # 實際名字),因為要評估的是模型的行為。
+        # 2026.08.31 George : route_only — 記錄模型實際讀取的 resource。
+        # MAF 失敗時回 "Error: ..." 字串而不拋例外,所以不能用 try/except 偵測。
+        # 同時記模型傳入的名字(評估模型行為)與前綴容錯後的名字(免呼叫端重做解析)。
+        resolved = await self._resolve_resource_name(skills, skill_name, resource_name)
         result = await super()._read_skill_resource(
-            skills, skill_name, resource_name, **kwargs
+            skills, skill_name, resolved, **kwargs
         )
+        if not skill_name or not resource_name:
+            return result
         # ≠ _load_skill:MAF 的 _read_skill_resource 回傳型別是 Any(callable resource
         # 可能回 dict/bytes),所以判「不是 Error 字串」而非「是成功的 str」。
         failed = isinstance(result, str) and result.startswith("Error:")
-        entry = (skill_name, resource_name)
-        if (
-            not failed
-            and skill_name
-            and resource_name
-            and entry not in self.loaded_resources
-        ):
-            self.loaded_resources.append(entry)
+        key = (skill_name, resource_name)
+        if failed:
+            if not any(e[:2] == key for e in self.failed_resources):
+                self.failed_resources.append((skill_name, resource_name, result[:200]))
+        elif not any(e[:2] == key for e in self.loaded_resources):
+            self.loaded_resources.append((skill_name, resource_name, resolved))
         return result
 
     async def _run_skill_script(self, skills, skill_name, script_name, args=None, **kwargs):  # type: ignore[override]
@@ -1083,6 +1104,16 @@ class SkillsProviderFactory:
                 SKILL_ENTRY_FILENAME,
                 *(path for path in listed_files if path != SKILL_ENTRY_FILENAME),
             ]
+            from skill_types import classify_skill
+            try:
+                scripts = await self._list_skill_scripts(meta)
+                classification = classify_skill(content, skill_name=meta.skill_name, scripts=scripts)
+                fm["_type_errors"] = list(classification.errors)
+            except Exception:
+                classification = classify_skill(content)
+                fm["_type_errors"] = [*classification.errors, "script inventory unavailable; package cannot be validated"]
+            fm["_skill_type"] = classification.skill_type
+            fm["_type_warnings"] = list(classification.warnings)
             return fm
 
         results = await asyncio.gather(*[_load_one(m) for m in metas])
@@ -1320,7 +1351,16 @@ class SkillsProviderFactory:
             # SKILL.md 一定要有,且必須先撈 —— 缺它整個 skill 就不成立,
             # 而且要先看過 frontmatter 才知道該不該落地。
             content = await self._fetch_skill_content(meta)
-            if _declares_children(content):
+            from skill_types import classify_skill
+            scripts = await self._list_skill_scripts(meta)
+            classification = classify_skill(content, skill_name=meta.skill_name, scripts=scripts)
+            for warning in classification.warnings:
+                logger.warning("[Skills] %s: %s", meta.skill_name, warning)
+            if not classification.valid:
+                logger.warning("[Skills] %s: invalid package, skipped: %s", meta.skill_name, classification.errors)
+                result.unsupported_script_skills[meta.skill_name] = "; ".join(classification.errors)
+                return False
+            if classification.skill_type == "scenario-orchestration":
                 logger.info(
                     "[Skills] %s declares children — scenario skill, "
                     "not materialized for the internal agent",
@@ -1372,13 +1412,15 @@ class SkillsProviderFactory:
             if extras:
                 await asyncio.gather(*[write_extra(r) for r in extras])
             problem = script_skill_problem(
-                meta.skill_name, await self._list_skill_scripts(meta), dynamic_mode=True
+                meta.skill_name, scripts, dynamic_mode=True, content=content
             )
             if problem:
                 result.unsupported_script_skills[meta.skill_name] = problem
             declared = declared_mi_scopes(content)
             if declared:
                 mi_scopes_by_skill[meta.skill_name] = declared
+            if _invalidates_skill_catalog(content):
+                result.catalog_mutating_skills.add(meta.skill_name)
             return True
 
         written = 0
@@ -1419,8 +1461,10 @@ class SkillsProviderFactory:
             )
             return None
 
-        children = _declared_child_names(await self._fetch_skill_content(target))
-        if not children:
+        from skill_types import classify_skill
+        classification = classify_skill(await self._fetch_skill_content(target))
+        children = classification.children
+        if not classification.valid or classification.skill_type != "scenario-orchestration" or not children:
             logger.warning(
                 "[Skills] scenario %r declares no children (not a scenario skill?) "
                 "— no scoping applied", scenario,
@@ -1542,6 +1586,7 @@ class SkillsProviderFactory:
             # v1.11:同一組目錄再供 resource_name 前綴容錯使用
             provider.resource_directories = resource_dirs
             provider.mi_scopes_by_skill = materialized_result.mi_scopes_by_skill
+            provider.catalog_mutating_skills = materialized_result.catalog_mutating_skills
             provider.unsupported_script_skills = materialized_result.unsupported_script_skills
             provider.script_blob_meta = materialized_result.script_blob_meta
             yield provider

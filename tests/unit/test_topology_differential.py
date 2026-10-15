@@ -14,7 +14,9 @@ for instance), and tightening ourselves to match would defeat the point.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,16 @@ pytestmark = pytest.mark.skipif(
     not REFERENCE_FILE.exists(),
     reason="reference/ snapshot is not present; see backend/topology.py for why it is optional",
 )
+
+
+@pytest.fixture(autouse=True)
+def reference_skill_types(monkeypatch):
+    path = REFERENCE_FILE.with_name("skill_types.py")
+    spec = importlib.util.spec_from_file_location("skill_types", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "skill_types", module)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _reference_version() -> str:
@@ -131,3 +143,17 @@ One line.
 """
     assert validate_topology(capability, SkillKind.CAPABILITY, mode=Mode.NEW) == []
     assert not _reference_declares_children()(capability)
+
+
+@pytest.mark.parametrize("kind, script", [(SkillKind.CAPABILITY, None), (SkillKind.CAPABILITY, "print(1)\n"), (SkillKind.SCENARIO, None)])
+def test_canonical_generator_types_match_the_runtime(reference_skill_types, kind, script) -> None:
+    from backend.topology import canonicalize_skill_type, expected_skill_type
+
+    source = CONSERVATIVE if kind is SkillKind.SCENARIO else "---\nname: demo\n---\n\n## Overview\nBody.\n"
+    canonical = canonicalize_skill_type(source, kind, script)
+    name = "leave-workflow" if kind is SkillKind.SCENARIO else "demo"
+    inventory = [f"scripts/{name}.py"] if script is not None else []
+    result = reference_skill_types.classify_skill(canonical, skill_name=name, scripts=inventory)
+    assert result.valid, result.errors
+    assert result.skill_type == expected_skill_type(kind, script)
+    assert not result.warnings

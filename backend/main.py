@@ -118,6 +118,7 @@ from .session_store import LocalSessionStore, make_session_store
 from .topology import (
     Severity,
     TopologyIssue,
+    canonicalize_skill_type,
     parse_frontmatter_block,
     validate_topology,
 )
@@ -949,12 +950,12 @@ def _eaa_lint(session: Session, skill_name: str) -> EaaLintResult:
         log_event("skill.save.eaa_lint_failed", level="warning", session_id=session.id, skill_name=skill_name, errors=result.errors)
         errors = result.errors or ["EAA reported the package invalid without listing errors."]
         raise _lint_failure("eaa_lint_failed", "EAA skill lint failed", errors)
-    if script is not None and not _ruleset_at_least(result.ruleset_version, SCRIPT_MIN_EAA_RULESET):
+    if not _ruleset_at_least(result.ruleset_version, SKILL_TYPE_MIN_EAA_RULESET):
         raise HTTPException(
             status_code=503,
             detail=(
-                f"EAA lint ruleset {result.ruleset_version or 'unknown'} predates the script checks "
-                f"(needs {'.'.join(map(str, SCRIPT_MIN_EAA_RULESET))}+), so a script skill cannot be verified "
+                f"EAA lint ruleset {result.ruleset_version or 'unknown'} predates the skill type checks "
+                f"(needs {'.'.join(map(str, SKILL_TYPE_MIN_EAA_RULESET))}+), so this skill cannot be verified "
                 "and was not saved."
             ),
         )
@@ -974,8 +975,7 @@ def _lint_failure(kind: str, title: str, issues: list[str]) -> HTTPException:
     )
 
 
-# EAA lint_skill_package validates scripts/ layout and naming from this ruleset on.
-SCRIPT_MIN_EAA_RULESET = (1, 1)
+SKILL_TYPE_MIN_EAA_RULESET = (1, 2)
 
 
 def _assert_script_flags_on(session: Session) -> None:
@@ -1177,9 +1177,14 @@ def _save_skill_dual_write(
     previous_name = old_name or (skill_name if existing is not None else "")
     previous_files = store.load_skill(previous_name) if previous_name else None
     previous_assets = store.load_assets(previous_name) if previous_name else {}
+    if any(path.startswith("scripts/") for path in previous_assets):
+        raise _lint_failure("skill_type_invalid", "Skill type validation failed", [
+            "The stored package has unexpected scripts/ files; resolve its script inventory before saving.",
+        ])
     try:
+        typed_md = canonicalize_skill_type(session.current_skill.skill_md, kind, session.current_skill.script)
         versioned_md = prepare_skill_version(
-            session.current_skill.skill_md,
+            typed_md,
             previous_files.skill_md if previous_files is not None else None,
             other_files_changed=bool(previous_files is not None and (
                 session.current_skill.script != previous_files.script
@@ -2045,17 +2050,17 @@ def _assert_children_before_routing(session: Session, item: str, confirmed: bool
 
 
 # What decides which layer the file belongs to.
-_LAYER_RULES = frozenset({"T4", "T10"})
+_LAYER_RULES = frozenset({"T4", "T5", "T10", "T11"})
 # What decides whether the frontmatter parses at all.
 _PARSEABILITY_RULES = frozenset({"T1", "T2", "T3"})
 
 
-def _topology_errors(skill_md: str, kind: SkillKind) -> list[TopologyIssue]:
+def _topology_errors(skill_md: str, kind: SkillKind, script: str | None = None) -> list[TopologyIssue]:
     # Mode.NEW so the MODIFY/IMPORT downgrade of T1-T3 to warnings never applies
     # to content this session just authored.
     return [
         issue
-        for issue in validate_topology(skill_md, kind, mode=Mode.NEW)
+        for issue in validate_topology(skill_md, kind, mode=Mode.NEW, script=script)
         if issue.severity is Severity.ERROR
     ]
 
@@ -2069,7 +2074,11 @@ def _assert_topology_preserved(session: Session, skill_md: str, *, tool: str) ->
     correct.
     """
     kind = SkillKind(session.skill_kind)
-    issues = _topology_errors(skill_md, kind)
+    issues = _topology_errors(skill_md, kind, session.current_skill.script)
+    before_meta = parse_frontmatter_meta(session.current_skill.skill_md)
+    after_meta = parse_frontmatter_meta(skill_md)
+    if "skill_type" in before_meta and "skill_type" not in after_meta:
+        raise ValueError(f"{tool} was rejected: keep metadata.skill_type intact.")
 
     layer = [issue for issue in issues if issue.rule in _LAYER_RULES]
     if layer:
@@ -2083,7 +2092,7 @@ def _assert_topology_preserved(session: Session, skill_md: str, *, tool: str) ->
     # Parseability is enforced as a REGRESSION only, so a file that was already
     # malformed when it was imported stays editable.
     before = session.current_skill.skill_md
-    baseline = {issue.rule for issue in _topology_errors(before, kind)} if before.strip() else set()
+    baseline = {issue.rule for issue in _topology_errors(before, kind, session.current_skill.script)} if before.strip() else set()
     regressed = [
         issue
         for issue in issues
@@ -2742,6 +2751,12 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
                 ),
             )
         inferred_kind = SkillKind.SCENARIO if has_children else SkillKind.CAPABILITY
+        type_errors = [
+            issue.message for issue in validate_topology(files.skill_md, inferred_kind, mode=Mode.MODIFY, script=files.script)
+            if issue.rule in {"T3", "T4", "T5", "T10", "T11"} and issue.severity is Severity.ERROR
+        ]
+        if type_errors:
+            raise _lint_failure("skill_type_invalid", "Skill type validation failed", type_errors)
         if req.skill_kind is not None and SkillKind(req.skill_kind) is not inferred_kind:
             raise HTTPException(
                 status_code=400,
@@ -4514,15 +4529,29 @@ def _neighbor_edit_save(session_id: str, skill: str, upn: str) -> Session:
         raise HTTPException(status_code=400, detail="No selected version to save")
     if not _user_can_modify_skill(upn, ne.skill_name):
         raise HTTPException(status_code=403, detail=f"You cannot modify the skill: {ne.skill_name}")
-    kind = SkillKind.SCENARIO if parse_frontmatter_meta(version.skill_md).get("children") else SkillKind.CAPABILITY
-    _assert_no_named_skill_references(version.skill_md, kind)
     previous = store.load_skill(ne.skill_name)
+    kind = SkillKind.SCENARIO if parse_frontmatter_meta(previous.skill_md).get("children") else SkillKind.CAPABILITY
+    _assert_no_named_skill_references(version.skill_md, kind)
+    if any(path.startswith("scripts/") for path in store.load_assets(ne.skill_name)):
+        raise _lint_failure("skill_type_invalid", "Skill type validation failed", [
+            "The stored package has unexpected scripts/ files; resolve its script inventory before saving.",
+        ])
+    type_issues = [
+        issue for issue in validate_topology(version.skill_md, kind, mode=Mode.MODIFY, script=previous.script)
+        if issue.rule in {"T4", "T5", "T10", "T11"} and issue.severity is Severity.ERROR
+    ]
+    if type_issues:
+        raise _lint_failure("skill_type_invalid", "Skill type validation failed", [issue.message for issue in type_issues])
     try:
-        versioned_md = prepare_skill_version(version.skill_md, previous.skill_md)
+        typed_md = canonicalize_skill_type(version.skill_md, kind, previous.script)
+        versioned_md = prepare_skill_version(typed_md, previous.skill_md)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={
             "kind": "skill_version_invalid", "message": str(exc), "recoverable": True,
         }) from exc
+    _eaa_lint(session.model_copy(update={
+        "current_skill": session.current_skill.model_copy(update={"skill_md": versioned_md, "script": previous.script}),
+    }), ne.skill_name)
     files = SkillFiles(name=ne.skill_name, skill_md=versioned_md, version_hash=compute_hash(versioned_md))
     try:
         saved = store.save_skill(
@@ -5229,6 +5258,7 @@ TOPOLOGY_RULES: list[dict[str, str]] = [
     {"rule": "T8", "description": "Large metadata mappings produce a warning."},
     {"rule": "T9", "description": "Scenario skills must not contain capability-only sections."},
     {"rule": "T10", "description": "Scenario skill_type and children must appear together."},
+    {"rule": "T11", "description": "Generator skill_type must match the skill layer and bundled script."},
     {"rule": "P1", "description": "Every fetch_skill target must be declared in metadata.children."},
     {"rule": "P2", "description": "Every requested section name must resolve to a child's ## heading."},
     {"rule": "P3", "description": "Each skill is fetched once, naming all its sections at that call."},

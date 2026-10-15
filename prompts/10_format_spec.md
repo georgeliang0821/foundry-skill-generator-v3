@@ -9,6 +9,7 @@ values containing colon+space can break parsing:
 name: lowercase-kebab-case
 description: "2-3 sentence retrieval-oriented description"
 metadata:
+  skill_type: inline
   author: owner
   tags: []
   uses_obo: false
@@ -18,6 +19,14 @@ metadata:
 A skill that uses the platform Managed Identity also declares
 `metadata.mi_scopes` (see The Managed Identity Contract); every other skill
 omits that key.
+
+`metadata.skill_type` is required in every generated skill. This Generator writes
+`scenario-orchestration` for scenario skills, `inline` for capability skills
+without a bundled script, and `script` for capability skills with a bundled
+script. These are this Generator's output types, not the platform's entire type
+set. Never write the compatibility alias `code-generation`. Inline skills may
+carry code examples, instructions and resources; a code fence does not make a
+skill script-based. A capability skill never declares `children`.
 
 `name` must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` and be at most 64
 characters -- lowercase letters, digits and hyphens only, no leading or

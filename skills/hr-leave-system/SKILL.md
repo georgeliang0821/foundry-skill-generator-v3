@@ -15,6 +15,7 @@ description: >
   幫我送假單、我的假單簽核到哪了、查我的請假紀錄。
 metadata:
   author: "George Liang"
+  skill_type: inline
   version: "1.5"
   uses_obo: true
 ---

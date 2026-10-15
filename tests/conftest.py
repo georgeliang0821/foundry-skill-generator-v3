@@ -236,7 +236,7 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     monkeypatch.setattr(
         module,
         "lint_skill_package",
-        lambda *args, **kwargs: module.EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="test"),
+        lambda *args, **kwargs: module.EaaLintResult(valid=True, errors=[], warnings=[], ruleset_version="1.2"),
     )
     yield module
     # PREPARE-entry work runs in a daemon thread; drain it so it cannot race the

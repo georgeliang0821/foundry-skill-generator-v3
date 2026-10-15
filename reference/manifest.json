@@ -3,27 +3,33 @@
   "upstream": {
     "repository": "https://github.com/agent-accelerators/enterprise-agent-accelerator.git",
     "local_checkout": "C:\\dev\\code_tool_hosted-async-1.8.0",
-    "commit": "d00b04d67904c2775e461a919390165729659960",
-    "verified_at": "2026-10-05"
+    "commit": "80a1f9efe9b34136886bb6ed5cbb162b0925a89b",
+    "verified_at": "2026-10-15"
   },
   "files": [
+    {
+      "source": "skill_types.py",
+      "destination": "reference/skill_types.py",
+      "sha256": "a90cae39d77edc9b8c6b2545b442ade10d6fe22070e5e23b7b0413b6a6e20499",
+      "version": "unknown"
+    },
     {
       "source": "core_handler.py",
       "destination": "reference/core_handler.py",
       "version": "1.12",
-      "sha256": "5855929a33defa1d2fcc8dcf36b1348efbccff23e95999ed428b7bced9f5ec06"
+      "sha256": "3fb5f5546eeb19f0d8d3efe80a63395f80d6e79d9787bc0ab45d9b52383ec205"
     },
     {
       "source": "skill_gatekeeper.py",
       "destination": "reference/skill_gatekeeper.py",
       "version": "2.10",
-      "sha256": "2650bd36d450e3974a6de5c3c3ee8d4b5683d23e0c8cf5a61175cfff07676aaa"
+      "sha256": "1db2c1bdc05b841e9d736d46804a1fe8f9218ff36ed66a5e0d1bb0f4b90b3d25"
     },
     {
       "source": "skills_provider_factory.py",
       "destination": "reference/skills_provider_factory.py",
       "version": "1.16",
-      "sha256": "40c3175b3f0e52a36adfc4e04ab5f1eb733318db8ee1f62de3883128c85a0235"
+      "sha256": "742acc18aa6ea27567d52e9b2ea2be35d6cc167ffea9a03ef7bc2e3269d97f03"
     },
     {
       "source": "code_executor.py",
@@ -154,6 +160,20 @@
   ],
   "restated": [
     {
+      "source": "skill_types.py",
+      "symbol": "GENERATOR_SKILL_TYPES",
+      "file": "backend/models.py",
+      "restated_as": "GENERATOR_SKILL_TYPES",
+      "relation": "equal",
+      "review": [
+        "backend/topology.py",
+        "backend/form_conversion.py",
+        "prompts/10_format_spec.md",
+        "prompts/02_draft_script_addendum.md",
+        "prompts/10_format_spec_scenario.md"
+      ]
+    },
+    {
       "source": "code_executor.py",
       "symbol": "SUBPROCESS_ENV_DENYLIST",
       "file": "backend/eaa_platform.py",
@@ -249,6 +269,7 @@
       "uploads",
       "skills_referenced",
       "loaded_resources",
+      "failed_resources",
       "requested_scripts"
     ],
     "ignored": {

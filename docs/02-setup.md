@@ -140,6 +140,7 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 1. 向 EAA 管理員取得 MCP 根 URL → `MCP_ENDPOINT`（例如 `https://eaa.foundryeaa.org/mcp`）。
 2. 請 EAA 管理員確認：EAA 驗證的 token audience 是 [2.1](#21-登入用-app-registration) 那支 app 的 `api://<app-id>`。後端以該 app 對自己做 client credentials 取得 app-only token，不需要另外設定 app role。
 3. 若 EAA 驗證的是另一支 app，將那支 app 的 audience 填入 `MCP_OAUTH_AUDIENCE`。
+4. 確認 `lint_skill_package` 回報 `ruleset_version >= 1.2`，具備 skill 類型與套件一致性檢查。低於此版號或無法辨識版號時，所有類型的儲存都會回 HTTP 503；可識別為無效的套件仍回 HTTP 400。
 
 > audience 不符時，儲存會因 lint 取不到判定而回 HTTP 503，路由測試則回 HTTP 502。lint 的完整行為見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)，呼叫身分的細節見 [03-architecture.md](03-architecture.md#24-呼叫-eaa-mcp-的身分)。
 

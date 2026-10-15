@@ -36,7 +36,7 @@ from enum import Enum
 import yaml
 from pydantic import BaseModel
 
-from .models import SCENARIO_SKILL_TYPE, Mode, SkillKind
+from .models import GENERATOR_SKILL_TYPES, SCENARIO_SKILL_TYPE, Mode, SkillKind
 from .sections import (
     ambiguous_titles,
     h2_sections,
@@ -182,7 +182,7 @@ def validate_topology(
 
     _check_name(frontmatter, expected_name, add)
     _check_children_shape(frontmatter, kind, add)
-    _check_skill_type(frontmatter, add)
+    _check_skill_type(frontmatter, add, kind=kind, script=script)
     _check_metadata_size(frontmatter, add)
     _check_section_contract(stripped, kind, add, script)
 
@@ -245,7 +245,55 @@ def _check_children_shape(frontmatter: dict, kind: SkillKind, add) -> None:
         add("T4", "Every entry in `metadata.children` must be a non-empty string.")
 
 
-def _check_skill_type(frontmatter: dict, add) -> None:
+def expected_skill_type(kind: SkillKind, script: str | None) -> str:
+    return SCENARIO_SKILL_TYPE if kind == SkillKind.SCENARIO else "script" if script is not None else "inline"
+
+
+def canonicalize_skill_type(
+    skill_md: str, kind: SkillKind, script: str | None, *, allow_form_change: bool = False,
+) -> str:
+    block, frontmatter = parse_frontmatter_block(skill_md)
+    if block is None or frontmatter is None:
+        raise ValueError("The skill frontmatter must be a YAML mapping.")
+    metadata = frontmatter.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata must be a YAML mapping.")
+    declared = metadata.get("skill_type")
+    expected = expected_skill_type(kind, script)
+    if "skill_type" in frontmatter:
+        raise ValueError("skill_type must be declared under metadata.")
+    allowed = (expected, "code-generation", "inline", "script") if allow_form_change else (expected, "code-generation")
+    if "skill_type" in metadata and declared not in allowed:
+        raise ValueError(f"metadata.skill_type must be `{expected}` for this package.")
+    if declared == "code-generation" and expected != "inline" and not allow_form_change:
+        raise ValueError("code-generation is an inline compatibility alias, not a script or scenario type.")
+    if declared == expected:
+        return skill_md
+    tree = yaml.compose(block)
+    metadata_node = next((value for key, value in tree.value if key.value == "metadata"), None)
+    type_node = next((value for key, value in metadata_node.value if key.value == "skill_type"), None) if isinstance(metadata_node, yaml.MappingNode) else None
+    structured = any(isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken)) for token in yaml.scan(block))
+    if structured or (type_node is not None and type_node.style in ("|", ">")):
+        frontmatter["metadata"] = dict(metadata, skill_type=expected)
+        replacement = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)
+    elif metadata_node is None:
+        replacement = block.rstrip("\n") + f"\nmetadata:\n  skill_type: {expected}\n"
+    elif isinstance(metadata_node, yaml.MappingNode) and not metadata_node.flow_style and metadata_node.value:
+        if type_node is not None:
+            replacement = block[:type_node.start_mark.index] + expected + block[type_node.end_mark.index:]
+        else:
+            first_key = metadata_node.value[0][0]
+            start = block.rfind("\n", 0, first_key.start_mark.index) + 1
+            line = " " * first_key.start_mark.column + f"skill_type: {expected}\n"
+            replacement = block[:start] + line + block[start:]
+    else:
+        frontmatter["metadata"] = dict(metadata, skill_type=expected)
+        replacement = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)
+    replacement = replacement.rstrip("\n") + ("\n" if block.endswith("\n") else "")
+    return skill_md.replace(block, replacement, 1)
+
+
+def _check_skill_type(frontmatter: dict, add, *, kind: SkillKind, script: str | None) -> None:
     meta = frontmatter.get("metadata")
     skill_type = str(meta.get("skill_type") or "").strip() if isinstance(meta, dict) else ""
     declares_scenario = skill_type == SCENARIO_SKILL_TYPE
@@ -260,6 +308,18 @@ def _check_skill_type(frontmatter: dict, add) -> None:
             "T10",
             f"A skill declaring `metadata.children` must also set `metadata.skill_type: {SCENARIO_SKILL_TYPE}`.",
         )
+    if "skill_type" in frontmatter:
+        add("T11", "skill_type must be declared under metadata.skill_type.")
+    if isinstance(meta, dict) and "skill_type" in meta:
+        declared = meta["skill_type"]
+        resolved = "inline" if declared == "code-generation" else declared
+        expected = expected_skill_type(kind, script)
+        if not isinstance(resolved, str) or resolved not in GENERATOR_SKILL_TYPES:
+            add("T11", "Generator skill_type must be scenario-orchestration, inline or script.")
+        elif resolved != expected:
+            add("T11", f"metadata.skill_type is `{declared}` but this package requires `{expected}`.")
+    if kind == SkillKind.SCENARIO and script is not None:
+        add("T11", "A scenario skill must not bundle its own script.")
 
 
 def _check_metadata_size(frontmatter: dict, add) -> None:

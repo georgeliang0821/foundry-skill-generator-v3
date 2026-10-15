@@ -159,7 +159,7 @@ def test_patch_version_tracks_saved_content_and_undo_remains_local(client, backe
     response = _accept_patch(client, session, call_id="version_patch", old="Original", new="Changed", addresses=[])
     assert response.status_code == 200, response.text
     body = response.json()
-    saved = original.replace("Original", "Changed").replace('"1.6"', '"1.6.1"')
+    saved = original.replace("Original", "Changed").replace('"1.6"', '"1.6.1"').replace("metadata:\n", "metadata:\n  skill_type: inline\n")
     record = body["patch_history"][-1]
     assert record["content_after"] == saved
     assert record["version_hash_after"] == backend_main.version_hash(saved)
@@ -172,7 +172,7 @@ def test_patch_version_tracks_saved_content_and_undo_remains_local(client, backe
     assert undone.json()["current_skill"]["skill_md"] == original
     assert backend_main.store.load_skill("demo").skill_md == saved
     assert client.post(f"/api/sessions/{sid}/save", json={}).status_code == 200
-    assert backend_main.store.load_skill("demo").skill_md == original.replace('"1.6"', '"1.6.2"')
+    assert backend_main.store.load_skill("demo").skill_md == original.replace('"1.6"', '"1.6.2"').replace("metadata:\n", "metadata:\n  skill_type: inline\n")
 
 
 def test_lint_rejected_patch_never_writes_a_snapshot(client, backend_main, grant_skill) -> None:

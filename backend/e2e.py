@@ -89,6 +89,7 @@ def e2e_skill_files(name: str = "e2e-calendar-skill") -> SkillFiles:
 name: {safe}
 description: E2E fake skill for browser automation.
 metadata:
+    skill_type: inline
   author: e2e
   version: "1.0"
   tags:
@@ -476,6 +477,8 @@ class FakeE2EAgent:
             return
         files = e2e_scenario_skill_files() if SkillKind(session.skill_kind) is SkillKind.SCENARIO else e2e_skill_files()
         skill_md = files.skill_md
+        if session.current_skill.script is not None:
+            skill_md = skill_md.replace("skill_type: inline", "skill_type: script", 1)
         if get_scenario() == "lint_failure":
             # Unparseable sample code: A1 blocks the save.
             skill_md = skill_md.replace("def run():", "def run(:")

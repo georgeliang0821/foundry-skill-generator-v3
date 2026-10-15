@@ -509,15 +509,42 @@ def _build_static_skills_provider():
         # 掃描參數讓白名單失效。【Mode B 的 skills_provider_factory 必須保持
         # 同步】,否則兩模式的 skill 可見行為會不一致。
         resource_exts, resource_dirs = derive_resource_scan_args(SKILLS_DIR)
+        from pathlib import Path
+        from skill_types import classify_skill
+        from skills_sync import STATIC_SKILL_SCRIPTS, STATIC_UNSUPPORTED_SCRIPT_SKILLS, script_skill_problem
+        paths = []
+        problems = dict(STATIC_UNSUPPORTED_SCRIPT_SKILLS)
+        for directory in sorted(Path(SKILLS_DIR).iterdir()):
+            entry = directory / "SKILL.md"
+            if not directory.is_dir() or not entry.is_file():
+                continue
+            try:
+                content = entry.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                problems[directory.name] = str(error)
+                logger.warning("[Skills] %s: unreadable package: %s", directory.name, error)
+                continue
+            scripts = sorted(path.relative_to(directory).as_posix() for path in (directory / "scripts").rglob("*") if path.is_file())
+            scripts = STATIC_SKILL_SCRIPTS.get(directory.name, scripts)
+            classification = classify_skill(content, skill_name=directory.name, scripts=scripts)
+            problem = script_skill_problem(directory.name, scripts, False, content)
+            if problem:
+                problems.setdefault(directory.name, problem)
+            for warning in classification.warnings:
+                logger.warning("[Skills] %s: %s", directory.name, warning)
+            if not classification.valid:
+                logger.warning("[Skills] %s: invalid package: %s", directory.name, classification.errors)
+                continue
+            if classification.skill_type != "scenario-orchestration":
+                paths.append(directory)
         provider_cls = _TolerantSkillsProvider or _StaticSkillsProvider
         provider = provider_cls.from_paths(
-            SKILLS_DIR,
+            paths,
             resource_extensions=resource_exts,
             resource_directories=resource_dirs,
         )
         provider.resource_directories = resource_dirs
-        from skills_sync import STATIC_UNSUPPORTED_SCRIPT_SKILLS
-        provider.unsupported_script_skills = dict(STATIC_UNSUPPORTED_SCRIPT_SKILLS)
+        provider.unsupported_script_skills = problems
         # 列出載入的 skill 名稱,方便 debug
         skill_names = sorted(
             d for d in os.listdir(SKILLS_DIR)
@@ -872,6 +899,7 @@ RESPONSE_BOUNDARY_WHITELIST = frozenset({
     # 本 whitelist 是「保留清單」不是「補齊清單」,多列一個從不存在的 key 對既有
     # 流量是 no-op。
     "loaded_resources",
+    "failed_resources",
     # route_only + SKILL_SCRIPTS_ENABLED:模型要求但未執行的腳本(flag 關閉時 key 不存在)
     "requested_scripts",
     # detach / rejected / cancelled 等非 success shape 的控制欄位也保留,
@@ -1781,6 +1809,11 @@ async def _run_coding_agent_inner(
             f"cached_input={this_turn_usage['cached_input_token_count']}, "
             f"cache_write={this_turn_usage['cache_write_token_count']}; "
             f"session total={state.session_usage_totals['total_token_count']}"
+        )
+
+        _prev_skills = (metadata or {}).get("session_skills", []) or []
+        state.session_skills = list(
+            dict.fromkeys(list(_prev_skills) + list(state.skills_referenced or []))
         )
 
         # 4.5 生成 turn summary 並累積到 turn_history
@@ -2979,6 +3012,11 @@ def _format_skills_catalog(header: str, catalog: list[dict]) -> str:
         name = meta.get("name", "")
         description = meta.get("description", "")
         lines.append(f"- **{name}**: {description}")
+        if "_skill_type" in meta:
+            lines.append(f"  - skill_type: {meta['_skill_type'] or 'invalid'}")
+        for field in ("_type_errors", "_type_warnings"):
+            for diagnostic in meta.get(field, []):
+                lines.append(f"  - {field[1:]}: {diagnostic}")
 
         # 2026.08.21 George : children 提到獨立一行 —— 宿主(DA / Foundry helper)
         # 靠它判斷「這是情境層,要先 fetch_skill 取完整指引」。埋在 metadata 的
@@ -3129,6 +3167,16 @@ async def list_skills(credentials: Optional[Dict] = None) -> str:
                         parsed = yaml.safe_load(parts[1])
                         if isinstance(parsed, dict):
                             meta = parsed
+                from pathlib import Path
+                from skill_types import classify_skill
+                from skills_sync import STATIC_SKILL_SCRIPTS
+                directory = Path(SKILLS_DIR) / skill_name
+                scripts = sorted(path.relative_to(directory).as_posix() for path in (directory / "scripts").rglob("*") if path.is_file())
+                scripts = STATIC_SKILL_SCRIPTS.get(skill_name, scripts)
+                classification = classify_skill(content, skill_name=skill_name, scripts=scripts)
+                meta["_skill_type"] = classification.skill_type
+                meta["_type_errors"] = list(classification.errors)
+                meta["_type_warnings"] = list(classification.warnings)
             except Exception:
                 meta = {"description": "(SKILL.md 解析失敗)"}
         else:
