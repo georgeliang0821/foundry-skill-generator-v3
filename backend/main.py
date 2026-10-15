@@ -1211,11 +1211,10 @@ def _save_skill_dual_write(
         delegated = set(delegation_children(session))
         internal_children = [c for c in declared_children if c in delegated]
     previous_children = _infer_previous_children(session)
-    orphaned_children = [
-        child
-        for child in previous_children
-        if child not in declared_children and _is_internal_skill(child)
-    ]
+    orphaned_children = _unreferenced_internal_children(
+        [child for child in previous_children if child not in declared_children],
+        session.remote_skill_id or skill_name,
+    )
     if orphaned_children and orphan_action not in {"keep_internal", "make_capability"}:
         raise HTTPException(
             status_code=409,
@@ -4835,14 +4834,10 @@ def list_permission_skills(upn: str = Depends(require_upn)):
     return {"skills": [row.to_payload() for row in skills_repo.list_permission_skills(upn)]}
 
 
-def _skill_dependencies(name: str, upn: str) -> dict:
+def _dependency_graph() -> dict[tuple[str, str | None], list[str]]:
     import yaml
 
-    acl_mod.assert_can_manage_permissions(upn, name)
-    dependencies = []
-    dependents = []
-    hidden = 0
-    found = False
+    graph = {}
     try:
         documents = store.dependency_documents()
         scanned = {(item[0], item[1]) for item in documents}
@@ -4861,23 +4856,51 @@ def _skill_dependencies(name: str, upn: str) -> dict:
             children = metadata.get("children", [])
             if not isinstance(children, list) or any(not isinstance(child, str) or safe_skill_name(child) != child for child in children):
                 raise ValueError("Invalid children.")
-            if source == name and owner is None:
-                dependencies = list(dict.fromkeys(children))
-                found = True
-            if name not in children or (source == name and owner is None):
-                continue
-            row = skills_repo.get_skill(source, owner)
-            visible = bool(row and (row.created_by == upn or (owner is None and acl_mod.can_access(upn, source))))
-            if visible:
-                dependents.append({"name": source, "can_modify": owner is None and acl_mod.can_modify(upn, source), "path": [source, name]})
-            else:
-                hidden += 1
-        if not found:
-            raise ValueError("Target content is missing.")
+            graph[(source, owner)] = list(dict.fromkeys(children))
     except Exception as exc:
-        log_exception("skills.dependencies.failed", exc, skill_name=name)
-        raise HTTPException(status_code=503, detail="Dependency check is incomplete. Deletion is unavailable.") from exc
-    return {"skill_name": name, "dependencies": dependencies, "dependents": dependents, "hidden_dependents": hidden, "can_delete": not dependents and not hidden}
+        log_exception("skills.dependencies.failed", exc)
+        raise HTTPException(status_code=503, detail="Dependency check is incomplete. No changes were made.") from exc
+    return graph
+
+
+def _unreferenced_internal_children(
+    children: list[str], parent: str,
+    graph: dict[tuple[str, str | None], list[str]] | None = None,
+) -> list[str]:
+    candidates = [child for child in dict.fromkeys(children) if _is_internal_skill(child)]
+    if not candidates:
+        return []
+    if graph is None:
+        graph = _dependency_graph()
+    referenced = {
+        child for scope, declared in graph.items()
+        if scope != (parent, None) for child in declared
+    }
+    return [child for child in candidates if child not in referenced]
+
+
+def _skill_dependencies(name: str, upn: str) -> dict:
+    acl_mod.assert_can_manage_permissions(upn, name)
+    graph = _dependency_graph()
+    if (name, None) not in graph:
+        raise HTTPException(status_code=503, detail="Dependency check is incomplete. Deletion is unavailable.")
+    dependencies = graph[(name, None)]
+    dependents = []
+    hidden = 0
+    for (source, owner), children in graph.items():
+        if name not in children or (source == name and owner is None):
+            continue
+        row = skills_repo.get_skill(source, owner)
+        visible = bool(row and (row.created_by == upn or (owner is None and acl_mod.can_access(upn, source))))
+        if visible:
+            dependents.append({"name": source, "can_modify": owner is None and acl_mod.can_modify(upn, source), "path": [source, name]})
+        else:
+            hidden += 1
+    return {
+        "skill_name": name, "dependencies": dependencies, "dependents": dependents,
+        "hidden_dependents": hidden, "can_delete": not dependents and not hidden,
+        "orphaned_children": _unreferenced_internal_children(dependencies, name, graph),
+    }
 
 
 @app.get("/api/skills/{name}/dependencies")
@@ -4887,6 +4910,15 @@ def skill_dependencies(name: str, upn: str = Depends(require_upn)):
 
 class DeleteSkillRequest(BaseModel):
     confirm_name: str
+    orphan_action: str | None = None
+
+
+def _require_delete_orphan_action(children: list[str], action: str | None) -> None:
+    if children and action not in {"keep_internal", "make_capability"}:
+        raise HTTPException(status_code=409, detail={
+            "kind": "orphaned_children", "recoverable": True, "children": children,
+            "message": "Deleting this scenario leaves internal skills with no remaining parent. Choose whether to keep them internal or make them standalone capability skills.",
+        })
 
 
 @app.delete("/api/skills/{name}")
@@ -4904,6 +4936,8 @@ def _delete_managed_skill(name: str, req: DeleteSkillRequest, upn: str):
     dependencies = _skill_dependencies(name, upn)
     if not dependencies["can_delete"]:
         raise HTTPException(status_code=409, detail={"message": "Other skills still depend on this skill.", **dependencies})
+    original_orphans = set(dependencies["orphaned_children"])
+    _require_delete_orphan_action(dependencies["orphaned_children"], req.orphan_action)
     try:
         version = store.backup_for_delete(name, upn)
     except Exception as exc:
@@ -4912,6 +4946,10 @@ def _delete_managed_skill(name: str, req: DeleteSkillRequest, upn: str):
     dependencies = _skill_dependencies(name, upn)
     if not dependencies["can_delete"]:
         raise HTTPException(status_code=409, detail={"message": "Dependencies changed during backup. Nothing was deleted.", **dependencies})
+    _require_delete_orphan_action(
+        dependencies["orphaned_children"],
+        req.orphan_action if set(dependencies["orphaned_children"]).issubset(original_orphans) else None,
+    )
     if store.load_skill(name).version_hash != version:
         raise HTTPException(status_code=409, detail="Skill changed after backup; reload before deleting.")
     try:
@@ -4924,6 +4962,14 @@ def _delete_managed_skill(name: str, req: DeleteSkillRequest, upn: str):
         get_skills_index().invalidate()
         raise HTTPException(status_code=503, detail="Blob deletion failed and may be partial. SQL registration was retained; contact the administrator.") from exc
     try:
+        if req.orphan_action == "make_capability":
+            for child in dependencies["orphaned_children"]:
+                child_row = skills_repo.get_skill(child)
+                if child_row is not None:
+                    skills_repo.upsert_skill(
+                        child, is_public=child_row.is_public,
+                        enabled=child_row.enabled, is_internal=False,
+                    )
         skills_repo.delete_skill(name)
     except Exception as exc:
         log_exception("skills.delete.sql_failed", exc, skill_name=name)

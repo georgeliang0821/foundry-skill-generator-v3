@@ -36,6 +36,102 @@ def test_manage_delete_cascades_grants(client, backend_main, fake_sql):
     assert "SKILL.md" in backup["files"]
 
 
+@pytest.mark.parametrize("action", [None, "keep_internal", "make_capability"])
+def test_manage_delete_reconciles_only_unreferenced_internal_children(
+    client, backend_main, fake_sql, action
+):
+    for name, children, creator in (
+        ("scenario-a", "[shared-child, orphan-child, visible-child]", TEST_UPN),
+        ("scenario-b", "[shared-child]", "other@example.com"),
+        ("shared-child", "[]", TEST_UPN),
+        ("orphan-child", "[]", "other@example.com"),
+        ("visible-child", "[]", TEST_UPN),
+    ):
+        backend_main.store.save_skill(backend_main.SkillFiles(
+            name=name, skill_md=f"---\nname: {name}\nmetadata:\n  children: {children}\n---\n",
+        ))
+        fake_sql.upsert_skill(
+            name, created_by=creator, is_internal=name in {"shared-child", "orphan-child"},
+            is_public=name == "orphan-child", enabled=name != "orphan-child",
+        )
+        fake_sql.add_grant(name, TEST_UPN)
+    child_before = dict(fake_sql.skills["orphan-child"])
+    grants_before = dict(fake_sql.grants)
+    dependencies = client.get("/api/skills/scenario-a/dependencies").json()
+    assert dependencies["orphaned_children"] == ["orphan-child"]
+    assert "scenario-b" not in str(dependencies)
+
+    response = client.request("DELETE", "/api/skills/scenario-a", json={
+        "confirm_name": "scenario-a", "orphan_action": action,
+    })
+
+    if action is None:
+        assert response.status_code == 409
+        assert response.json()["detail"]["kind"] == "orphaned_children"
+        assert response.json()["detail"]["children"] == ["orphan-child"]
+        assert backend_main.store.load_skill("scenario-a")
+        assert not backend_main.store.store.history
+        assert fake_sql.skills["orphan-child"] == child_before
+        assert fake_sql.grants == grants_before
+    else:
+        assert response.status_code == 200
+        assert "scenario-a" not in fake_sql.skills
+        assert fake_sql.skills["orphan-child"]["is_internal"] is (action == "keep_internal")
+        for field in ("is_public", "enabled", "created_by"):
+            assert fake_sql.skills["orphan-child"][field] == child_before[field]
+        assert fake_sql.grants == {
+            key: value for key, value in grants_before.items() if key[1] != "scenario-a"
+        }
+    assert fake_sql.skills["shared-child"]["is_internal"] is True
+    assert fake_sql.skills["visible-child"]["is_internal"] is False
+    for child in ("shared-child", "orphan-child", "visible-child"):
+        assert backend_main.store.load_skill(child)
+
+
+@pytest.mark.parametrize("change", ["add_parent", "remove_parent", "incomplete_scan"])
+def test_manage_delete_rechecks_child_references_after_backup(
+    client, backend_main, fake_sql, monkeypatch, change
+):
+    for name, children in (
+        ("scenario-a", "[child]"), ("child", "[]"),
+        ("scenario-b", "[child]" if change == "remove_parent" else "[]"),
+    ):
+        backend_main.store.save_skill(backend_main.SkillFiles(
+            name=name, skill_md=f"---\nname: {name}\nmetadata:\n  children: {children}\n---\n",
+        ))
+        fake_sql.upsert_skill(name, created_by=TEST_UPN, is_internal=name == "child")
+    backup = backend_main.store.backup_for_delete
+
+    def changed(name, upn):
+        version = backup(name, upn)
+        if change == "incomplete_scan":
+            fake_sql.upsert_skill("missing-parent")
+        else:
+            children = "[child]" if change == "add_parent" else "[]"
+            backend_main.store.save_skill(backend_main.SkillFiles(
+                name="scenario-b",
+                skill_md=f"---\nname: scenario-b\nmetadata:\n  children: {children}\n---\n",
+            ))
+        return version
+
+    monkeypatch.setattr(backend_main.store, "backup_for_delete", changed)
+    response = client.request("DELETE", "/api/skills/scenario-a", json={
+        "confirm_name": "scenario-a",
+        "orphan_action": None if change == "remove_parent" else "make_capability",
+    })
+
+    assert fake_sql.skills["child"]["is_internal"] is True
+    if change == "add_parent":
+        assert response.status_code == 200
+        assert "scenario-a" not in fake_sql.skills
+    else:
+        assert response.status_code == (409 if change == "remove_parent" else 503)
+        if change == "remove_parent":
+            assert response.json()["detail"]["children"] == ["child"]
+        assert backend_main.store.load_skill("scenario-a")
+        assert "scenario-a" in fake_sql.skills
+
+
 @pytest.mark.parametrize("failure", ["backup", "blob", "sql"])
 def test_manage_delete_failure_preserves_registration(client, backend_main, fake_sql, monkeypatch, failure):
     backend_main.store.save_skill(backend_main.SkillFiles(name="target", skill_md="---\nname: target\n---\n"))

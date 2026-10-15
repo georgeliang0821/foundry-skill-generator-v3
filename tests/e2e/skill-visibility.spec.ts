@@ -88,6 +88,56 @@ test("management shows both dependency directions and blocks referenced capabili
   expect((await request.get("/api/skills/child")).ok()).toBeTruthy();
 });
 
+for (const choice of ["make_capability", "keep_internal", "cancel"]) {
+  test(`scenario deletion handles internal child choice: ${choice}`, async ({ page, request }) => {
+    await seedSkill(request, "child");
+    await seedSkill(request, "parent", "scenario", {
+      skill_md: "---\nname: parent\ndescription: Parent\nmetadata:\n  children: [child]\n---\n",
+    });
+    const payloads: Record<string, unknown>[] = [];
+    await page.route("**/api/skills/parent", async (route) => {
+      if (route.request().method() !== "DELETE") return route.continue();
+      payloads.push(route.request().postDataJSON());
+      if (payloads.length > 1) return route.continue();
+      await route.fulfill({ status: 409, json: { detail: {
+        kind: "orphaned_children", children: ["child"], recoverable: true,
+        message: "Choose how to handle internal children.",
+      } } });
+    });
+    await openApp(page);
+    await page.getByTestId("grants-button").click();
+    await page.getByTestId("permission-skill-select").selectOption("parent");
+    await expect(page.locator("#skillDependencyStatus")).toHaveText("No incoming dependencies.");
+    await page.locator("#skillDeleteConfirm").fill("parent");
+    const dialogs: string[] = [];
+    page.on("dialog", async (dialog) => {
+      dialogs.push(dialog.message());
+      if (dialogs.length === 1 || (dialogs.length === 2 && choice === "make_capability")
+          || (dialogs.length === 3 && choice === "keep_internal")) {
+        await dialog.accept();
+      } else {
+        await dialog.dismiss();
+      }
+    });
+    await page.locator("#skillDeleteBtn").click();
+    if (choice === "cancel") {
+      await expect(page.locator("#skillDeleteBtn")).toBeEnabled();
+      await expect(page.getByTestId("permission-skill-select")).toHaveValue("parent");
+      expect(payloads).toHaveLength(1);
+      expect((await request.get("/api/skills/parent")).ok()).toBeTruthy();
+    } else {
+      await expect(page.locator("#grantsStatus")).toContainText("Deleted parent.");
+      expect(payloads).toHaveLength(2);
+      expect(payloads[1].orphan_action).toBe(choice);
+    }
+    expect(dialogs).toHaveLength(choice === "make_capability" ? 2 : 3);
+    expect(dialogs[1]).toContain("INTERNAL");
+    expect(dialogs[1]).toContain("child");
+    await expect(page.locator("#grantsError")).toBeEmpty();
+    expect((await request.get("/api/skills/child")).ok()).toBeTruthy();
+  });
+}
+
 test("deleting a bound skill retains its conversation and disables saving", async ({ page, request }) => {
   await openApp(page);
   await createDraftWithFakeAgent(page);

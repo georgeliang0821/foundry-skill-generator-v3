@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.models import Delegation, SkillFiles
 
 
@@ -199,6 +201,66 @@ def test_removing_a_dependency_that_was_never_internal_is_silent(
 
     assert response.status_code == 200
     assert fake_sql.skills["peer-skill"]["is_internal"] is False
+
+
+@pytest.mark.parametrize("action", [None, "make_capability"])
+def test_removing_shared_internal_child_preserves_internal(
+    client, backend_main, grant_skill, fake_sql, action
+) -> None:
+    _seed_skill(backend_main, "child-skill", CHILD_MD)
+    _seed_skill(backend_main, "peer-skill", PEER_MD)
+    _seed_skill(backend_main, "parent-skill", PARENT_WITH_DEPENDENCY_MD)
+    _seed_skill(
+        backend_main, "other-parent", PARENT_MD.replace("parent-skill", "other-parent")
+    )
+    for name in ("child-skill", "peer-skill", "parent-skill"):
+        grant_skill(name)
+    fake_sql.upsert_skill("child-skill", is_internal=True)
+    fake_sql.upsert_skill("other-parent", created_by="other@example.com")
+    session_id = client.post(
+        "/api/sessions",
+        json={"mode": "modify", "target_skill_id": "parent-skill", "materials": []},
+    ).json()["id"]
+    session = backend_main.sessions[session_id]
+    session.current_skill.skill_md = PARENT_MD.replace("child-skill", "peer-skill")
+    session.children = ["peer-skill"]
+    session.child_full_md = {"peer-skill": PEER_MD}
+
+    response = client.post(
+        f"/api/sessions/{session_id}/save", json={"orphan_action": action}
+    )
+
+    assert response.status_code == 200
+    assert fake_sql.skills["child-skill"]["is_internal"] is True
+
+
+def test_removing_internal_child_fails_closed_on_incomplete_scan(
+    client, backend_main, grant_skill, fake_sql
+) -> None:
+    for name, content in (
+        ("child-skill", CHILD_MD), ("peer-skill", PEER_MD),
+        ("parent-skill", PARENT_WITH_DEPENDENCY_MD),
+    ):
+        _seed_skill(backend_main, name, content)
+        grant_skill(name)
+    fake_sql.upsert_skill("child-skill", is_internal=True)
+    fake_sql.upsert_skill("missing-parent", created_by="other@example.com")
+    session_id = client.post(
+        "/api/sessions",
+        json={"mode": "modify", "target_skill_id": "parent-skill", "materials": []},
+    ).json()["id"]
+    session = backend_main.sessions[session_id]
+    session.current_skill.skill_md = PARENT_MD.replace("child-skill", "peer-skill")
+    session.children = ["peer-skill"]
+    session.child_full_md = {"peer-skill": PEER_MD}
+
+    response = client.post(
+        f"/api/sessions/{session_id}/save", json={"orphan_action": "make_capability"}
+    )
+
+    assert response.status_code == 503
+    assert backend_main.store.load_skill("parent-skill").skill_md == PARENT_WITH_DEPENDENCY_MD
+    assert fake_sql.skills["child-skill"]["is_internal"] is True
 
 
 def test_scenario_save_denied_child_writes_nothing(client, backend_main, fake_sql) -> None:

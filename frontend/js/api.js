@@ -451,13 +451,13 @@ export async function fetchSkillDependencies(name) {
   return res.json();
 }
 
-export async function deleteManagedSkill(name, confirmName) {
+export async function deleteManagedSkill(name, confirmName, orphanAction = null) {
   const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}`, {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ confirm_name: confirmName }),
+    body: JSON.stringify({ confirm_name: confirmName, orphan_action: orphanAction }),
   });
-  if (!res.ok) throw new Error(await formatFetchError(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 

@@ -5171,10 +5171,10 @@ function lintFixPrompt(detail) {
 function chooseOrphanAction(err) {
   if (!isOrphanDecisionError(err)) return null;
   const children = (err.detail.children || []).join(", ");
-  if (window.confirm(`These skills are currently marked INTERNAL (hidden from the host catalog) and are no longer listed by this scenario: ${children}.\n\nMake them visible standalone capability skills?`)) {
+  if (window.confirm(`These INTERNAL skills will have no remaining scenario reference: ${children}.\n\nMake them visible standalone capability skills? Existing access permissions will be retained.`)) {
     return "make_capability";
   }
-  if (window.confirm("Keep them hidden from the host catalog even though this scenario no longer lists them?")) {
+  if (window.confirm("Keep them hidden from the host catalog without a scenario reference?")) {
     return "keep_internal";
   }
   return null;
@@ -7407,7 +7407,14 @@ async function handleSkillDelete(event) {
   el("grantsModal").querySelector("[data-action='close-grants-modal']").disabled = true;
   el("grantsError").textContent = "";
   try {
-    await deleteManagedSkill(skill, el("skillDeleteConfirm").value);
+    try {
+      await deleteManagedSkill(skill, el("skillDeleteConfirm").value);
+    } catch (err) {
+      if (!isOrphanDecisionError(err)) throw err;
+      const orphanAction = chooseOrphanAction(err);
+      if (!orphanAction) return;
+      await deleteManagedSkill(skill, el("skillDeleteConfirm").value, orphanAction);
+    }
     missingSkillBindings.add(skill);
     await refreshSkills();
     renderSkillBindingStatus();

@@ -132,13 +132,16 @@ Manage Skills 用來設定 **誰能使用 Skill**、查看 **Skill 之間的相�
 ![輸入完整 Skill 名稱後，Delete Skill 按鈕可用](images/manage-skills/09-delete-confirmation.png)
 
 5. 瀏覽器會詢問是否刪除該 Skill 與其存取授權，並提醒無法在此還原。不確定時請取消；確定後才接受。
-6. 等待操作完成。成功時面板顯示 **Deleted training-demo. History and conversations retained.**，該 Skill 也會從選單移除。
+6. 若刪除 scenario 會讓內部子 Skill 失去最後一個引用，瀏覽器會列出這些子 Skill，詢問是否將它們顯示為獨立 capability（`is_internal = 0`）。拒絕後可再選擇保留 internal（`is_internal = 1`）；兩次都取消則不執行刪除。這個選擇不會改變子 Skill 的公開設定、啟用狀態或存取授權。
+7. 等待操作完成。成功時面板顯示 **Deleted training-demo. History and conversations retained.**，該 Skill 也會從選單移除。
 
 ![刪除成功，面板保留歷史與對話的提示](images/manage-skills/10-deleted.png)
 
 | 刪除的內容 | 保留的內容 |
 | --- | --- |
 | 目前 Skill 的正式套件與登錄，以及它的存取授權 | 依賴的其他 Skill、歷史備份與對話紀錄 |
+
+同一個 capability 可被多個 scenario 引用；仍有其他引用的子 Skill 會保留 internal，不列入上述選擇。系統會檢查所有 Skill，而非只檢查你看得到的項目；掃描不完整時不允許刪除，引用者的受限名稱也不會公開。最終備份後會重新檢查，若多出需決定的子 Skill，請重新確認後再刪除。
 
 若某段對話綁定的 Skill 已刪除，對話仍保留，但狀態會顯示 **Skill deleted**，不能再直接儲存至該 Skill。
 
