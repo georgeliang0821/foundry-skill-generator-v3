@@ -2,6 +2,7 @@
 
 > 本文件說明「這個專案在做什麼」、使用者是誰、有哪些需求、核心功能，以及使用者完整流程圖。
 > 啟動方式請見 [02-setup.md](02-setup.md)；程式碼與架構請見 [03-architecture.md](03-architecture.md)。
+> 建立、修改與測試的圖文操作，請見 [Generator 完整使用者指南](07-generator-guide.md)；授權、公開設定、相依關係與刪除請見 [Manage Skills 使用者指南](06-manage-skills-guide.md)。
 
 ---
 
