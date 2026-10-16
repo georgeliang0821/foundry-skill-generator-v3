@@ -115,6 +115,8 @@ from .models import (
 from .patch import PatchError, apply_v4a_to_content, v4a_from_contents, version_hash
 from .form_conversion import FormConversionError, convert_session_form
 from .session_store import LocalSessionStore, make_session_store
+from .history import add_history, display_detail, record_result, record_tool, sync_history
+from .models import PendingToolCall
 from .topology import (
     Severity,
     TopologyIssue,
@@ -1392,6 +1394,7 @@ def _save_skill_dual_write(
 
 def persist_session(session: Session) -> None:
     log_event("session.persist.start", session_id=session.id, stage=session.current_stage)
+    sync_history(session)
     session_store.save(session)
 
 
@@ -3454,6 +3457,9 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
 
     events: list[dict[str, Any]] = []
     assistant_chunks: list[str] = []
+    assistant_history = []
+    active_assistant_history = None
+    assistant_chars = 0
     event_counts: dict[str, int] = {}
     try:
         agent_events = iter(agent.stream(session, req.message))
@@ -3465,8 +3471,7 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                 break
             if not isinstance(event, dict):
                 log_event("chat.event.non_dict", level="warning", session_id=session.id, event_type=type(event).__name__)
-                assistant_chunks.append(str(event))
-                continue
+                event = {"event": "text_delta", "data": {"delta": str(event)}}
             event_name = str(event.get("event") or "text_delta")
             event_counts[event_name] = event_counts.get(event_name, 0) + 1
             data = event.get("data", {})
@@ -3474,7 +3479,18 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                 log_event("chat.event.data_non_dict", level="warning", session_id=session.id, event=event_name, data_type=type(data).__name__)
                 data = {"delta": str(data)} if event_name == "text_delta" else {"value": data}
             if event_name == "text_delta":
-                assistant_chunks.append(str(data.get("delta") or ""))
+                delta = str(data.get("delta") or "")
+                assistant_chunks.append(delta)
+                if delta:
+                    if active_assistant_history is None:
+                        active_assistant_history = add_history(session, "message", {
+                            "index": None, "role": "assistant", "start": assistant_chars,
+                        })
+                        assistant_history.append(active_assistant_history)
+                    assistant_chars += len(delta)
+                    active_assistant_history.data["end"] = assistant_chars
+            else:
+                active_assistant_history = None
             if event_name == "tool_call":
                 log_event(
                     "chat.tool_call",
@@ -3541,6 +3557,7 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                         persist_session(session)
                     continue
                 if data["tool"] in PASSIVE_TOOL_CALLS:
+                    record_tool(session, PendingToolCall(**data))
                     call_id = data.get("call_id")
                     session.pending_tool_calls = [
                         call for call in session.pending_tool_calls if call.call_id != call_id
@@ -3548,10 +3565,21 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                 with log_timing("chat.phase", phase="tool_persist", call_id=data.get("call_id")):
                     persist_session(session)
             events.append({"event": event_name, "data": data})
-        assistant_text = "".join(assistant_chunks).strip()
+        raw_assistant_text = "".join(assistant_chunks)
+        assistant_text = raw_assistant_text.strip()
         if assistant_text:
             session.conversation.append(ChatMessage(role=MessageRole.ASSISTANT, content=assistant_text))
+            leading_space = len(raw_assistant_text) - len(raw_assistant_text.lstrip())
+            for history_event in assistant_history:
+                history_event.data.update(
+                    index=len(session.conversation) - 1,
+                    start=max(0, history_event.data["start"] - leading_space),
+                    end=min(len(assistant_text), max(0, history_event.data["end"] - leading_space)),
+                )
             session.touch()
+        else:
+            for history_event in assistant_history:
+                session.ui_history.remove(history_event)
         with log_timing("chat.phase", phase="final_persist"):
             persist_session(session)
         with log_timing("chat.phase", phase="state_snapshot"):
@@ -3569,6 +3597,10 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
         events.append({"event": "done", "data": {}})
     except Exception as exc:
         with log_timing("chat.phase", phase="failure_persist"):
+            for history_event in assistant_history:
+                if history_event.data.get("index") is None:
+                    session.ui_history.remove(history_event)
+            add_history(session, "status", {"text": "Model request failed: " + str(exc), "failed": True})
             persist_session(session)
         log_exception("chat.failed", exc, session_id=session.id, stage=session.current_stage, duration_ms=elapsed_ms(started))
         events.append({"event": "error", "data": {"message": str(exc)}})
@@ -3584,7 +3616,9 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
         log_event("tool_result.missing_call", level="warning", session_id=session.id, call_id=req.tool_call_id)
         raise HTTPException(status_code=404, detail="Tool call not found")
     result = req.result if isinstance(req.result, dict) else {"value": req.result}
-    result_metadata: dict[str, Any] = {"tool": call.tool}
+    sync_history(session)
+    record_tool(session, call)
+    result_metadata: dict[str, Any] = {"tool": call.tool, "call_id": call.call_id}
     delegated_token = get_delegated_token(request)
     log_event(
         "tool_result.start",
@@ -3780,6 +3814,7 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             log_event("tool_result.request_positive_samples.saved", session_id=session.id, positive=len(positives))
     except PatchError as exc:
         detail = patch_error_detail(call, exc)
+        record_result(session, call, result, failed=True, detail=detail, terminal=call.tool == "propose_patch")
         if call.tool == "propose_patch":
             session.pending_tool_calls = [c for c in session.pending_tool_calls if c.call_id != call.call_id]
         session.conversation.append(
@@ -3802,6 +3837,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
         )
         raise HTTPException(status_code=409, detail=detail) from exc
     except ValueError as exc:
+        record_result(session, call, result, failed=True, detail=str(exc), terminal=False)
+        persist_session(session)
         # Topology guardrail (T4/T10). Recoverable: the agent can re-send the
         # same edit with the layer declaration intact.
         log_event(
@@ -3819,6 +3856,8 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
             "guidance": str(exc),
         }) from exc
     except HTTPException as exc:
+        record_result(session, call, result, failed=True, detail=exc.detail, terminal=False)
+        persist_session(session)
         log_event(
             "tool_result.failed",
             level="error",
@@ -3831,12 +3870,15 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
         )
         raise
     except Exception as exc:
+        record_result(session, call, result, failed=True, detail="Operation failed.", terminal=False)
+        persist_session(session)
         log_exception("tool_result.failed", exc, session_id=session.id, tool=call.tool, call_id=call.call_id, duration_ms=elapsed_ms(started))
         raise HTTPException(status_code=500, detail=f"{call.tool} failed: {exc}") from exc
 
     # Post-processing tail: persistence/serialization issues here must also
     # return a JSON error detail rather than escaping as an opaque 500.
     try:
+        record_result(session, call, result, patch_sync=result_metadata.get("patch_sync"))
         session.pending_tool_calls = [c for c in session.pending_tool_calls if c.call_id != req.tool_call_id]
         session.conversation.append(
             ChatMessage(role=MessageRole.TOOL, content=json.dumps(req.result, ensure_ascii=False), metadata=result_metadata)
@@ -3892,7 +3934,17 @@ def save_session_skill(session_id: str, req: SaveSessionSkillRequest, upn: str =
     if req.change_summary is not None:
         summary = req.change_summary.strip()
         session.pending_change_summaries = [summary] if summary else []
-    save_skill_dual_write(session, upn, req.name, orphan_action=req.orphan_action)
+    try:
+        save_skill_dual_write(session, upn, req.name, orphan_action=req.orphan_action)
+    except HTTPException as exc:
+        sync_history(session)
+        detail = exc.detail
+        reason = display_detail(detail)
+        add_history(session, "status", {"text": f"Skill was not saved: {reason}", "failed": True})
+        persist_session(session)
+        raise
+    sync_history(session)
+    add_history(session, "status", {"text": "Saved to Blob + SQL."})
     persist_session(session)
     return session
 

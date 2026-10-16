@@ -88,13 +88,7 @@ def e2e_skill_files(name: str = "e2e-calendar-skill") -> SkillFiles:
     skill_md = f"""---
 name: {safe}
 description: E2E fake skill for browser automation.
-metadata:
-    skill_type: inline
-  author: e2e
-  version: "1.0"
-  tags:
-    - e2e
-  uses_obo: false
+metadata: {{skill_type: inline, author: e2e, version: "1.0", tags: [e2e], uses_obo: false}}
 ---
 
 ## When to Use This Skill

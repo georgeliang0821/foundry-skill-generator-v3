@@ -2,6 +2,48 @@ import { test, expect } from "@playwright/test";
 import { openApp, startNewSession, openTab } from "./helpers/app";
 
 test.describe("UI refresh — warm palette, icons, clarity", () => {
+  test("replays completed cards read-only without duplicating pending actions", async ({ page }) => {
+    await openApp(page);
+    await startNewSession(page);
+    const mutations: string[] = [];
+    page.on("request", (request) => {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method())) mutations.push(request.url());
+    });
+    await page.evaluate(() => {
+      const app = (window as any).__sgv2;
+      app.session.conversation = [{ role: "user", content: "Original request" }, { role: "assistant", content: "Before card.After card." }];
+      app.session.ui_history_cursor = 2;
+      app.session.ui_history = [
+        { event_id: "m1", kind: "message", data: { index: 0, role: "user" } },
+        { event_id: "m2", kind: "message", data: { index: 1, role: "assistant", start: 0, end: 12 } },
+        { event_id: "q", kind: "tool", call_id: "answered", data: { tool: "ask_user_input", args: { question: "Which format?", options: ["Inline", "Script"] } } },
+        { event_id: "m3", kind: "message", data: { index: 1, role: "assistant", start: 12, end: 23 } },
+        { event_id: "answer", kind: "result", call_id: "answered", data: { tool: "ask_user_input", result: { value: "Inline" }, terminal: true } },
+        { event_id: "p", kind: "tool", call_id: "failed-sync", data: { tool: "propose_patch", args: { target_file: "SKILL.md", patch: "*** Begin Patch\n-original\n+updated\n*** End Patch" } } },
+        { event_id: "result", kind: "result", call_id: "failed-sync", data: { tool: "propose_patch", result: { action: "accept" }, patch_sync: { status: "failed", detail: "EAA unavailable" } } },
+        { event_id: "pending", kind: "tool", call_id: "pending", data: { tool: "ask_user_input", args: { question: "Continue?", options: ["Yes", "No"] } } },
+      ];
+      app.session.pending_tool_calls = [{ call_id: "pending", tool: "ask_user_input", args: { question: "Continue?", options: ["Yes", "No"] } }];
+      app.renderLoadedSessionContent();
+      app.renderLoadedSessionContent();
+    });
+    const cards = page.getByTestId("history-card");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.first()).toContainText("Which format?");
+    await expect(cards.first()).toContainText("Answer: Inline");
+    await expect(cards.last()).toContainText("not synced to Blob + SQL");
+    await expect(cards.locator("button, input, select, textarea")).toHaveCount(0);
+    await expect(page.locator('[data-question-id="pending"]')).toHaveCount(1);
+    await cards.last().locator("summary").click();
+    await expect(cards.last().locator("pre")).toContainText("-original");
+    await expect(page.getByTestId("chat-stream").locator(".message")).toHaveCount(3);
+    const order = await page.getByTestId("chat-stream").locator(":scope > .message, :scope > .historical-tool-card").allTextContents();
+    expect(order[1]).toContain("Before card.");
+    expect(order[2]).toContain("Which format?");
+    expect(order[3]).toContain("After card.");
+    expect(mutations).toEqual([]);
+  });
+
   test("inline Heroicons sprite is loaded and the brand mark renders an icon", async ({ page }) => {
     await openApp(page);
 

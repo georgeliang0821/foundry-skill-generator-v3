@@ -871,6 +871,9 @@ textarea:focus, input:focus, select:focus {
 .tool-card p { margin: 6px 0 10px; color: var(--text-2); font-size: var(--fs-sm); }
 
 .conversation-tool { margin-bottom: 10px; }
+.historical-tool-card { min-width: 0; overflow-wrap: anywhere; }
+.historical-tool-card pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.historical-tool-card .tool-resolution { color: var(--text-2); }
 .activity-card { padding: 0; overflow: hidden; }
 .activity-card > summary {
   display: flex;

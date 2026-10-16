@@ -17,7 +17,7 @@ from backend.agent import (
     _parse_llm_payload,
     _session_context,
 )
-from backend.models import Material, MaterialKind, Session
+from backend.models import ChatMessage, Material, MaterialKind, Session, UIHistoryEvent
 
 
 @pytest.mark.parametrize("name,required", [
@@ -115,6 +115,16 @@ def test_session_context_redacts_materials_that_the_system_message_carries() -> 
     # The live session must be untouched: the session title and the Materials tab
     # both read the real content back out of it.
     assert session.materials[0].content == content
+
+
+def test_session_context_excludes_visual_history_without_changing_recent_messages() -> None:
+    session = Session(conversation=[ChatMessage(role="user", content=str(index)) for index in range(20)])
+    session.ui_history.append(UIHistoryEvent(kind="status", data={"text": "visual-only-history"}))
+    context = json.loads(_session_context(session))
+    assert "ui_history" not in context
+    assert "ui_history_cursor" not in context
+    assert [message["content"] for message in context["conversation"]] == [str(index) for index in range(8, 20)]
+    assert len(session.conversation) == 20
 
 
 def test_normalize_openai_style_function_call() -> None:

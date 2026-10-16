@@ -206,6 +206,10 @@ flowchart LR
 
 建立或還原 session 時，前端分別顯示載入與讀取 ACA 環境設定的狀態；這段流程不呼叫對話模型。聊天請求送出後，立即顯示模型處理中與經過秒數，無須等待事件批次回傳。完成或失敗摘要保留在對話區，區分內容未變更、等待使用者確認與已更新；ACA 查詢失敗時則說明技能已載入但環境設定不可用。
 
+Session 的 `ui_history` 保存依發生順序排列的畫面事件，`ui_history_cursor` 標記已處理的對話位置。一般文字參照 `conversation` 的索引；同一則助理訊息可用字元區段保留工具前後的顯示順序。工具事件只保存顯示所需的提案欄位、回答與結果，測試事件參照 `run_id`，不保存完整 `state_update` 或認證資料。`persist_session()` 在既有保存邊界同步這些事件；單純 Resume 不新增歷史。`_session_context()` 與前端的模型輸入預覽明確排除這兩個欄位，模型仍只取得最後 12 筆對話及目前狀態。
+
+`renderLoadedSessionContent()` 依事件還原文字、唯讀歷史卡片、操作狀態與測試摘要，再以 `pending_tool_calls` 決定仍可操作的卡片，並依 `call_id` 去重。歷史呈現不綁定提交、Accept／Reject／Undo、儲存或測試操作。Patch 結果沿用 `patch_sync: local | saved | failed`，不以接受動作推定同步成功；後續儲存另記結果。缺少畫面事件時沿用可確認的對話文字與工具結果，不推測原問題、提案或時間順序。此紀錄屬於 session，不是 Blob 上 Skill 套件的版本備份。
+
 MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` 等於登入者、已啟用且 Blob 內容存在的 skill，不以 grants 或公開狀態作為修改權。一般 `GET /api/skills` 保留可讀取清單，供 scenario 子 skill 選擇等用途；兩份清單分開保存。重新整理會重讀兩份清單，未通過建立者篩選的舊 session 目標不會被補回選單。
 
 **Script 型 skill 在前端的呈現**（形式規則見 [04-agent-mechanism.md 第 7.5 節](04-agent-mechanism.md#75-code-素材與-script-形式)）：
@@ -234,6 +238,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 | `acl.py` | 身分與授權：從請求取出 UPN（email）、`AclCache` 快取讀取授權、FastAPI 相依 `require_upn`；`assert_can_modify` 直接查 SQL 建立者，`assert_can_manage_permissions` 檢查建立者與全域 scope，兩者不使用 grant 快取 |
 | `auth_store.py` | 登入狀態保存：`LocalAuthStore`（記憶體）與選用的 `AzureBlobAuthStore`（共用 / 多實例） |
 | `session_store.py` | 撰寫 session 的 JSON 持久化（本機檔案，或 `SGV2_SESSION_STORE=blob` 改存 Blob）；以 `PERSIST_CONTEXT` 序列化，skill 資產全文只在這裡寫出 |
+| `history.py` | Session 畫面歷史的欄位篩選、工具提案與結果記錄、對話參照及測試摘要同步；沿用 Session Store，不另建資料庫或儲存層 |
 | `blob_store.py` | Azure Blob 版 Skill 儲存與 `SKILL.md` frontmatter 解析（含含冒號 description 的容錯）；script 型 skill 另存 `scripts/<name>.py`，列表以 `has_script` 標示，`SkillFiles.remove_script` 會刪除既有 script；skill 資產的寫入、清掃、讀取（`load_assets`），刪除 skill 時刪整個 prefix；選用的覆寫前完整套件備份與 manifest（獨立歷史容器，不隨 skill 刪除） |
 | `form_conversion.py` | MODIFY session 的 inline ↔ script 機械轉換（`convert_session_form`）：搬移程式碼並同步 `metadata.skill_type`，不改寫正文 |
 | `skill_assets.py` | Skill 資產的檢查（`check_asset`、`check_asset_set`、`assets_blocked_reason`）：只接受或拒收，不轉換 |

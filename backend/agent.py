@@ -776,7 +776,7 @@ def _redact_materials(snapshot: dict[str, Any]) -> None:
 
 
 def _session_context(session: Session) -> str:
-    snapshot = session.model_dump(mode="json")
+    snapshot = session.model_dump(mode="json", exclude={"ui_history", "ui_history_cursor"})
     # Keep the prompt bounded while still giving the model the operational state.
     if snapshot.get("conversation"):
         snapshot["conversation"] = snapshot["conversation"][-12:]

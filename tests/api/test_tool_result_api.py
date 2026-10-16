@@ -5,6 +5,29 @@ import pytest
 from backend.models import IterationReflection, PendingToolCall
 
 
+def test_answer_history_preserves_question_without_replay_side_effects(client, backend_main) -> None:
+    session = backend_main.Session(owner_upn="test@example.com")
+    session.pending_tool_calls.append(PendingToolCall(call_id="question", tool="ask_user_input", args={
+        "question": "Choose output", "options": ["Inline", "Script"], "access_token": "not-for-history",
+    }))
+    backend_main.sessions[session.id] = session
+    response = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": "question", "result": {"value": "Inline", "access_token": "not-for-history"},
+    })
+    assert response.status_code == 200
+    history = response.json()["ui_history"]
+    assert [event["kind"] for event in history] == ["tool", "result"]
+    assert history[0]["data"]["args"] == {"question": "Choose output", "options": ["Inline", "Script"]}
+    assert history[1]["data"]["result"] == {"value": "Inline"}
+    assert "not-for-history" not in str(history)
+    backend_main.sessions.pop(session.id)
+    for _ in range(2):
+        loaded = client.get(f"/api/sessions/{session.id}")
+        assert loaded.status_code == 200
+        assert loaded.json()["ui_history"] == history
+        assert loaded.json()["pending_tool_calls"] == []
+
+
 @pytest.mark.parametrize("content,patch,kind", [
     ("hello", "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-missing anchor\n+hi\n*** End Patch", "anchor_not_found"),
     ("hello\nhello", "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-hello\n+hi\n*** End Patch", "ambiguous_anchor"),
@@ -101,6 +124,13 @@ def test_accept_propose_patch_updates_content_and_patch_history(client, backend_
     assert body["pending_tool_calls"] == []
     assert body["conversation"][-1]["metadata"]["patch_sync"] == {"call_id": "call_patch", "status": "local"}
     assert body["pending_change_summaries"] == ["shorten greeting"]
+    history = body["ui_history"]
+    proposal = next(event for event in history if event["kind"] == "tool")
+    outcome = next(event for event in history if event["kind"] == "result")
+    assert proposal["call_id"] == outcome["call_id"] == "call_patch"
+    assert proposal["data"]["args"]["patch"].startswith("*** Begin Patch")
+    assert outcome["data"]["patch_sync"]["status"] == "local"
+    assert backend_main.session_store.load(session.id).ui_history[-1].kind == "result"
 
 
 def test_patch_sync_failure_retains_local_patch_and_reports_outcome(client, backend_main, monkeypatch) -> None:

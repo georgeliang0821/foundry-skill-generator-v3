@@ -735,7 +735,14 @@ function renderLoadedSessionContent(statusText = "") {
   pendingChoiceAnswers.clear();
   if (statusText) appendConversationStatus(statusText);
   const messages = session?.conversation || [];
-  messages.forEach((message) => {
+  const history = session?.ui_history || [];
+  const pending = new Map((session?.pending_tool_calls || []).map((call) => [call.call_id, call]));
+  const renderedCalls = new Set();
+  const renderedMessages = new Set();
+  const outcomes = new Map();
+  history.filter((event) => event.kind === "result").forEach((event) => outcomes.set(event.call_id, event.data));
+  const renderMessage = (message) => {
+    if (!message) return;
     if (message.role === "user" || message.role === "assistant") {
       if (message.role === "user" && message.metadata?.auto_continue) {
         appendConversationStatus("System auto-continued to the next stage.");
@@ -745,15 +752,119 @@ function renderLoadedSessionContent(statusText = "") {
     } else if (message.role === "system" && message.metadata?.tool === "propose_patch" && message.metadata?.patch_error) {
       const detail = message.metadata.patch_error;
       appendConversationStatus(`Patch was not applied: ${detail.guidance || detail.error || "The patch could not be applied."}`, { failed: true });
+    } else if (message.role === "tool") {
+      try {
+        const result = JSON.parse(message.content);
+        if (message.metadata?.patch_sync) {
+          const outcome = { tool: message.metadata.tool, result, patch_sync: message.metadata.patch_sync };
+          appendConversationStatus(historyOutcomeText(outcome), { failed: outcome.patch_sync.status === "failed" });
+        } else if (["ask_user_input", "request_positive_samples"].includes(message.metadata?.tool)) {
+          const answer = result.value ?? result.answer ?? result.positive;
+          if (answer !== undefined) appendConversationStatus(`Recorded answer: ${compactValue(answer)}`);
+        }
+      } catch {}
     }
+  };
+  const seenEvents = new Set();
+  history.forEach((event) => {
+    if (seenEvents.has(event.event_id)) return;
+    seenEvents.add(event.event_id);
+    const data = event.data || {};
+    if (event.kind === "message") {
+      const message = Number.isInteger(data.index) ? messages[data.index] : null;
+      if (!message || message.role !== data.role) return;
+      const segmented = Number.isInteger(data.start) && Number.isInteger(data.end);
+      if (!segmented && renderedMessages.has(data.index)) return;
+      renderedMessages.add(data.index);
+      renderMessage(segmented ? { ...message, content: Array.from(message.content || "").slice(data.start, data.end).join("") } : message);
+    } else if (event.kind === "tool") {
+      if (renderedCalls.has(event.call_id)) return;
+      renderedCalls.add(event.call_id);
+      if (pending.has(event.call_id)) renderToolCall(pending.get(event.call_id));
+      else renderHistoricalTool(event, outcomes.get(event.call_id));
+    } else if (event.kind === "result") {
+      appendConversationStatus(historyOutcomeText(data), { failed: data.failed || data.patch_sync?.status === "failed" });
+    } else if (event.kind === "status") {
+      appendConversationStatus(data.text || "Operation completed.", { failed: data.failed });
+    } else if (event.kind === "test") {
+      appendTestRunCard((session?.test_runs || []).find((run) => run.run_id === data.run_id));
+    }
+  });
+  messages.forEach((message, index) => {
+    if (!history.length || (index >= (session.ui_history_cursor || 0) && !renderedMessages.has(index))) renderMessage(message);
   });
   const restoredTools = session?.pending_tool_calls || [];
   dbgLog("restore", `replaying session ${session?.id}: ${messages.length} messages, ${restoredTools.length} pending tool calls`);
-  restoredTools.forEach((call) => renderToolCall(call));
+  restoredTools.filter((call) => !renderedCalls.has(call.call_id)).forEach((call) => renderToolCall(call));
   resetActivityGroup();
-  if (!messages.length && !restoredTools.length) {
+  if (!messages.length && !restoredTools.length && !history.length) {
     el("chatStream").innerHTML = `<div class="empty-state chat-empty">${svgIcon("i-chat")}<strong>Saved session loaded</strong><em>Continue by sending the next message.</em></div>`;
   }
+}
+
+function historyOutcomeText(data) {
+  const sync = data.patch_sync;
+  if (sync?.status === "failed") return `Patch applied locally, but not synced to Blob + SQL.${sync.detail ? ` ${sync.detail}` : ""}`;
+  if (sync?.status === "local") return "Patch applied locally. Not saved to Blob + SQL.";
+  if (sync?.status === "saved") return "Patch accepted. Saved to Blob + SQL.";
+  if (data.failed && data.terminal && data.tool === "propose_patch") return `Patch was not applied: ${data.detail || "The patch could not be applied."}`;
+  if (data.failed) return `${data.terminal ? "Not applied" : "Operation failed"}: ${data.detail || "The operation could not be completed."}`;
+  const action = data.result?.action;
+  if (action === "reject") return "Rejected";
+  if (["propose_skill_draft", "rename_skill"].includes(data.tool) && action === "accept") return "Accepted. Saved to Blob + SQL.";
+  return action === "accept" ? "Accepted" : "Submitted";
+}
+
+function renderHistoricalTool(event, outcome) {
+  const data = event.data || {};
+  const args = data.args || {};
+  const card = document.createElement("div");
+  card.className = "tool-card conversation-tool resolved historical-tool-card";
+  card.dataset.testid = "history-card";
+  card.dataset.historyCallId = event.call_id;
+  card.dataset.tool = data.tool || "";
+  const title = document.createElement("strong");
+  title.textContent = args.question || args.prompt || labelize(data.tool || "Agent action");
+  card.appendChild(title);
+  const description = args.change_summary || args.summary || args.reason || args.message || args.new_name || args.skill_name;
+  if (description) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = description;
+    card.appendChild(paragraph);
+  }
+  if (Array.isArray(args.options) && args.options.length) {
+    const options = document.createElement("p");
+    options.textContent = args.options.join(" / ");
+    card.appendChild(options);
+  }
+  if (outcome) {
+    const answer = outcome.result || {};
+    const value = answer.answer ?? answer.value ?? answer.selected ?? answer.positive;
+    if (value !== undefined) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = `Answer: ${Array.isArray(value) ? value.join("; ") : compactValue(value)}`;
+      card.appendChild(paragraph);
+    }
+    if (answer.custom || answer.notes) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = answer.custom || answer.notes;
+      card.appendChild(paragraph);
+    }
+    const resolution = document.createElement("p");
+    resolution.className = "tool-resolution";
+    resolution.textContent = historyOutcomeText(outcome);
+    card.appendChild(resolution);
+  }
+  if (args.patch) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = args.target_file || "Proposed changes";
+    const patch = document.createElement("pre");
+    patch.textContent = args.patch;
+    details.append(summary, patch);
+    card.appendChild(details);
+  }
+  el("chatStream").appendChild(card);
 }
 
 appLog("Frontend loaded");
@@ -3717,6 +3828,8 @@ function allowedTransitionsPromptPreview(stage) {
 function currentSessionSnapshotPreview() {
   if (!session) return "No session has been started.";
   const snapshot = JSON.parse(JSON.stringify(session));
+  delete snapshot.ui_history;
+  delete snapshot.ui_history_cursor;
   if (Array.isArray(snapshot.conversation)) snapshot.conversation = snapshot.conversation.slice(-12);
   return JSON.stringify(snapshot, null, 2);
 }

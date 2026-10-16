@@ -17,6 +17,55 @@ def test_e2e_reset_refuses_application_session_directory(client, backend_main, m
 import pytest
 
 
+def test_chat_visual_history_preserves_fake_agent_event_order(client, backend_main, monkeypatch) -> None:
+    from backend.e2e import FakeE2EAgent, set_scenario
+
+    set_scenario("new_skill_happy_path")
+    monkeypatch.setattr(backend_main, "agent", FakeE2EAgent())
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    response = client.post(f"/api/sessions/{session_id}/chat", json={"message": "Create a deterministic calendar skill."})
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert not [event for event in events if event["event"] == "error"], events
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["current_skill"]["skill_md"], events
+    kinds = [event["kind"] for event in state["ui_history"]]
+    assert kinds[:2] == ["message", "message"]
+    assert "tool" in kinds
+
+
+def test_chat_history_keeps_text_on_both_sides_of_tool_without_extra_model_messages(client, backend_main, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from backend.models import PendingToolCall
+
+    events = [
+        {"event": "text_delta", "data": {"delta": "  Before "}},
+        {"event": "text_delta", "data": {"delta": "question. "}},
+        {"event": "tool_call", "data": {
+            "call_id": "middle-question", "tool": "ask_user_input",
+            "args": {"question": "Which format?", "options": ["Inline", "Script"]},
+        }},
+        {"event": "text_delta", "data": {"delta": "After question.  "}},
+    ]
+    def stream(session, message):
+        for event in events:
+            if event["event"] == "tool_call":
+                session.pending_tool_calls.append(PendingToolCall(**event["data"]))
+            yield event
+
+    monkeypatch.setattr(backend_main, "agent", SimpleNamespace(stream=stream))
+    session_id = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    response = client.post(f"/api/sessions/{session_id}/chat", json={"message": "Start"})
+    state = next(event["data"] for event in response.json()["events"] if event["event"] == "state_update")
+    assert len(state["conversation"]) == 2
+    assert state["conversation"][1]["content"] == "Before question. After question."
+    timeline = state["ui_history"]
+    assert [event["kind"] for event in timeline] == ["message", "message", "tool", "message"]
+    parts = [event["data"] for event in timeline if event["kind"] == "message" and event["data"]["role"] == "assistant"]
+    assert [state["conversation"][part["index"]]["content"][part["start"]:part["end"]].strip() for part in parts] == ["Before question.", "After question."]
+    assert client.get(f"/api/sessions/{session_id}").json()["ui_history"] == timeline
+
+
 @pytest.mark.parametrize("reader", ["api", "internal"])
 @pytest.mark.parametrize("from_disk", [False, True])
 def test_loading_session_retires_only_confirmed_failed_patches(client, backend_main, reader, from_disk) -> None:

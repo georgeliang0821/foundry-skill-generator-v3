@@ -664,6 +664,14 @@ class NeighborNoticeOutcome(BaseModel):
     user_declined: bool = False
 
 
+class UIHistoryEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: uuid4().hex)
+    kind: Literal["message", "tool", "result", "status", "test"]
+    created_at: str = Field(default_factory=utc_now_iso)
+    call_id: str = ""
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class Session(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
@@ -717,6 +725,8 @@ class Session(BaseModel):
     child_sections: dict[str, list[str]] = Field(default_factory=dict, exclude=True)
     test_runs: list[TestRun] = Field(default_factory=list)
     conversation: list[ChatMessage] = Field(default_factory=list)
+    ui_history: list[UIHistoryEvent] = Field(default_factory=list)
+    ui_history_cursor: int = 0
     pending_tool_calls: list[PendingToolCall] = Field(default_factory=list)
     research_summary: str = ""
     aca_env_result: dict[str, Any] | None = None

@@ -38,12 +38,26 @@ for (const omitPatchEvent of [false, true]) {
     await expect(card).toHaveCount(1);
 
     await setScenario(request, "default");
+    const followup = page.waitForResponse((response) => response.url().endsWith("/chat") && response.request().method() === "POST");
     await card.getByRole("button", { name: "Accept patch" }).click();
     await expect(card).toContainText("Accepted");
+    await (await followup).finished();
+    await expect(page.getByTestId("send-button")).toHaveText("Send");
     session = await readSession(request, await currentSessionId(page));
     expect(session.patch_history).toHaveLength(1);
     expect(session.conversation.some((message: { metadata?: { patch_sync?: { status: string } } }) =>
       message.metadata?.patch_sync?.status === "saved")).toBe(true);
+    await expect(page.getByTestId("send-button")).toHaveText("Send");
+    const sessionId = session.id;
+    await page.reload();
+    await page.getByTestId("session-list").selectOption(sessionId);
+    const historicalPatch = page.getByTestId("history-card").filter({ hasText: "E2E refined selection boundary" });
+    await expect(historicalPatch).toHaveCount(1);
+    await expect(historicalPatch).toContainText("Saved to Blob + SQL");
+    await expect(historicalPatch.locator("button")).toHaveCount(0);
+    await historicalPatch.locator("summary").click();
+    await expect(historicalPatch.locator("pre")).toBeVisible();
+    expect((await readSession(request, sessionId)).ui_history).toEqual(session.ui_history);
   });
 }
 

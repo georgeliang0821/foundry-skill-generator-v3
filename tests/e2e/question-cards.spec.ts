@@ -23,6 +23,26 @@ test("submits selected option plus custom answer", async ({ page, request }) => 
 
   const session = await readSession(request, await currentSessionId(page));
   expect(session.pending_tool_calls).toHaveLength(0);
+  await expect(page.getByTestId("send-button")).toHaveText("Send");
+  const mutations: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "GET" && /\/(tool-result|save|test|chat)$/.test(request.url())) mutations.push(request.url());
+  });
+  await page.reload();
+  await page.getByTestId("session-list").selectOption(session.id);
+  const history = page.getByTestId("history-card").filter({ hasText: "Use deterministic draft" });
+  await expect(history).toHaveCount(1);
+  await expect(history).toContainText("Add this custom note.");
+  await expect(history.locator("input, button, textarea")).toHaveCount(0);
+  await page.evaluate(() => (window as any).__sgv2.renderLoadedSessionContent());
+  await expect(history).toHaveCount(1);
+  expect((await readSession(request, session.id)).ui_history).toEqual(session.ui_history);
+  expect(mutations).toEqual([]);
+  await page.screenshot({ path: test.info().outputPath("resumed-history-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(history).toBeVisible();
+  expect(await history.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("resumed-history-mobile.png") });
 });
 
 test("submits no-answer fallback when the user leaves a question blank", async ({ page, request }) => {

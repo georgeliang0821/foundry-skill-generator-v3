@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.models import Material, Session
+from backend.models import Material, Session, UIHistoryEvent
 from backend.session_store import LocalSessionStore
 
 
@@ -42,6 +42,20 @@ def test_session_store_save_load_and_list(tmp_path: Path) -> None:
     assert summaries[0].material_count == 1
 
 
+def test_visual_history_round_trip_and_legacy_defaults(tmp_path: Path) -> None:
+    store = LocalSessionStore(tmp_path)
+    session = Session(ui_history_cursor=2, ui_history=[
+        UIHistoryEvent(kind="tool", call_id="question", data={"tool": "ask_user_input", "args": {"question": "Which?"}}),
+        UIHistoryEvent(kind="result", call_id="question", data={"result": {"answer": "First"}}),
+    ])
+    store.save(session)
+    loaded = store.load(session.id)
+    assert loaded is not None
+    assert loaded.ui_history == session.ui_history
+    assert loaded.ui_history_cursor == 2
+    assert Session.model_validate({"id": "legacy"}).ui_history == []
+
+
 def test_session_title_modify_mode_uses_target_id(tmp_path: Path) -> None:
     from backend.models import Mode
 
@@ -65,6 +79,26 @@ def test_session_store_ignores_corrupt_json(tmp_path: Path) -> None:
     store = LocalSessionStore(tmp_path)
 
     assert store.load_all() == {}
+
+
+def test_visual_history_keeps_legacy_text_and_known_results_without_inventing_questions() -> None:
+    import json
+    from backend.history import sync_history
+    from backend.models import ChatMessage
+
+    session = Session(conversation=[
+        ChatMessage(role="user", content="Original request"),
+        ChatMessage(role="tool", content=json.dumps({"value": "Inline", "token": "omit"}), metadata={"tool": "ask_user_input"}),
+        ChatMessage(role="assistant", content="Original response"),
+    ])
+    sync_history(session)
+    before = session.model_dump()
+    sync_history(session)
+    assert session.model_dump() == before
+    assert [event.kind for event in session.ui_history] == ["message", "status", "message"]
+    assert "Inline" in session.ui_history[1].data["text"]
+    assert "omit" not in session.ui_history[1].data["text"]
+    assert "question" not in session.ui_history[1].data
 
 
 def test_session_store_sanitizes_session_id_for_path(tmp_path: Path) -> None:
