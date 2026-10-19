@@ -5022,6 +5022,11 @@ function renderInspectSessionState() {
 
 function renderPassiveToolCall(call) {
   const args = call.args || {};
+  if (call.tool === "set_orchestration_owner") {
+    const ownerLabel = args.owner === "eaa" ? "EAA internal Agent" : "Host Agent";
+    appendConversationStatus(`Orchestration owner set to ${ownerLabel}.`);
+    return true;
+  }
   if (["select_neighbor_skill", "confirm_neighbor_notification"].includes(call.tool)) {
     appendActivityRow(call);
     return true;
@@ -6000,6 +6005,9 @@ async function sendChatPayload(message, materials, options = {}) {
         if (data.tool === "stage_transition" || data.tool === "request_stage_transition") {
           const target = data.args?.target || data.args?.target_stage || null;
           autoContinueTarget = target ? String(target).toUpperCase() : null;
+        }
+        if (data.tool === "set_orchestration_owner" && data.args?.owner !== session.orchestration_owner) {
+          autoContinueTarget = "PREPARE";
         }
         if (data.tool === "select_neighbor_skill") neighborSelected = true;
         if (data.tool === "confirm_neighbor_notification") notificationConfirmed = true;

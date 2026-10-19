@@ -82,11 +82,16 @@ flowchart LR
 EAA 非空正文與可執行的 children。Generator 仍只產出 scenario-orchestration／inline／script。
 
 `POST /api/sessions/{id}/orchestration-owner` 只更新該使用者的 scenario session。
+對話工具 `set_orchestration_owner` 與此 UI API 共用 `_change_orchestration_owner`，
+只在作者明確選擇後套用，不允許模型自行決定。聊天問題卡事先說明切換影響後取得的同意，
+可直接使用 `confirm_restart: true`，不需再次操作 UI；未告知影響的自由文字要求才補問一次。
 已有正文時須 `confirm_restart: true`，清除草稿、待接受工具／patch、失效測試及確認，
 退回 PREPARE；舊正文暫存為唯讀重新生成來源，不在清稿時覆寫 Blob／SQL。
 `owner_regeneration_pending` 防止遠端 hydration 補回舊稿，也阻擋測試舊遠端版本；
 remote 綁定與版本 hash 保留。新正文通過共用存檔檢核後才完成切換。
-一般編輯、patch 與 undo 不得繞過 owner selector 直接改編排負責者。
+一般編輯、patch 與 undo 不得繞過專用切換邏輯直接改編排負責者。
+切換工具是該回合的終止工具，成功或被拒絕後都停止套用其餘舊 owner 工具；
+成功時透過 `state_update` 同步選單，前端自動續行 PREPARE，以新 owner 重建 prompt。
 
 Host 路由測試仍檢查 parent 不出現在 capability 候選及 child 可達性。
 EAA 的 route-only 只檢查 parent 已解析，L3 明確為未驗證，不推論 children 已執行。

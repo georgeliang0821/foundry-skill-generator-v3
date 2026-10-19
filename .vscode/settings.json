@@ -5,6 +5,10 @@
         "/^node --check frontend\\\\js\\\\main\\.js; node --check frontend\\\\js\\\\api\\.js$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^git --no-pager diff --check; node --check frontend\\\\js\\\\main\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

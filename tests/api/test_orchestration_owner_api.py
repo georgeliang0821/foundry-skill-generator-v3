@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from backend import agent as agent_module
 from backend.models import PendingToolCall, SkillFiles, Stage, TestRun as SkillTestRun
 
 
@@ -68,6 +71,104 @@ def test_new_owner_selection_and_import_preserve_source(client):
     assert imported.json()["skill_kind"] == "scenario"
     assert imported.json()["orchestration_owner"] == "eaa"
     assert imported.json()["children"] == ["child-skill"]
+
+
+def owner_chat(client, backend_main, monkeypatch, sid, args, *, trailing_calls=()):
+    monkeypatch.setattr(agent_module, "_run_foundry_turn_sync", lambda session, message: json.dumps({
+        "text": "",
+        "tool_calls": [{"tool": "set_orchestration_owner", "args": args}, *trailing_calls],
+    }))
+    monkeypatch.setattr(backend_main, "agent", agent_module.OrchestratorAgent())
+    response = client.post(f"/api/sessions/{sid}/chat", json={"message": "Switch the owner as confirmed."})
+    assert response.status_code == 200
+    return response.json()["events"]
+
+
+@pytest.mark.parametrize("initial,target", [("host", "eaa"), ("eaa", "host")])
+def test_chat_owner_switch_persists_without_another_ui_confirmation(
+    client, backend_main, grant_skill, monkeypatch, initial, target,
+):
+    sid, original = modify(client, backend_main, grant_skill, initial)
+    session = backend_main.sessions[sid]
+    session.pending_tool_calls = [PendingToolCall(tool="propose_patch", args={})]
+    session.test_runs = [SkillTestRun()]
+    session.prepare_brief.verify_checklist = {key: True for key in session.prepare_brief.verify_checklist}
+    events = owner_chat(client, backend_main, monkeypatch, sid, {"owner": target, "confirm_restart": True},
+                        trailing_calls=[{"tool": "record_understanding", "args": {"skill_goal": "STALE OWNER CONTEXT"}}])
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in events), events
+    calls = [event["data"]["tool"] for event in events if event["event"] == "tool_call"]
+    assert calls == ["set_orchestration_owner"]
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["orchestration_owner"] == target
+    assert state["current_stage"] == "prepare"
+    assert state["current_skill"]["skill_md"] == ""
+    assert state["owner_source_skill_md"] == original
+    assert state["owner_regeneration_pending"]
+    assert state["prepare_brief"]["understanding"]["skill_goal"] != "STALE OWNER CONTEXT"
+    assert not state["pending_tool_calls"] and not state["test_runs"] and not state["patch_history"]
+    assert not any(state["prepare_brief"]["verify_checklist"].values())
+    assert any(event["kind"] == "tool" and event["data"]["tool"] == "set_orchestration_owner"
+               for event in state["ui_history"])
+    assert backend_main.store.load_skill("parent-skill").skill_md == original
+    backend_main.await_prepare_entry()
+    backend_main.sessions.pop(sid)
+    restored = client.get(f"/api/sessions/{sid}").json()
+    assert restored["orchestration_owner"] == target
+    assert restored["owner_source_skill_md"] == original
+    assert restored["current_skill"]["skill_md"] == ""
+
+
+def test_chat_owner_switch_needs_restart_consent_before_clearing_existing_text(
+    client, backend_main, grant_skill, monkeypatch,
+):
+    sid, original = modify(client, backend_main, grant_skill)
+    events = owner_chat(client, backend_main, monkeypatch, sid, {"owner": "eaa", "confirm_restart": False},
+                        trailing_calls=[{"tool": "record_understanding", "args": {"skill_goal": "MUST NOT APPLY"}}])
+    rejection = next(event["data"] for event in events if event["event"] == "tool_effect_rejected")
+    assert "confirmation" in rejection["message"].lower()
+    assert "ask_user_input" in rejection["guidance"]
+    assert "set_orchestration_owner" in rejection["guidance"]
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["orchestration_owner"] == "host"
+    assert state["current_stage"] == "refine"
+    assert state["current_skill"]["skill_md"] == original
+    assert state["prepare_brief"]["understanding"]["skill_goal"] != "MUST NOT APPLY"
+    assert not state["pending_tool_calls"]
+    assert backend_main.store.load_skill("parent-skill").skill_md == original
+
+
+def test_chat_owner_switch_on_empty_scenario_needs_no_restart_confirmation(
+    client, backend_main, monkeypatch,
+):
+    sid = client.post("/api/sessions", json={"skill_kind": "scenario"}).json()["id"]
+    events = owner_chat(client, backend_main, monkeypatch, sid, {"owner": "eaa", "confirm_restart": False})
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in events), events
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["orchestration_owner"] == "eaa"
+    assert not state["owner_regeneration_pending"]
+    assert not state["pending_tool_calls"]
+
+
+def test_chat_same_owner_does_not_clear_existing_text(client, backend_main, grant_skill, monkeypatch):
+    sid, original = modify(client, backend_main, grant_skill)
+    events = owner_chat(client, backend_main, monkeypatch, sid, {"owner": "host", "confirm_restart": False})
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in events), events
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["current_skill"]["skill_md"] == original
+    assert state["current_stage"] == "refine"
+    assert not state["owner_regeneration_pending"]
+    assert not state["pending_tool_calls"]
+
+
+@pytest.mark.parametrize("kind,owner", [("capability", "eaa"), ("scenario", "invalid")])
+def test_chat_owner_tool_rejects_wrong_kind_or_invalid_owner(client, backend_main, monkeypatch, kind, owner):
+    sid = client.post("/api/sessions", json={"skill_kind": kind}).json()["id"]
+    events = owner_chat(client, backend_main, monkeypatch, sid, {"owner": owner, "confirm_restart": True})
+    assert any(event["event"] == "tool_effect_rejected" for event in events), events
+    assert not any(event["event"] == "error" for event in events), events
+    state = next(event["data"] for event in events if event["event"] == "state_update")
+    assert state["orchestration_owner"] == "host"
+    assert not state["pending_tool_calls"]
 
 
 @pytest.mark.parametrize("initial,target", [("host", "eaa"), ("eaa", "host")])

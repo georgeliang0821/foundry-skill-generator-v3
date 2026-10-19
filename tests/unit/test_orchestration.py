@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from backend import testing
+from backend.agent import TOOL_SCHEMAS
 from backend.models import Delegation, Mode, Session, SkillDraft, SkillKind, Stage
 from backend.orchestration import skill_orchestration_owner
 from backend.skill_lint import check_named_skill_references, lint_skill
@@ -127,9 +128,31 @@ def test_scenario_prepare_discloses_owner_choices_before_dependency_review(owner
         assert option in prompt
     assert "Checklist > Orchestration owner" in prompt
     assert "Apply owner" in prompt
-    assert "A chat answer expresses intent; it does not change the session owner" in prompt
-    assert "wait until Runtime State reports the requested owner" in prompt
+    assert "call `set_orchestration_owner`" in prompt
+    assert "Selecting the switch option on this informed card is sufficient consent" in prompt
+    assert "Do not ask again after an informed choice or require the author to click the UI" in prompt
+    assert "confirm_restart=false" in prompt
+    assert "only tool call in the turn" in prompt
     assert "Do not repeat an already answered owner question" in prompt
+
+
+def test_owner_tool_schema_and_shared_prompt_support_single_informed_confirmation():
+    schema = next(tool for tool in TOOL_SCHEMAS if tool["name"] == "set_orchestration_owner")
+    assert schema["parameters"]["properties"]["owner"]["enum"] == ["host", "eaa"]
+    assert schema["parameters"]["properties"]["confirm_restart"]["type"] == "boolean"
+    assert set(schema["parameters"]["required"]) == {"owner", "confirm_restart"}
+    assert schema["parameters"]["additionalProperties"] is False
+    for owner in ("host", "eaa"):
+        for stage in Stage:
+            prompt = build_system_prompt(Session(
+                skill_kind=SkillKind.SCENARIO, orchestration_owner=owner, current_stage=stage,
+            ))
+            prompt = " ".join(prompt.split())
+            assert "a required second action" in prompt
+            assert "confirm_restart=true" in prompt
+            assert 'or a "continue" message' in prompt
+            assert "Do not choose an owner on the author's behalf" in prompt
+            assert "direct them to the scenario owner selector" not in prompt
 
 
 @pytest.mark.parametrize("stage", list(Stage))

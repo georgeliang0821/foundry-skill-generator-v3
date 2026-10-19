@@ -693,6 +693,7 @@ _session_store_location = str(getattr(session_store, "root", getattr(session_sto
 log_event("app.ready", session_count=len(sessions), session_root=_session_store_location)
 
 PASSIVE_TOOL_CALLS = {
+    "set_orchestration_owner",
     "stage_transition",
     "select_neighbor_skill",
     "confirm_neighbor_notification",
@@ -1719,6 +1720,7 @@ def patch_error_detail(call, exc: PatchError) -> dict[str, Any]:
 # wrong layer is a modelling mistake, not a transport failure, so it goes down
 # the recoverable tool_effect_rejected path with guidance instead of crashing.
 KIND_ONLY_TOOLS: dict[str, SkillKind] = {
+    "set_orchestration_owner": SkillKind.SCENARIO,
     "record_variables": SkillKind.CAPABILITY,
     "propose_material_patch": SkillKind.CAPABILITY,
     "record_delegation": SkillKind.SCENARIO,
@@ -2132,11 +2134,11 @@ def _assert_owner_preserved(session: Session, skill_md: str) -> None:
         return
     owner = skill_orchestration_owner(skill_md)
     if owner != session.orchestration_owner:
-        raise ValueError("The draft's orchestration owner differs from the session. Use the scenario owner selector and confirm regeneration.")
+        raise ValueError("The draft's orchestration owner differs from the session. Use set_orchestration_owner or the scenario owner selector with informed restart consent.")
     before = parse_frontmatter_meta(session.current_skill.skill_md)
     after = parse_frontmatter_meta(skill_md)
     if "orchestration_owner" in before and "orchestration_owner" not in after:
-        raise ValueError("Keep metadata.orchestration_owner intact; use the owner selector to change orchestration.")
+        raise ValueError("Keep metadata.orchestration_owner intact; use set_orchestration_owner or the owner selector to change orchestration.")
 
 
 def _catalog_skill_names() -> set[str]:
@@ -2295,6 +2297,12 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             f"{tool} is only available for a {required_kind.value} skill, and this "
             f"session authors a {session.skill_kind} skill."
         )
+
+    if tool == "set_orchestration_owner":
+        req = OrchestrationOwnerUpdateRequest.model_validate(args)
+        with _skill_mutation_lock:
+            _change_orchestration_owner(session, req)
+        return
 
     # v6: 5-stage state machine + invariants.
     if tool in {"stage_transition", "request_stage_transition"}:
@@ -2671,6 +2679,15 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
     """
     if isinstance(exc, FormLockDeferred):
         return str(exc)
+    if tool == "set_orchestration_owner":
+        return (
+            f"Owner change was not applied: {exc}. Keep the current owner. "
+            "For a scenario with existing text, call ask_user_input to explain clearing the draft, "
+            "pending patches, tests and confirmations and returning to PREPARE for regeneration. "
+            "After the author agrees, call set_orchestration_owner with a valid host/eaa owner "
+            "and confirm_restart=true. An informed choice already given needs no further "
+            "confirmation. Do not ask the author to apply the change in the UI."
+        )
     if tool in {"stage_transition", "request_stage_transition"}:
         requested = str(args.get("target") or args.get("target_stage") or "?").lower()
         try:
@@ -2911,51 +2928,66 @@ def refresh_session_children(
     return session
 
 
+class OwnerRestartRequired(ValueError):
+    pass
+
+
+def _change_orchestration_owner(session: Session, req: OrchestrationOwnerUpdateRequest) -> Session:
+    if SkillKind(session.skill_kind) is not SkillKind.SCENARIO:
+        raise ValueError("Only a scenario skill has an orchestration owner.")
+    if req.owner == session.orchestration_owner:
+        return session
+    has_draft = bool(session.current_skill.skill_md.strip())
+    needs_confirmation = has_draft or bool(session.remote_skill_id and not session.owner_regeneration_pending)
+    if needs_confirmation and not req.confirm_restart:
+        raise OwnerRestartRequired(
+            "Changing the owner requires confirmation to clear the draft, pending patches, tests "
+            "and confirmations and return to PREPARE for regeneration. The stored skill is not changed."
+        )
+    before = session.orchestration_owner
+    if has_draft or session.remote_skill_id or session.owner_regeneration_pending:
+        if has_draft:
+            session.owner_source_skill_md = session.current_skill.skill_md
+        session.current_skill = SkillDraft()
+        session.owner_regeneration_pending = True
+    session.orchestration_owner = req.owner
+    session.pending_tool_calls.clear()
+    session.patch_history.clear()
+    session.test_runs.clear()
+    session.iteration_reflections.clear()
+    session.pending_change_summaries.clear()
+    brief = session.prepare_brief
+    brief.verify_checklist = {key: False for key in brief.verify_checklist}
+    brief.verify_evidence.clear()
+    brief.verify_updated_at.clear()
+    brief.revisit = True
+    brief.last_updated = now_ms()
+    session.conversation.append(ChatMessage(
+        role=MessageRole.SYSTEM,
+        content=f"Orchestration owner changed from {before} to {req.owner}. Reconfirm the scenario and regenerate; the stored skill remains unchanged until a successful save.",
+    ))
+    if Stage(session.current_stage) is not Stage.PREPARE:
+        transition(session, Stage.PREPARE, "Orchestration owner changed; regenerate the scenario.")
+    session.touch()
+    persist_session(session)
+    log_event("session.orchestration_owner.changed", session_id=session.id, previous=before, owner=req.owner)
+    return session
+
+
 @app.post("/api/sessions/{session_id}/orchestration-owner")
 def update_session_orchestration_owner(
     session_id: str, req: OrchestrationOwnerUpdateRequest, upn: str = Depends(require_upn),
 ) -> Session:
     with _skill_mutation_lock:
         session = get_session_for_user(session_id, upn)
-        if SkillKind(session.skill_kind) is not SkillKind.SCENARIO:
-            raise HTTPException(status_code=400, detail="Only a scenario skill has an orchestration owner.")
-        if req.owner == session.orchestration_owner:
-            return session
-        has_draft = bool(session.current_skill.skill_md.strip())
-        needs_confirmation = has_draft or bool(session.remote_skill_id and not session.owner_regeneration_pending)
-        if needs_confirmation and not req.confirm_restart:
+        try:
+            return _change_orchestration_owner(session, req)
+        except OwnerRestartRequired as exc:
             raise HTTPException(status_code=409, detail={
-                "kind": "owner_restart_required", "recoverable": True,
-                "message": "Changing the owner clears the draft and requires PREPARE confirmation and regeneration. The stored skill is not changed.",
-            })
-        before = session.orchestration_owner
-        if has_draft or session.remote_skill_id or session.owner_regeneration_pending:
-            if has_draft:
-                session.owner_source_skill_md = session.current_skill.skill_md
-            session.current_skill = SkillDraft()
-            session.owner_regeneration_pending = True
-        session.orchestration_owner = req.owner
-        session.pending_tool_calls.clear()
-        session.patch_history.clear()
-        session.test_runs.clear()
-        session.iteration_reflections.clear()
-        session.pending_change_summaries.clear()
-        brief = session.prepare_brief
-        brief.verify_checklist = {key: False for key in brief.verify_checklist}
-        brief.verify_evidence.clear()
-        brief.verify_updated_at.clear()
-        brief.revisit = True
-        brief.last_updated = now_ms()
-        session.conversation.append(ChatMessage(
-            role=MessageRole.SYSTEM,
-            content=f"Orchestration owner changed from {before} to {req.owner}. Reconfirm the scenario and regenerate; the stored skill remains unchanged until a successful save.",
-        ))
-        if Stage(session.current_stage) is not Stage.PREPARE:
-            transition(session, Stage.PREPARE, "Orchestration owner changed; regenerate the scenario.")
-        session.touch()
-        persist_session(session)
-        log_event("session.orchestration_owner.changed", session_id=session.id, previous=before, owner=req.owner)
-        return session
+                "kind": "owner_restart_required", "recoverable": True, "message": str(exc),
+            }) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/sessions/{session_id}/skill-form")
@@ -3655,6 +3687,8 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                     }})
                     with log_timing("chat.phase", phase="rejected_tool_persist", call_id=call_id):
                         persist_session(session)
+                    if data.get("tool") == "set_orchestration_owner":
+                        break
                     continue
                 if data["tool"] in PASSIVE_TOOL_CALLS:
                     record_tool(session, PendingToolCall(**data))
@@ -3665,6 +3699,9 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                 with log_timing("chat.phase", phase="tool_persist", call_id=data.get("call_id")):
                     persist_session(session)
             events.append({"event": event_name, "data": data})
+            if event_name == "tool_call" and data.get("tool") == "set_orchestration_owner":
+                # Remaining calls were generated against the previous owner.
+                break
         raw_assistant_text = "".join(assistant_chunks)
         assistant_text = raw_assistant_text.strip()
         if assistant_text:

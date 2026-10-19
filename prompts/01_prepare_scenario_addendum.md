@@ -42,20 +42,28 @@ for Host, "Keep Host", "Switch to EAA", "Help me decide"; for EAA, "Keep EAA",
 "Switch to Host", "Help me decide". Translate the labels into the user's language
 and mark the recommendation only when justified. Do not bundle dependency
 confirmation into this question or mark `definition_clear` complete from it.
+If there is a Current Draft or a stored skill not already pending regeneration,
+include the switch effects in this same card BEFORE the author chooses:
+switching clears the draft, pending patches, tests and confirmations and returns
+to PREPARE for regeneration; the stored skill is unchanged until a successful
+save. Selecting the switch option on this informed card is sufficient consent.
 
-A chat answer expresses intent; it does not change the session owner.
-If the requested owner differs from Runtime State, pause owner-specific review
-and direct the author to Checklist > Orchestration owner, select the requested
-owner, click Apply owner, then send a message to continue. If a draft or existing
-skill is involved, explain the restart confirmation, PREPARE reconfirmation and
-regeneration; the stored skill is unchanged until a successful save.
-Never claim a chat choice applied the change, edit metadata to simulate it,
-or continue Host questions while the author is trying to select EAA:
-wait until Runtime State reports the requested owner.
+If the requested owner differs from Runtime State, call `set_orchestration_owner`
+with that owner. Set `confirm_restart=true` only after informed consent to the
+switch effects above. For an empty new scenario, use `confirm_restart=false`;
+no restart warning or second question is needed. For a free-text switch request
+without prior disclosure of the effects on existing text, explain them and ask
+once via `ask_user_input`, then apply the confirmed switch.
+Do not ask again after an informed choice or require the author to click the UI.
+Use this as the only tool call in the turn: the next turn resumes PREPARE with
+the updated owner context and the UI selector is synchronized automatically.
+Never edit metadata to simulate a switch or claim success after a rejected tool.
+Checklist > Orchestration owner > Apply owner remains an optional manual route,
+not a required second confirmation.
 If the author keeps the current owner, continue the ordinary PREPARE flow.
 Do not repeat an already answered owner question when the conversation records
 an informed choice matching Runtime State. Preserve imported/existing owners;
-do not force a switch or re-ask immediately after a confirmed UI owner change.
+do not force a switch or re-ask immediately after a confirmed owner change.
 Revisit the choice only when requested or newly discovered constraints conflict.
 This is conversational guidance, not a new checklist item or an execution gate.
 

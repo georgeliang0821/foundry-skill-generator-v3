@@ -52,6 +52,7 @@ items - address them before retrying.
 - `request_materials` - when you need extra context (sample skills, API docs).
 - `record_understanding` / `record_research` - PREPARE-stage briefs.
 - `update_prepare_checklist` - mark a PREPARE checklist item confirmed.
+- `set_orchestration_owner` - apply an explicit scenario Host/EAA choice using the shared informed-consent rules; UI switching is optional, not a second confirmation. Use it as the only tool call in the turn, then resume with fresh PREPARE context.
 - `propose_skill_draft` - only in DRAFT, when skill_md is empty (or correcting a rejected unsaved draft). A confirmed scenario owner change starts a new generation cycle; follow the scenario ownership addendum.
 - `propose_patch` - V4A patches, only in REFINE or TEST.
 - `rename_skill` - change the skill's `name`, only in REFINE or TEST. Never patch `name` yourself.

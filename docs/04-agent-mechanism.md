@@ -19,10 +19,14 @@ PREPARE 的 scenario addendum 要求對話主動揭露兩種 owner 與目前設�
 當成作者已同意。目標清楚後、確認 `input_sources` 與 owner 專屬分工之前，以單一問題卡
 說明差異、依需求／已知 child 契約給出有理由的建議，並提供保留、切換及協助判斷的選項；
 部署條件不明時須明說，不得虛構 Host 工作或宣稱 EAA 已可部署。既有對話尚未揭露時，
-下一回合補上；已有知情選擇且符合 session owner，或剛完成 UI 切換者，不重複詢問。
-這是 prompt 層的對話引導，不新增 checklist 欄位或後端閘門。對話選項只表達意圖；
-要切換時仍引導到 **Checklist → Orchestration owner → Apply owner**，在 session
-回報新 owner 前暫停該 owner 專屬確認，不可把聊天回答當成已切換或直接改 metadata。
+下一回合補上；已有知情選擇且符合 session owner，或剛完成已確認切換者，不重複詢問。
+不新增 checklist 欄位。作者明確選擇切換後，Agent 呼叫 `set_orchestration_owner`，
+與 UI 共用後端切換邏輯；右側選單隨 `state_update` 同步，前端自動以新 owner 繼續
+PREPARE，不需手動 Apply 或再傳「繼續」。已有草稿或尚未進入重新生成的遠端技能時，
+必須在原問題卡先說明清稿、清除待接受 patch／測試／確認與重新生成的影響；
+作者選擇後以 `confirm_restart=true` 執行，不重複確認。未事先說明的自由文字要求才補問一次；
+空白新 scenario 不需清稿確認。後端拒絕未確認的破壞性切換，且在切換工具成功或被拒絕後
+停止處理該回合其餘工具，避免套用以舊 owner 生成的內容。一般 draft／patch 仍不可直接改 metadata。
 
 - **Host**：宿主執行前置工作、取得 child 契約、組裝參數並串接能力；保留現有指標及確認關卡。
 - **EAA**：內部 Agent 讀自然語言正文、透過內部 skill tools 取得契約並調派能力。
@@ -34,7 +38,7 @@ PREPARE 的 scenario addendum 要求對話主動揭露兩種 owner 與目前設�
   這些是 Agent 行為要求，不是固定流程引擎、程式強制閘門或 exactly-once 保證。
 - 不產生 `metadata.orchestration`、`orchestration_ref` 或專用流程檔案。
   N1 僅對 EAA 正文中的已宣告 child 執行指令放行具名引用，description／路由替代不放行。
-- 已有正文時切 owner 需明確 UI 確認與重新生成；唯讀 Previous Scenario 提供業務規則來源，
+- 已有正文時切 owner 需明確同意與重新生成，對話與 UI 皆可取得同意；唯讀 Previous Scenario 提供業務規則來源，
   不能被當成待還原的原稿。成功存檔前遠端不變；一般 MODIFY 不切 owner 的行為不變。
 
 測試的 L1 共用靜態檢核；Host 的 L2／L3 保持原邏輯，EAA L2 改檢查 parent 解析，

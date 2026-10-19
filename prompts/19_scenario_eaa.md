@@ -16,8 +16,10 @@ scenario and relays questions/results; it does NOT orchestrate individual childr
   headings, not calls to a public MCP tool. Copy explicit input bindings only
   when the child publishes them; do not invent a Host credentials wrapper.
 - Leave `host_capabilities` empty. If the scenario needs Host-only tools, explain
-  the mismatch and ask the author to change the scope or select Host using the UI.
-  Do not invent Host tasks just to satisfy a checkpoint, and do not change owner.
+  the mismatch and ask the author to change the scope or choose Host. Apply an
+  explicit owner choice through `set_orchestration_owner` under the shared
+  informed-consent rules; do not require a second UI action.
+  Do not invent Host tasks just to satisfy a checkpoint or switch without consent.
 - Confirm the dependency whitelist and `delegation_ok` through the ordinary
   PREPARE checkpoints. EAA ownership does not bypass author confirmation.
 

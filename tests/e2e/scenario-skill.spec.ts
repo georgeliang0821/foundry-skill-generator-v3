@@ -132,6 +132,59 @@ test("owner conversion confirms before clearing a stored scenario draft", async 
   expect(session.owner_regeneration_pending).toBe(false);
 });
 
+for (const [initial, target] of [["host", "eaa"], ["eaa", "host"]]) {
+  test(`chat owner switch ${initial} to ${target} syncs the selector and continues without UI confirmation`, async ({ page, request }) => {
+    const created = await request.post("/api/sessions", {
+      data: { skill_kind: "scenario", orchestration_owner: initial },
+    });
+    expect(created.ok()).toBeTruthy();
+    const state = await created.json();
+    await openApp(page);
+    await page.getByRole("combobox", { name: "Session", exact: true }).selectOption(state.id);
+    await openTab(page, "checklist");
+    await expect(page.getByTestId("scenario-owner-select")).toHaveValue(initial);
+    const payloads: Array<{ auto_continue?: boolean; message: string }> = [];
+    const ownerPosts: string[] = [];
+    let dialogs = 0;
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/orchestration-owner")) {
+        ownerPosts.push(request.url());
+      }
+    });
+    page.on("dialog", async (dialog) => {
+      dialogs += 1;
+      await dialog.dismiss();
+    });
+    await page.route(`**/api/sessions/${state.id}/chat`, async (route) => {
+      payloads.push(route.request().postDataJSON());
+      state.orchestration_owner = target;
+      state.current_stage = "prepare";
+      const call = payloads.length === 1
+        ? { call_id: "switch-owner", tool: "set_orchestration_owner", args: { owner: target, confirm_restart: false } }
+        : { call_id: "next-owner-question", tool: "ask_user_input", args: {
+          question: `Continue ${target} dependency review?`, options: ["Confirm dependencies", "Adjust dependencies"],
+        } };
+      state.pending_tool_calls = payloads.length === 1 ? [] : [call];
+      await route.fulfill({ json: { events: [
+        { event: "tool_call", data: call },
+        { event: "state_update", data: state },
+        { event: "done", data: {} },
+      ] } });
+    });
+
+    await sendChat(page, `Use ${target} as confirmed.`);
+
+    await expect(page.getByTestId("scenario-owner-select")).toHaveValue(target);
+    await expect(page.getByTestId("question-card")).toContainText(`Continue ${target} dependency review?`);
+    expect(payloads).toHaveLength(2);
+    expect(payloads[1].auto_continue).toBe(true);
+    expect(payloads[1].message).toContain("PREPARE");
+    expect(ownerPosts).toEqual([]);
+    expect(dialogs).toBe(0);
+    await expect(page.getByTestId("send-button")).toBeEnabled();
+  });
+}
+
 test("runtime input sources persist without changing authentication fields", async ({ page, request }) => {
   await openApp(page);
   await openTab(page, "checklist");

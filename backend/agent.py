@@ -22,6 +22,28 @@ FOUNDRY_MAX_RETRIES = 0
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
+        "name": "set_orchestration_owner",
+        "description": (
+            "Apply the author's explicit Host/EAA choice to a scenario session. "
+            "This shares the UI owner-switch logic and does not save the remote skill. "
+            "When a draft or stored skill exists, first explain that switching clears the draft, "
+            "pending patches, tests and confirmations and returns to PREPARE for regeneration. "
+            "Set confirm_restart=true only after the author agrees to those effects; an answer "
+            "to a question that already disclosed them is sufficient. Do not ask again or send "
+            "the author to the UI. Emit this as the only tool call this turn; the next turn "
+            "uses the updated owner context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "enum": ["host", "eaa"]},
+                "confirm_restart": {"type": "boolean"},
+            },
+            "required": ["owner", "confirm_restart"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "ask_user_input",
         "description": "Ask the user to choose from structured options.",
         "parameters": {

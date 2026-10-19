@@ -16,9 +16,21 @@ the EAA addendum below replaces those instructions, not the common quality rules
   `workflow.yaml`. Do not relocate a flow DSL elsewhere. No strategy, step ID,
   outputs DSL, confirmation token, or operation ID requirement.
 - Preserve the session owner through drafts, patches and formatting. Do not
-  change it through a draft or patch. If the author wants a different owner,
-  direct them to the scenario owner selector. With existing text, that selector
-  requires confirmation and a fresh PREPARE review before regeneration.
+  change it through a draft or patch. If the author explicitly wants a different
+  owner, use `set_orchestration_owner`; the UI selector is an alternative, not
+  a required second action. Do not choose an owner on the author's behalf.
+- With a draft or a stored skill not already pending regeneration, explain BEFORE
+  asking that switching clears the draft, pending patches, tests and confirmations
+  and returns to PREPARE for regeneration; the stored skill stays unchanged until
+  a successful save. A switch option selected after this disclosure is sufficient:
+  call `set_orchestration_owner(owner=..., confirm_restart=true)` without asking
+  again. For a free-text request without that disclosure, ask once, then apply.
+  For an empty new scenario, explicit choice needs no restart warning; use false.
+- Emit `set_orchestration_owner` as the only tool call in its turn. The server
+  applies the same owner-change logic as the UI, persists the session and stops
+  calls generated against the old owner. The UI syncs its selector and continues
+  automatically with fresh PREPARE context. Do not ask for manual UI application
+  or a "continue" message, and do not claim success on tool rejection.
 - When `owner_regeneration_pending` is true, do not restore the old remote
   body. Reconfirm the brief, transition to DRAFT, and propose a complete
   replacement draft even in MODIFY. The stored skill remains unchanged until
