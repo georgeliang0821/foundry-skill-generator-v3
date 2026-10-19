@@ -41,6 +41,39 @@ def test_prompt_contract_uses_unnamed_stopping_conditions(kind: SkillKind, stage
     assert "Skills named here are alternatives" not in text
 
 
+@pytest.mark.parametrize("kind,owner", [
+    (SkillKind.CAPABILITY, "host"),
+    (SkillKind.SCENARIO, "host"),
+    (SkillKind.SCENARIO, "eaa"),
+])
+def test_prepare_prompt_batches_related_decisions_without_skipping_gates(kind, owner) -> None:
+    text = build_system_prompt(Session(
+        skill_kind=kind, current_stage=Stage.PREPARE, orchestration_owner=owner,
+    ))
+    assert "one meaningful decision per round" in text
+    assert "multiple `ask_user_input` calls in the SAME response" in text
+    assert "Do not re-ask an explicitly answered question" in text
+    assert "Do not treat a blank or ambiguous answer as consent" in text
+    assert "Do not combine questions whose answers depend on each other" in text
+    assert "remaining decision groups" in text
+    for obsolete in (
+        "one-question-at-a-time",
+        "one-checkpoint-at-a-time",
+        "THREE fields asked ONE AT A TIME",
+        "downstream block ONE AT A TIME",
+        "confirmed one field at a time",
+        "go through them one at a time",
+    ):
+        assert obsolete not in text
+    assert "Only confirm a checklist block after all its required fields" in text
+    if kind is SkillKind.SCENARIO:
+        assert "Present EVERY supported operation together" in text
+        assert "get-analysis" in text and "save-analysis" in text
+        assert "Do not restart the operations review" in text
+        assert "before input_sources" in text
+        assert "only after all six fields are recorded for every child" in text
+
+
 @pytest.mark.parametrize("stage", [Stage.REFINE, Stage.TEST])
 def test_pending_patch_prompt_distinguishes_card_acceptance_from_sync(stage: Stage) -> None:
     session = Session(current_stage=stage, mode=Mode.MODIFY, neighbor_notice_review={"notice_id": 1})

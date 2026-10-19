@@ -73,6 +73,45 @@ test("answers pending questions from the chat box", async ({ page, request }) =>
   expect(session.pending_tool_calls).toHaveLength(0);
 });
 
+test("submits a related question batch with one agent continuation", async ({ page, request }) => {
+  await setScenario(request, "question_multi");
+  await openApp(page);
+  await startNewSession(page);
+  await sendChat(page, "Ask me two questions.");
+
+  const card = page.getByTestId("question-card");
+  await expect(card).toHaveCount(1);
+  await expect(card.getByTestId("question-item")).toHaveCount(2);
+  const pending = await readSession(request, await currentSessionId(page));
+  expect(pending.pending_tool_calls).toHaveLength(2);
+  const continuations: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/chat")) {
+      continuations.push(request.postDataJSON().message);
+    }
+  });
+
+  await card.getByLabel("Use deterministic draft").check();
+  await card.getByLabel("Small sample set").check();
+  const continuation = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().endsWith("/chat"),
+  );
+  await card.getByTestId("submit-questions-button").click();
+  await continuation;
+
+  await expect(card).toContainText("Submitted answers");
+  await expect(page.getByTestId("send-button")).toBeEnabled();
+  expect(continuations).toHaveLength(1);
+  expect(continuations[0]).toContain("Answer: Use deterministic draft");
+  expect(continuations[0]).toContain("Answer: Small sample set");
+  const session = await readSession(request, pending.id);
+  expect(session.pending_tool_calls).toHaveLength(0);
+  const results = session.ui_history.filter((event: { kind: string }) => event.kind === "result");
+  for (const call of pending.pending_tool_calls) {
+    expect(results.filter((event: { call_id: string }) => event.call_id === call.call_id)).toHaveLength(1);
+  }
+});
+
 test("continues automatically after selecting a neighbor", async ({ page, request }) => {
   await openApp(page);
   await startNewSession(page);

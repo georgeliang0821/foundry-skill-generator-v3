@@ -64,6 +64,18 @@ def test_output_rules_use_the_existing_patch_card_for_acceptance() -> None:
     assert "Do not emit a separate `ask_user_input` for the same acceptance" in text
 
 
+def test_output_rules_support_batched_prepare_confirmations() -> None:
+    text = "\n".join(FOUNDRY_OUTPUT_RULES)
+    assert "one meaningful decision per round" in text
+    assert "multiple ask_user_input calls in the SAME response" in text
+    assert "Do not infer consent from an unanswered question" in text
+    assert "one-question-at-a-time" not in text
+    assert "THREE fields asked ONE AT A TIME" not in text
+    assert "downstream block ONE AT A TIME" not in text
+    assert "positives are saved" in text
+    assert "BLOCK CONFIRMATION IS MANDATORY AND SEQUENTIAL" in text
+
+
 def test_load_output_rules_raises_when_the_prompt_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("backend.agent.load_prompt", lambda _name: "<!-- Missing prompt -->")
 

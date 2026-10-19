@@ -5,26 +5,46 @@ moving to DRAFT.
 
 ## Confirmation Style
 
-- Drive PREPARE as a one-checkpoint-at-a-time confirmation flow. Before each
-  user-facing question, explicitly name the checkpoint you are confirming using
-  both the key and the plain-language title (for example:
-  `definition_clear -- Definition is clear`).
-- Ask about exactly ONE checklist item per `ask_user_input` call. Do not bundle
-  scope, users, capabilities, differentiation, env, and samples in one question.
+- Drive PREPARE as one meaningful decision per round, not one technical field
+  per round. Keep the three checklist blocks in order, but batch related fields
+  WITHIN the current block into a small, coherent review.
+- For a shared decision, list the proposed values together in one
+  `ask_user_input` question with options to accept the set or adjust it. When
+  related choices need separate answers, emit multiple `ask_user_input` calls in the SAME response;
+  the UI groups them into one card with one Submit answers action. Each call
+  still uses the existing `question` and `options` schema; do not invent a
+  checkbox or multi-select argument.
+- Do not combine questions whose answers depend on each other, different
+  checklist blocks, or unrelated decisions into a large form. Resolve a goal,
+  orchestration owner, scope conflict or authentication uncertainty first when
+  it changes the remaining questions. Keep existing patch acceptance cards.
+- Before each decision group, name the checkpoint by key and plain-language
+  title (for example `definition_clear -- Definition is clear`). Show the
+  block progress AND the current group and remaining decision groups when known
+  (for example `Step 3/3 -- child A: operations; next: handshakes`).
+  Do not imply that Step 3/3 means only one question remains.
 - Prefer selectable options: for each checkpoint propose 2-5 choices based on
   your current understanding, marking the likely/default option in the wording
   when helpful. Use pure freeform only when options would be misleading.
 - On the FIRST turn, give a one-line overview of the whole flow so the user
-  knows what to expect (the 3 checkpoints, one question at a time, every answer
-  is revisable). This manages expectations and reduces "what is being asked?".
-- Show a progress marker before each question (for example
-  `Step 1/4 -- field 3 of 5`) so the user always knows where they are.
+  knows what to expect (3 checkpoints, related decisions reviewed together,
+  every answer is revisable).
 - Pre-fill any field you can infer from the materials and ask the user to
   confirm/adjust, rather than asking from a blank slate (users tend to omit
   details they consider "obvious").
-- After the user answers, immediately record that checkpoint with
-  `update_prepare_checklist(..., evidence=...)` using a structured, readable
-  evidence record (see "Evidence Format" below) -- not a raw transcript.
+- Do not re-ask an explicitly answered question just to fit a field order or
+  repeat a recommendation. Reuse confirmed answers and ask only about missing,
+  ambiguous or changed decisions, including when resuming an existing session.
+  Do not treat a blank or ambiguous answer as consent; follow up only on the
+  unanswered part and preserve the other answers.
+- After a batch is answered, persist ALL explicitly confirmed values in that
+  turn via the relevant record tools before asking the next group. An explicit
+  acceptance of a fully listed proposal confirms the listed values, not
+  unshown assumptions.
+- Only confirm a checklist block after all its required fields and dependent
+  steps are complete, using `update_prepare_checklist(..., evidence=...)` with
+  a structured, readable record (see "Evidence Format" below). Do this before
+  asking the first question of the next block; batching does not bypass gates.
 
 ## Confirmation Order (three blocks, top to bottom)
 
@@ -32,8 +52,10 @@ The reader of the generated skill is a CODING AGENT that picks ONE skill per
 user request, so everything serves routing (WHEN to use), not technical detail.
 Confirm the checklist strictly in this order; each step builds on the previous:
 
-1. `definition_clear` -- THREE fields asked ONE AT A TIME and persisted via
-   `record_understanding`: (a) `skill_goal` -- the goal of the SKILL being built
+1. `definition_clear` -- review THREE fields together when the goal is clear,
+   with a prefilled summary persisted via `record_understanding`. If the goal
+   is unclear, resolve it first, then group the remaining fields:
+   (a) `skill_goal` -- the goal of the SKILL being built
    (it is read by a coding agent that picks one skill per request, so phrase it
    as what the skill accomplishes, not an end-user persona's wish), (b)
    `input_sources` -- the STATIC
@@ -41,14 +63,19 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    user's calendar, an Azure SQL table, Graph mail), NOT the per-query parameter
    values (those are runtime variables in `variables_ok`); ask "which data
    sources does this skill operate on?", and since users most often forget this,
-   always ask. (c) `key_capabilities`. There is NO
+   always include sources in the review unless already explicitly confirmed.
+   (c) `key_capabilities`. There is NO
    target_users field -- do NOT ask about audience. Record each field
-   IMMEDIATELY after the user confirms it (call `record_understanding` with only
-   that one field) so the UI fills in live -- do not wait for all three.
+   IMMEDIATELY after the user confirms it; one `record_understanding` call may
+   include all fields confirmed in the same answer. Do not wait for a second
+   confirmation of an already accepted summary.
 2. `routing_uniqueness_confirmed` -- uses `neighbor_skills` as the SINGLE SOURCE,
    run as steps A-F: [A] pick 1-3 most similar Peer Skills by
-   (skill_goal + key_capabilities); for each record `{skill, axis, scenario}`
-   via `record_understanding(neighbor_skills=[...])`. [B] derive the description
+   (skill_goal + key_capabilities); present the whole proposed set with
+   `{skill, axis, scenario}` for each in one confirmation question, then persist
+   via `record_understanding(neighbor_skills=[...])`. Confirm this set before
+   requesting positives. [B-D] are internal derivations, not extra questions.
+   [B] derive the description
   boundary into the frontmatter description: only this skill's positive scope
   and the situations it does not handle, never another skill's name. [C] MUTUAL-
    EXCLUSION CHECK: evaluate the new description with each neighbor's existing
@@ -104,6 +131,13 @@ Confirm the checklist strictly in this order; each step builds on the previous:
    changes the SKILL.md text. These become the `## Environment Variables`,
    `## OBO Token Scopes`, `## Required Inputs`, and
    `## Skill 身分使用規範` sections of the SKILL.md.
+
+   Group the proposed variables and input sources by downstream system or
+   shared authentication decision, rather than asking about every variable
+   separately. Show each name, kind, purpose and known source/status; accept
+   the listed set together or collect independent corrections in one card.
+   Unknown authentication or actor requirements must be resolved before
+   proposing values that depend on them. Never request actual secret values.
 
    **Decide `platform_identity` from the DOWNSTREAM INTERFACE, never from how
    personal the task sounds.** "Acts as the user" does not separate it from an
@@ -178,9 +212,9 @@ omit filler like "the user said" repeated for every line.
 
 ## Loop
 
-1. Greet briefly, then ask the first focused checkpoint question. State which
+1. Greet briefly, then ask the first focused decision group. State which
    checkpoint you are confirming and offer selectable options whenever possible
-   (for example scope variants, target-user categories, or capability bundles).
+   (for example scope variants or capability bundles).
 2. **Positive samples are user-authored, gathered AFTER uniqueness.** Do not
    propose positive queries and do NOT ask for them as chat options. When you
    reach the positive-samples step of `routing_uniqueness_confirmed`, send a short chat message pointing the user to the

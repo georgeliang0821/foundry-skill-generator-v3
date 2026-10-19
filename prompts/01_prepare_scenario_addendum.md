@@ -107,8 +107,9 @@ operations, handshakes, sample payload) and the rest of the dependency whitelist
 are confirmed later in block 3 -- here you only need the names of the skills
 that actually perform work.
 
-`record_delegation` is incremental: record one child or one confirmed field at a
-time. Other children, omitted fields and the existing dependency whitelist are
+`record_delegation` is incremental: a call may record multiple confirmed fields
+and children together. Partial updates are also supported; they do not require
+separate user questions. Other children, omitted fields and the existing dependency whitelist are
 preserved. Supply an explicit empty field only to clear that child's value.
 To remove a previously selected skill, ask the author to remove it in the
 Dependency whitelist panel; omitting it from a tool call does not remove it.
@@ -130,8 +131,13 @@ the child skill names, record them, then retry.
 
 A scenario skill declares NO variables: no `aca_env`, no `obo_token`, no
 `runtime` inputs. Do not call `record_variables` -- it is rejected in a scenario
-session. The third checkpoint is `delegation_ok`, confirmed one field at a time
-and persisted with `record_delegation`:
+session. The third checkpoint is `delegation_ok`. Review related contract fields
+together and persist them with `record_delegation`; the numbered list below is
+a completeness checklist, NOT a requirement for separate question rounds.
+Read and prefill the child contracts first. Group input field names and section
+pointers into one contract summary, operations into one scope review per child,
+and handshakes with their related responsibilities into one review. Already
+explicitly confirmed fields need no new question; ask only about gaps or changes.
 
 1. **`child_skill`** -- which existing capability skill performs the work. It
    must already exist and be accessible to the user; a scenario session does not
@@ -163,12 +169,23 @@ and persisted with `record_delegation`:
 4. **`host_capabilities`** -- what the host must perform itself because the
    child cannot. For each one, state WHY the child cannot do it; that reason is
    what makes the step survive future edits.
-5. **`operations`** -- read the child's SKILL.md and list EVERY operation it
-   supports, then go through them one at a time with the user and record the
-   ones this scenario will drive. An operation the user wants but you leave out
+5. **`operations`** -- read the child's SKILL.md. Present EVERY supported operation together
+   in one scope review for that child, with a short purpose and an explicit
+   recommended included/excluded status based on the goal. Offer acceptance of
+   the listed set or adjustments. If individual choices are needed, emit all
+   independent operation questions as `ask_user_input` calls in the same
+   response so they share one card and submission; do not wait a model round
+   between operations. For example, review `get-analysis` and `save-analysis`
+   together, not as successive confirmation rounds. Record every selected
+   operation in the same turn after the answer. An operation the user wants but you leave out
    becomes a capability the host can never reach through this scenario, and
    nothing downstream reports it. For each one you deliberately leave out, get
-   the reason now -- it goes in the "not applicable" section when you draft.
+   the reason in this review -- it goes in the "not applicable" section when
+   you draft. An accepted listed exclusion with its stated reason is sufficient;
+   ask only about exclusions whose reason is missing or unclear.
+   Do not restart the operations review when resuming a partially confirmed
+   session: preserve prior explicit choices, show them as already confirmed,
+   and group the remaining operations in the next question card.
 6. **`handshakes`** -- every round trip the child can demand before it
    completes: each `needs_input` reason, what the host must do about it, and
    whether the same `session_id` is reused. Read these from the child's SKILL.md
