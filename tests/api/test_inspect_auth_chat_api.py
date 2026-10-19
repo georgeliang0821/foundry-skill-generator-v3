@@ -71,10 +71,13 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
     assert "name and description only (not tags)" in combined
     assert "positive samples miss" in combined
     assert "negative samples incorrectly select" in combined
-    assert "one-question-at-a-time" in combined
-    assert "exactly one thing per ask_user_input" in combined
+    assert "one meaningful decision per round" in combined
+    assert "multiple ask_user_input calls in the same response" in rules
+    assert "do not infer consent from an unanswered question" in rules
+    assert "one-question-at-a-time" not in combined
+    assert "exactly one thing per ask_user_input" not in combined
     assert "prefer selectable options" in combined
-    assert "strictly top-to-bottom in this order" in combined
+    assert "block confirmation is mandatory and sequential" in rules
     assert "skimmable structured record" in combined
     # Phase 3: three blocks; routing_uniqueness merges uniqueness + samples.
     assert "definition_clear" in combined
@@ -82,7 +85,7 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
     assert "variables_ok" in combined
     assert "modify the existing skill" in combined
     assert "input_sources" in combined
-    assert "record each field immediately" in combined
+    assert "persist all explicitly confirmed fields immediately" in rules
     assert "the more the better" in combined
     assert "route_to_peer" in combined
     # Neighbor single source + mutual-exclusion check.

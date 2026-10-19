@@ -58,6 +58,28 @@ Pytest does not verify:
 
 Those belong to Playwright.
 
+## Maintaining Prompt Contracts
+
+Intentional prompt changes must update both semantic assertions (including the
+Inspect API contract) and the committed hashes in
+`tests/unit/inline_prompt_baseline.json`. Shared output rules are included in
+every stage, so changing them also changes non-PREPARE prompt hashes.
+
+After reviewing the intended prompt changes, use the existing capture helper to
+print candidate hashes, then update the baseline explicitly; do not remove the
+snapshot assertions or regenerate the baseline automatically during tests:
+
+```powershell
+uv run --no-sync python -c "import json, runpy; tests = runpy.run_path(r'tests\unit\test_script_form_prompts.py'); print(json.dumps(tests['capture_baseline'](), indent=2, sort_keys=True))"
+```
+
+Run the prompt and Inspect tests first, then the full unit/API suite used by CI:
+
+```powershell
+uv run --no-sync python -m pytest tests\unit\test_script_form_prompts.py tests\api\test_inspect_auth_chat_api.py -q
+uv run --no-sync python -m pytest tests\unit tests\api -q
+```
+
 ## External Services
 
 Pytest does not call real external services. `tests/conftest.py` sets local test
