@@ -408,7 +408,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "record_delegation",
-        "description": "SCENARIO SKILLS ONLY. Persist the delegation_ok checkpoint: delegation contains child capabilities and their published input contracts, contract sections, operations and handshakes; dependency_skills contains other required direct capabilities. Their union is metadata.children, the complete capability whitelist, not execution order. The scenario ownership addendum defines which executor reads the contracts and handles questions. Host-only capabilities apply only to Host ownership; EAA ownership has none. Contracts come from the current child SKILL.md, never invented fields. This replaces record_variables.",
+        "description": "SCENARIO SKILLS ONLY. Incrementally record the delegation_ok checkpoint: delegation entries are merged by child_skill, updating only supplied fields and preserving other children and omitted fields. Explicit empty fields clear that child's values; an empty delegation list removes nothing. dependency_skills adds other required direct capabilities. Previously selected metadata.children are preserved; use the Dependency whitelist panel for removals. The whitelist is not execution order. The scenario ownership addendum defines which executor reads the contracts and handles questions. Host-only capabilities apply only to Host ownership; EAA ownership has none. Contracts come from the current child SKILL.md, never invented fields. This replaces record_variables.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -448,7 +448,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "dependency_skills": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Every other existing skill the flow uses at any step and does not delegate a payload to, e.g. a deck renderer or a mail sender. These join metadata.children but are NOT marked as this scenario's internal children.",
+                    "description": "Add other existing skills the flow uses without delegating a payload, e.g. a deck renderer or mail sender. Omitted or empty lists remove nothing. These join metadata.children but are NOT marked as this scenario's internal children.",
                 },
             },
             "required": ["delegation"],

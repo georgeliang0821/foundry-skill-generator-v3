@@ -34,6 +34,12 @@ PREPARE，不需手動 Apply 或再傳「繼續」。已有草稿或尚未進入
   請作者調整範圍或切換 owner。不得假設公開 MCP `fetch_skill` 是內部工具。
 - `children` 是完整能力白名單，不是執行順序；EAA child 限可執行 inline／script，
   仍檢查既有技能可讀性與禁止巢狀 scenario。
+- `record_delegation` 依 `child_skill` 增量合併契約，只更新本次提供的欄位；
+  未提供的欄位、其他子技能與已選依賴皆保留，明確傳入空欄位才清除該值。
+  `dependency_skills` 只增加依賴，空清單不會刪除既有項目。移除技能須在
+  Dependency whitelist 面板明確操作，並同步移除該契約、撤銷委派確認，
+  避免後續逐項確認時將它加回。新增依賴或修改契約也會撤銷委派確認。
+  子技能全文由後端載入並注入 prompt，不應要求作者將既有契約當成素材上傳。
 - 正文保留補問、`needs_input`、明確同意後繼續、拒絕即停、模糊再問與不明結果先查核；
   這些是 Agent 行為要求，不是固定流程引擎、程式強制閘門或 exactly-once 保證。
 - 不產生 `metadata.orchestration`、`orchestration_ref` 或專用流程檔案。

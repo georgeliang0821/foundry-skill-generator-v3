@@ -107,6 +107,17 @@ operations, handshakes, sample payload) and the rest of the dependency whitelist
 are confirmed later in block 3 -- here you only need the names of the skills
 that actually perform work.
 
+`record_delegation` is incremental: record one child or one confirmed field at a
+time. Other children, omitted fields and the existing dependency whitelist are
+preserved. Supply an explicit empty field only to clear that child's value.
+To remove a previously selected skill, ask the author to remove it in the
+Dependency whitelist panel; omitting it from a tool call does not remove it.
+Read existing child contracts from `## Child Skills (full SKILL.md)`, not from
+user-uploaded materials. Never request their SKILL.md through `request_materials`.
+If a selected child's contract is missing, explain that it has not been loaded
+and ask the author to reload the dependency whitelist; do not invent its contract
+or claim a permission error without evidence.
+
 If you reach block 2 without knowing the children, say so and ask, rather than
 comparing against a list that may still contain one of them.
 

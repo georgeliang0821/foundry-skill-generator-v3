@@ -318,6 +318,143 @@ def test_update_session_children_deduplicates_and_loads(client, backend_main, gr
     assert backend_main.sessions[session_id].child_full_md["child-skill"] == CHILD_MD
 
 
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+def test_record_delegation_preserves_whitelist_and_other_child_contracts(
+    client, backend_main, grant_skill, owner
+) -> None:
+    from backend.state_machine import build_system_prompt
+
+    skills = {
+        "child-skill": CHILD_MD,
+        "peer-skill": PEER_MD,
+        "publisher-skill": CHILD_MD.replace("child-skill", "publisher-skill"),
+    }
+    for name, md in skills.items():
+        _seed_skill(backend_main, name, md)
+        grant_skill(name)
+    session_id = _scenario_session(client, backend_main)
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[session_id]
+    session.orchestration_owner = owner
+    response = client.post(
+        f"/api/sessions/{session_id}/children",
+        json={"children": list(skills)},
+    )
+    assert response.status_code == 200
+
+    for name in skills:
+        backend_main.apply_tool_effect(session, "record_delegation", {
+            "delegation": [{"child_skill": name, "operations": [f"run-{name}"]}],
+        })
+        assert session.children == list(skills)
+        assert session.child_full_md == skills
+        prompt = build_system_prompt(session)
+        for child, md in skills.items():
+            assert f"<<<BEGIN SKILL.md: {child}>>>\n{md}" in prompt
+        assert "Never request their SKILL.md through `request_materials`." in prompt
+
+    session.prepare_brief.verify_checklist["delegation_ok"] = True
+    session.prepare_brief.verify_evidence["delegation_ok"] = "confirmed"
+    backend_main.apply_tool_effect(session, "record_delegation", {
+        "delegation": [{"child_skill": "child-skill", "handshakes": ["stop on failure"]}],
+    })
+    contracts = {d.child_skill: d for d in session.prepare_brief.delegation}
+    assert list(contracts) == list(skills)
+    assert contracts["child-skill"].operations == ["run-child-skill"]
+    assert contracts["child-skill"].handshakes == ["stop on failure"]
+    assert contracts["peer-skill"].operations == ["run-peer-skill"]
+    assert contracts["publisher-skill"].operations == ["run-publisher-skill"]
+    assert session.prepare_brief.verify_checklist["delegation_ok"] is False
+    assert "delegation_ok" not in session.prepare_brief.verify_evidence
+
+    backend_main.persist_session(session)
+    restored = backend_main.session_store.load_all()[session_id]
+    assert restored.children == list(skills)
+    assert restored.prepare_brief.delegation == session.prepare_brief.delegation
+
+    backend_main.apply_tool_effect(session, "record_delegation", {
+        "delegation": [{"child_skill": "child-skill", "operations": []}],
+    })
+    contracts = {d.child_skill: d for d in session.prepare_brief.delegation}
+    assert contracts["child-skill"].operations == []
+    assert contracts["child-skill"].handshakes == ["stop on failure"]
+    assert contracts["peer-skill"].operations == ["run-peer-skill"]
+    assert session.children == list(skills)
+
+
+def test_record_delegation_adds_dependencies_without_clearing_existing_state(
+    client, backend_main
+) -> None:
+    _seed_skill(backend_main, "child-skill", CHILD_MD)
+    _seed_skill(backend_main, "peer-skill", PEER_MD)
+    session_id = _scenario_session(client, backend_main)
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[session_id]
+    _delegate(backend_main, session_id, "child-skill")
+    session.prepare_brief.verify_checklist["delegation_ok"] = True
+    session.prepare_brief.verify_evidence["delegation_ok"] = "confirmed"
+
+    backend_main.apply_tool_effect(session, "record_delegation", {
+        "delegation": [], "dependency_skills": ["peer-skill", "peer-skill"],
+    })
+    assert session.children == ["child-skill", "peer-skill"]
+    assert [d.child_skill for d in session.prepare_brief.delegation] == ["child-skill"]
+    assert set(session.child_full_md) == {"child-skill", "peer-skill"}
+    assert session.prepare_brief.verify_checklist["delegation_ok"] is False
+    assert "delegation_ok" not in session.prepare_brief.verify_evidence
+
+    session.prepare_brief.verify_checklist["delegation_ok"] = True
+    backend_main.apply_tool_effect(session, "record_delegation", {"delegation": []})
+    assert session.children == ["child-skill", "peer-skill"]
+    assert session.prepare_brief.verify_checklist["delegation_ok"] is True
+
+
+def test_children_update_removes_contracts_without_later_resurrection(
+    client, backend_main, grant_skill
+) -> None:
+    _seed_skill(backend_main, "child-skill", CHILD_MD)
+    _seed_skill(backend_main, "peer-skill", PEER_MD)
+    grant_skill("child-skill")
+    grant_skill("peer-skill")
+    session_id = _scenario_session(client, backend_main)
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[session_id]
+    session.children = ["child-skill", "peer-skill"]
+    _delegate(backend_main, session_id, "child-skill", "peer-skill")
+    session.prepare_brief.verify_checklist["delegation_ok"] = True
+    session.prepare_brief.verify_evidence["delegation_ok"] = "confirmed"
+
+    response = client.post(
+        f"/api/sessions/{session_id}/children", json={"children": ["child-skill"]},
+    )
+    assert response.status_code == 200
+    assert [d.child_skill for d in session.prepare_brief.delegation] == ["child-skill"]
+    assert set(session.child_full_md) == {"child-skill"}
+    assert session.prepare_brief.verify_checklist["delegation_ok"] is False
+    assert "delegation_ok" not in session.prepare_brief.verify_evidence
+    backend_main.apply_tool_effect(session, "record_delegation", {
+        "delegation": [{"child_skill": "child-skill", "operations": ["read"]}],
+    })
+    assert session.children == ["child-skill"]
+
+    session.prepare_brief.verify_checklist["delegation_ok"] = True
+    session.prepare_brief.verify_evidence["delegation_ok"] = "still confirmed"
+    response = client.post(
+        f"/api/sessions/{session_id}/children", json={"children": ["child-skill"]},
+    )
+    assert response.status_code == 200
+    assert session.prepare_brief.verify_checklist["delegation_ok"] is True
+    assert session.prepare_brief.verify_evidence["delegation_ok"] == "still confirmed"
+
+    response = client.post(
+        f"/api/sessions/{session_id}/children", json={"children": []},
+    )
+    assert response.status_code == 200
+    assert session.children == []
+    assert session.prepare_brief.delegation == []
+    assert session.child_full_md == {}
+
+
 def test_routing_checkpoint_is_refused_before_children_are_declared(client, backend_main) -> None:
     session_id = client.post(
         "/api/sessions",

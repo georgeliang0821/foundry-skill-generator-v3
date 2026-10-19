@@ -2595,33 +2595,37 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         from backend.models import Delegation
         raw = args.get("delegation")
         if isinstance(raw, list):
-            parsed_delegation: list[Delegation] = []
+            by_child = {d.child_skill: d for d in session.prepare_brief.delegation}
             for item in raw:
                 if not isinstance(item, dict):
                     continue
                 child = safe_skill_name(str(item.get("child_skill", "")).strip())
                 if not child:
                     continue
-                payload = dict(item)
+                existing = by_child.get(child)
+                payload = existing.model_dump() if existing else {}
+                payload.update(item)
                 payload["child_skill"] = child
-                parsed_delegation.append(Delegation.model_validate(payload))
-            if session.prepare_brief.delegation != parsed_delegation:
-                session.prepare_brief.verify_checklist["delegation_ok"] = False
-                session.prepare_brief.verify_evidence.pop("delegation_ok", None)
-            session.prepare_brief.delegation = parsed_delegation
-            # children is the whitelist of every skill the flow may use, so it
-            # is the delegation set plus the dependencies the scenario merely
-            # calls. Omitting one costs the host that capability silently.
+                by_child[child] = Delegation.model_validate(payload)
+            parsed_delegation = list(by_child.values())
             dependencies = [
                 safe_skill_name(str(name).strip())
                 for name in (args.get("dependency_skills") or [])
                 if str(name).strip()
             ]
-            session.children = list(
+            # A per-child confirmation must not shrink the complete whitelist.
+            children = list(
                 dict.fromkeys(
-                    [d.child_skill for d in parsed_delegation] + [d for d in dependencies if d]
+                    list(session.children or [])
+                    + [d.child_skill for d in parsed_delegation]
+                    + [d for d in dependencies if d]
                 )
             )
+            if session.prepare_brief.delegation != parsed_delegation or session.children != children:
+                session.prepare_brief.verify_checklist["delegation_ok"] = False
+                session.prepare_brief.verify_evidence.pop("delegation_ok", None)
+            session.prepare_brief.delegation = parsed_delegation
+            session.children = children
             try:
                 _load_child_full_md(session)
             except Exception:  # noqa: BLE001 - the record itself must still land.
@@ -2901,6 +2905,13 @@ def refresh_session_children(
         ))
         for child in children:
             acl_mod.assert_can_access(upn, child)
+        delegation = [
+            d for d in session.prepare_brief.delegation if d.child_skill in children
+        ]
+        if session.children != children or session.prepare_brief.delegation != delegation:
+            session.prepare_brief.verify_checklist["delegation_ok"] = False
+            session.prepare_brief.verify_evidence.pop("delegation_ok", None)
+        session.prepare_brief.delegation = delegation
         session.children = children
     _load_child_full_md(session)
     if req is not None:
