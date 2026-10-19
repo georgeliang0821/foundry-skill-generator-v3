@@ -15,6 +15,15 @@ Scenario 的作者選擇保存在 session `orchestration_owner`，不是模型�
 及僅限 EAA 的 [19_scenario_eaa.md](../prompts/19_scenario_eaa.md)，在共用規範之後注入，
 最末仍是允許的階段轉移。既有 scenario 格式中的 Host 專用流程表與 fetch 規則不套用到 EAA。
 
+PREPARE 的 scenario addendum 要求對話主動揭露兩種 owner 與目前設定，不把預設 Host
+當成作者已同意。目標清楚後、確認 `input_sources` 與 owner 專屬分工之前，以單一問題卡
+說明差異、依需求／已知 child 契約給出有理由的建議，並提供保留、切換及協助判斷的選項；
+部署條件不明時須明說，不得虛構 Host 工作或宣稱 EAA 已可部署。既有對話尚未揭露時，
+下一回合補上；已有知情選擇且符合 session owner，或剛完成 UI 切換者，不重複詢問。
+這是 prompt 層的對話引導，不新增 checklist 欄位或後端閘門。對話選項只表達意圖；
+要切換時仍引導到 **Checklist → Orchestration owner → Apply owner**，在 session
+回報新 owner 前暫停該 owner 專屬確認，不可把聊天回答當成已切換或直接改 metadata。
+
 - **Host**：宿主執行前置工作、取得 child 契約、組裝參數並串接能力；保留現有指標及確認關卡。
 - **EAA**：內部 Agent 讀自然語言正文、透過內部 skill tools 取得契約並調派能力。
   PREPARE 不要求虛構 Host 工作，若 delegation 仍有 Host 專屬能力則阻擋進 DRAFT，

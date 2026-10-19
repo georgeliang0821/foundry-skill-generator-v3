@@ -259,7 +259,10 @@ modify 模式下的 Session 清單會依目前 Skill 篩選，沒看到對話時
 scenario 用來描述跨 Skill 的編排與交接；capability 負責可重複使用的獨立能力。不要為了把幾支 API 放一起就任意選 scenario。
 
 1. 選擇 **Mode = new**、**Kind = scenario**，再按 **New session**。
-2. 在 Checklist 的 **Orchestration owner** 選擇 **Host Agent (default)** 或 **EAA internal Agent**，按 **Apply owner**。只有 scenario 有此選項；開啟既有技能會保留原 owner，未宣告仍是 Host。
+2. 對話會主動說明 **Host Agent** 與 **EAA internal Agent** 的差異及目前設定；目標清楚後，會在確認能力分工前依需求提出有理由的建議，讓你保留、切換或請它協助判斷。預設 Host 不代表你已同意採用。
+   - **Host**：宿主讀取子 Skill 契約、組裝輸入並串接執行，適合需要宿主專屬工具或由宿主掌控編排的流程。
+   - **EAA**：內部 Agent 讀契約並調派子 Skill，宿主轉達問題與結果；適合由既有可執行子 Skill 完成工作，且已具備 Mode B／互動 OBO 的環境。不確定部署條件時，可先釐清，不會只因預設值就建議 Host。
+   - 若要切換，在 Checklist 的 **Orchestration owner** 選擇所需模式，再按 **Apply owner**，完成後回到對話繼續。**只在對話回答「改用 EAA」不會更改設定**。只有 scenario 有此選項；開啟既有技能會保留原 owner，未宣告仍是 Host；已確認的選擇不會每回合重問。
 3. 在 **Dependency whitelist (metadata.children)** 選擇流程可能使用的所有子 Skill；需要多個時用 **+ Add skill**。
 4. 點選 **Save children**，等待儲存完成；**先宣告依賴，再進行路由與鄰近 Skill 比較**。
 5. 提供流程需求並逐項確認。Host 模式確認宿主前置工作、契約指標與能力交接；EAA 模式確認內部 Agent 如何讀契約、調派能力、補問、取得同意與處理不明結果，不需要 Host 逐一串接 children。

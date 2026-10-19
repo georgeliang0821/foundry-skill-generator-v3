@@ -7,6 +7,58 @@ with the stage prompt, this addendum wins.
 The Host-specific details below apply to `host`. For `eaa`, use the registered
 owner addendum: confirm internal capability delegation without Host-only tasks.
 
+## Proactive owner choice before dependency review
+
+Do not let the Checklist selector be the author's only discovery of this choice.
+On the first PREPARE reply, briefly disclose both owners and the current Runtime
+State owner in the user's language. The default `host` is not evidence of author consent.
+If the goal is not clear yet, ask only about the goal first; once it is clear,
+resolve the owner choice BEFORE block 1(b), child-contract review or Host-specific
+questions. For a conversation already in progress without this disclosure,
+introduce the choice at the next reply instead of continuing to assume Host.
+
+Explain the practical difference without requiring the author to know metadata:
+
+- Host Agent -- the Host reads child contracts, assembles inputs, chains children
+  and performs any work requiring its own tools.
+- EAA internal Agent -- EAA reads child contracts and dispatches the declared
+  executable children. The Host invokes the scenario and relays questions/results;
+  it does not chain individual children. Real execution requires Mode B and
+  interactive delegated/OBO identity; app-only Routine and static fallback are
+  unsupported. Generator route-only tests do not verify real child execution.
+
+State a recommendation and its concrete reason from the goal, supplied materials
+and known child contracts, not from the default setting. Recommend Host when the
+flow needs Host-only tools or Host-controlled orchestration. Recommend EAA when
+the work belongs to existing executable children and internal orchestration is
+desired, conditional on its deployment prerequisites. If these facts are unknown,
+say what is unknown and offer to clarify; do not invent Host-only work or claim
+EAA is deployable. A recommendation is not an owner change or author confirmation.
+
+Use one `ask_user_input` card labelled `definition_clear -- Orchestration owner
+(before input_sources)` with a brief comparison, current owner, recommendation
+and reason in its question. Offer both owners and a clarification option:
+for Host, "Keep Host", "Switch to EAA", "Help me decide"; for EAA, "Keep EAA",
+"Switch to Host", "Help me decide". Translate the labels into the user's language
+and mark the recommendation only when justified. Do not bundle dependency
+confirmation into this question or mark `definition_clear` complete from it.
+
+A chat answer expresses intent; it does not change the session owner.
+If the requested owner differs from Runtime State, pause owner-specific review
+and direct the author to Checklist > Orchestration owner, select the requested
+owner, click Apply owner, then send a message to continue. If a draft or existing
+skill is involved, explain the restart confirmation, PREPARE reconfirmation and
+regeneration; the stored skill is unchanged until a successful save.
+Never claim a chat choice applied the change, edit metadata to simulate it,
+or continue Host questions while the author is trying to select EAA:
+wait until Runtime State reports the requested owner.
+If the author keeps the current owner, continue the ordinary PREPARE flow.
+Do not repeat an already answered owner question when the conversation records
+an informed choice matching Runtime State. Preserve imported/existing owners;
+do not force a switch or re-ask immediately after a confirmed UI owner change.
+Revisit the choice only when requested or newly discovered constraints conflict.
+This is conversational guidance, not a new checklist item or an execution gate.
+
 ## Override for block 1(b): `input_sources`
 
 For a scenario skill, `input_sources` does NOT mean "data sources the skill

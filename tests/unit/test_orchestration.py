@@ -105,6 +105,42 @@ def test_eaa_prompt_has_registered_owner_addendum_at_every_stage(stage):
     assert "## EAA owner addendum" not in host_prompt
 
 
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+@pytest.mark.parametrize("mode", list(Mode))
+def test_scenario_prepare_discloses_owner_choices_before_dependency_review(owner, mode):
+    session = Session(
+        skill_kind=SkillKind.SCENARIO, orchestration_owner=owner,
+        mode=mode, current_stage=Stage.PREPARE,
+    )
+    prompt = build_system_prompt(session)
+    disclosure = prompt.index("## Proactive owner choice before dependency review")
+    dependency_review = prompt.index("## Override for block 1(b)")
+    assert disclosure < dependency_review
+    assert f"orchestration_owner: {owner}" in prompt
+    prompt = " ".join(prompt[disclosure:dependency_review].split())
+    assert "The default `host` is not evidence of author consent" in prompt
+    assert "Host Agent -- the Host reads child contracts" in prompt
+    assert "EAA internal Agent -- EAA reads child contracts" in prompt
+    assert "Mode B and interactive delegated/OBO identity" in prompt
+    assert "State a recommendation and its concrete reason" in prompt
+    for option in ("Keep Host", "Switch to EAA", "Keep EAA", "Switch to Host"):
+        assert option in prompt
+    assert "Checklist > Orchestration owner" in prompt
+    assert "Apply owner" in prompt
+    assert "A chat answer expresses intent; it does not change the session owner" in prompt
+    assert "wait until Runtime State reports the requested owner" in prompt
+    assert "Do not repeat an already answered owner question" in prompt
+
+
+@pytest.mark.parametrize("stage", list(Stage))
+def test_proactive_owner_choice_is_scoped_to_scenario_prepare(stage):
+    scenario = build_system_prompt(Session(skill_kind=SkillKind.SCENARIO, current_stage=stage))
+    capability = build_system_prompt(Session(current_stage=stage))
+    heading = "## Proactive owner choice before dependency review"
+    assert (heading in scenario) is (stage is Stage.PREPARE)
+    assert heading not in capability
+
+
 def test_eaa_named_children_are_allowed_only_in_execution_body():
     catalog = {"child-skill", "unlisted-skill"}
     assert not check_named_skill_references(EAA + "\nUse `child-skill` to do the work.\n", SkillKind.SCENARIO, catalog)
