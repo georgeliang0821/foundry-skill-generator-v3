@@ -259,22 +259,32 @@ modify 模式下的 Session 清單會依目前 Skill 篩選，沒看到對話時
 scenario 用來描述跨 Skill 的編排與交接；capability 負責可重複使用的獨立能力。不要為了把幾支 API 放一起就任意選 scenario。
 
 1. 選擇 **Mode = new**、**Kind = scenario**，再按 **New session**。
-2. 在 Checklist 的 **Dependency whitelist (metadata.children)** 選擇流程可能使用的所有子 Skill；需要多個時用 **+ Add skill**。
-3. 點選 **Save children**，等待儲存完成；**先宣告依賴，再進行路由與鄰近 Skill 比較**。
-4. 提供流程需求，與 Agent 確認每個步驟由宿主處理，還是交給子 Skill；檢查輸入資料欄位、操作、章節指標與需要補資料時的握手方式。
-5. 審閱草稿並查看 **Topology**，處理未通過項目後再儲存與測試。
+2. 在 Checklist 的 **Orchestration owner** 選擇 **Host Agent (default)** 或 **EAA internal Agent**，按 **Apply owner**。只有 scenario 有此選項；開啟既有技能會保留原 owner，未宣告仍是 Host。
+3. 在 **Dependency whitelist (metadata.children)** 選擇流程可能使用的所有子 Skill；需要多個時用 **+ Add skill**。
+4. 點選 **Save children**，等待儲存完成；**先宣告依賴，再進行路由與鄰近 Skill 比較**。
+5. 提供流程需求並逐項確認。Host 模式確認宿主前置工作、契約指標與能力交接；EAA 模式確認內部 Agent 如何讀契約、調派能力、補問、取得同意與處理不明結果，不需要 Host 逐一串接 children。
+6. 審閱草稿並查看 **Topology**，處理未通過項目後再儲存與測試。兩種模式都用技能正文描述流程，不產生固定流程設定檔。
+
+**切換已有技能的 owner**：在 MODIFY 開啟 scenario 後改選 owner 並按 Apply owner，
+必須確認清除草稿、待接受 patch、失效測試與確認，回到 PREPARE 重新確認並生成。
+取消就維持原狀；確認也只改本地 session，遠端直到新稿被接受且成功儲存才改變。
+原正文會暫留為唯讀業務規則來源；不可在編輯器直接改 owner 來略過這個流程。
+新建對話若已有草稿，也採同樣保護。
+
+EAA 模式的真實執行需要 Mode B／互動 OBO，不支援 app-only Routine 或靜態 fallback；
+部署驗收見 [EAA MCP 設定](02-setup.md#26-eaa-mcp)。
 
 ![scenario 先選擇子 Skill，並以 Save children 儲存依賴白名單](images/generator/17-scenario-delegation.png)
 
-**白名單不只列委派 payload 的 Skill，也要列流程會呼叫的其他 Skill。** 漏列可能讓宿主無法使用該能力；不要期待 Router 清單自動補齊所有依賴。子 Skill 也不是路由競爭者，不要為了「避免重疊」把必要子 Skill 排除。
+**白名單不是執行順序；不只列委派 payload 的 Skill，也要列必要的直接依賴。** 漏列會讓所選執行者無法使用該能力；不要期待 Router 清單自動補齊所有依賴。子 Skill 也不是路由競爭者，不要為了「避免重疊」把必要子 Skill 排除。EAA 的 children 限可執行 inline／script，不支援巢狀 scenario。
 
 scenario 路由測試會呈現分層結果：
 
 | 層次 | 主要檢查 | 不代表 |
 | --- | --- | --- |
 | **L1** | 靜態拓樸與宣告結構 | 外部系統已執行成功。 |
-| **L2** | 父 scenario 是否被錯誤載入為 capability | 每個業務分支都已執行。 |
-| **L3** | 路由紀錄中的子 Skill 可達性 | 逐一完成子 Skill 的真實業務操作。 |
+| **L2** | Host：parent 不應出現在 capability 路由紀錄；EAA：parent 應被解析並出現在紀錄 | 每個業務分支都已執行。 |
+| **L3** | Host：路由紀錄中的子 Skill 可達性；EAA：顯示未驗證 child 執行 | 逐一完成子 Skill 的真實業務操作。 |
 
 逐項查看結果中的未驗證說明，不要把分層通過當成完整端對端業務驗收。scenario 不支援 script 形式或附帶資產。
 

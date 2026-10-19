@@ -73,6 +73,25 @@ flowchart LR
 
 ## 2. 資料流
 
+### Scenario 編排負責者
+
+`metadata.orchestration_owner` 只用於 scenario，接受 `host`／`eaa`；省略維持 Host。
+[orchestration.py](../backend/orchestration.py) 提供共用 owner 契約，
+[models.py](../backend/models.py) 保存 session 選擇，
+[topology.py](../backend/topology.py) 以 T12 驗證欄位位置、舊流程欄位禁用、
+EAA 非空正文與可執行的 children。Generator 仍只產出 scenario-orchestration／inline／script。
+
+`POST /api/sessions/{id}/orchestration-owner` 只更新該使用者的 scenario session。
+已有正文時須 `confirm_restart: true`，清除草稿、待接受工具／patch、失效測試及確認，
+退回 PREPARE；舊正文暫存為唯讀重新生成來源，不在清稿時覆寫 Blob／SQL。
+`owner_regeneration_pending` 防止遠端 hydration 補回舊稿，也阻擋測試舊遠端版本；
+remote 綁定與版本 hash 保留。新正文通過共用存檔檢核後才完成切換。
+一般編輯、patch 與 undo 不得繞過 owner selector 直接改編排負責者。
+
+Host 路由測試仍檢查 parent 不出現在 capability 候選及 child 可達性。
+EAA 的 route-only 只檢查 parent 已解析，L3 明確為未驗證，不推論 children 已執行。
+真正套件仍送原 MCP lint 介面，不增加額外相容性探測呼叫。
+
 ### 2.1 一次對話回合的資料流
 
 ```mermaid

@@ -73,6 +73,11 @@ KIND_FORMAT_SPEC: dict[SkillKind, str] = {
     SkillKind.SCENARIO: "10_format_spec_scenario.md",
 }
 
+SCENARIO_OWNER_ADDENDA = {
+    "host": ("18_scenario_ownership.md",),
+    "eaa": ("18_scenario_ownership.md", "19_scenario_eaa.md"),
+}
+
 # Appended to the stage prompt by skill FORM, which is orthogonal to SkillKind (see _form_prompt_key).
 # "script_candidate" = a NEW capability skill whose form is not locked yet, with a code material and the flags on.
 FORM_STAGE_ADDENDA: dict[str, dict[Stage, tuple[str, ...]]] = {
@@ -161,42 +166,6 @@ structurally incompatible with the requested change.
 """
 
 
-SCENARIO_KIND_ADDENDUM = """\
-## Scenario Skill Addendum
-
-This session authors a SCENARIO (orchestration) skill, not a capability skill.
-
-- It is never executed by the backend. It tells the HOST agent what to do with
-  its own capabilities, what to delegate, and how to react to each returned
-  branch.
-- It declares `metadata.children` (a non-empty YAML list) and
-  `metadata.skill_type: scenario-orchestration`. Those two imply each other and
-  must never be removed or reshaped by a patch.
-- `metadata.children` is a WHITELIST of every skill this scenario's flow uses,
-  not just the ones it delegates a payload to. A skill left out never becomes
-  available to the host and there is NO error message, so when in doubt, list
-  it. Skills named as routing alternatives ("not applicable -> use X") are not
-  part of the flow and do not belong there.
-- It does NOT restate a child's field contract. Field names, types, required
-  flags, code lookup tables and payload structure stay in the child's body and
-  are reached with `fetch_skill(skill_name=..., sections="A, B")`. A copy drifts
-  in one direction only. What stays here is what only the host can do: reading
-  images, designing question rounds, judging output format, branching on the
-  result, and continuing a multi-turn exchange.
-- The body must state that these skills are absent from the host's
-  `list_skills` catalog and that being absent does not forbid fetching their
-  body -- and that their names may appear only as `fetch_skill` arguments.
-- It has NO variables of its own: no `## Environment Variables`, no
-  `## OBO Token Scopes`, no `## API Reference / Sample Code`. Those belong to
-  the child capability skill. `record_variables` is rejected in this session.
-- The third PREPARE checkpoint is `delegation_ok`, recorded with
-  `record_delegation`, not `variables_ok`.
-- Edit a child with `propose_child_edit`, never by drafting the child here.
-  Renaming one of a child's `##` headings is a breaking change: every parent
-  pointing at that name must be updated in the same turn.
-"""
-
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -279,9 +248,17 @@ def check_quality_gates(session: Session) -> list[str]:
     if kind is SkillKind.SCENARIO:
         # A scenario skill reads nothing itself; what stands in for input
         # sources is what the HOST must do because the child cannot.
-        if not any(d.host_capabilities for d in brief.delegation):
+        if session.orchestration_owner == "host" and not any(d.host_capabilities for d in brief.delegation):
             missing.append("delegation.host_capabilities")
+        if session.orchestration_owner == "eaa" and any(d.host_capabilities for d in brief.delegation):
+            missing.append("delegation.host_capabilities_not_available_to_eaa")
         _check_scenario_children(session, missing)
+        if session.orchestration_owner == "eaa":
+            for child in session.children:
+                _, frontmatter = parse_frontmatter_block(session.child_full_md.get(child, ""))
+                metadata = frontmatter.get("metadata", {}) if frontmatter else {}
+                if isinstance(metadata, dict) and metadata.get("skill_type") not in (None, "inline", "code-generation", "script"):
+                    missing.append(f"children.not_executable:{child}")
     elif len(brief.understanding.input_sources) < 1:
         missing.append("understanding.input_sources")
     if len(brief.understanding.key_capabilities) < 1:
@@ -641,7 +618,7 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
     if target == Stage.PREPARE and current in {Stage.DRAFT, Stage.REFINE, Stage.TEST, Stage.DONE}:
         # Coming back to PREPARE: clear the draft but keep the brief & materials.
         # A modify session's SKILL.md is the stored skill, not a discardable draft.
-        if Mode(session.mode) is not Mode.MODIFY:
+        if Mode(session.mode) is not Mode.MODIFY or session.owner_regeneration_pending:
             session.current_skill.skill_md = ""
             session.current_skill.version_hash = ""
         session.prepare_brief.revisit = True
@@ -1207,6 +1184,9 @@ def _format_remote_skill_state(session: Session) -> str:
     if not remote_name:
         binding = "NEW"
         status = "not saved to Blob"
+    elif session.owner_regeneration_pending:
+        binding = remote_name
+        status = "UNSAVED owner change; replacement draft required"
     elif remote_version and local_version and remote_version != local_version:
         binding = remote_name
         status = "UNSAVED local changes exist"
@@ -1433,17 +1413,6 @@ def _format_child_skills(session: Session) -> str | None:
         return None
     lines = [
         "## Child Skills (full SKILL.md)",
-        "",
-        "These are the COMPLETE current SKILL.md files of the capability skills "
-        "this scenario skill delegates to. Read them to write CORRECT POINTERS "
-        "and correct return branches -- the exact `##` heading names to fetch, "
-        "every `[NEEDS_INFO] missing=` code, and every business error key. Do "
-        "NOT copy their field tables or payload examples into the scenario "
-        "body; point at the section instead. When you call propose_child_edit, "
-        "copy the unchanged CONTEXT lines of your V4A patch VERBATIM from "
-        "between the markers below. The text is NOT fenced (these files contain "
-        "their own code blocks), so everything between <<<BEGIN ...>>> and "
-        "<<<END ...>>> is the literal file content.",
     ]
     for name, md in full.items():
         lines.append("")
@@ -1466,13 +1435,6 @@ def _format_child_sections(session: Session) -> str | None:
         return None
     lines = [
         "## Dependency Skills (## section index)",
-        "",
-        "Every skill declared in `metadata.children`, with the `##` headings it "
-        "publishes. These names are the ONLY values accepted in "
-        "`fetch_skill(sections=\"...\")`; `sections` is a comma-separated STRING, "
-        "not a list. Decorative emoji and punctuation may be omitted, but no "
-        "word may be invented. Fetch each skill once and name every section you "
-        "need in that single call.",
     ]
     for name, titles in index.items():
         rendered = "、".join(f"`{t}`" for t in titles) or "(no `##` sections)"
@@ -1589,6 +1551,7 @@ def build_system_prompt(session: Session) -> str:
         parts.append(load_prompt(ASSET_STAGE_ADDENDA[stage]))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
     if kind is SkillKind.SCENARIO:
+        runtime_state += f"\norchestration_owner: {session.orchestration_owner}\nowner_regeneration_pending: {str(session.owner_regeneration_pending).lower()}"
         declared = [str(c).strip() for c in (getattr(session, "children", None) or []) if str(c).strip()]
         runtime_state += "\nchildren: " + (
             ", ".join(declared)
@@ -1615,8 +1578,6 @@ def build_system_prompt(session: Session) -> str:
             parts.append("## Pending Patch Actions\n\n" + json.dumps(pending_patches, ensure_ascii=False))
     if stage == Stage.DONE:
         parts.append(DONE_REENTRY_GUIDANCE)
-    if kind is SkillKind.SCENARIO:
-        parts.append(SCENARIO_KIND_ADDENDUM)
     if mode == Mode.IMPORT:
         parts.append(IMPORT_MODE_ADDENDUM)
     if mode == Mode.MODIFY:
@@ -1677,11 +1638,16 @@ def build_system_prompt(session: Session) -> str:
             f"version_hash: {session.current_skill.version_hash}\n\n"
             f"```markdown\n{session.current_skill.skill_md}\n```"
         )
+    if session.owner_regeneration_pending and session.owner_source_skill_md:
+        parts.append("## Previous Scenario (read-only)\n\n" + session.owner_source_skill_md)
     bundled_script = _format_bundled_script(session)
     if bundled_script:
         parts.append(bundled_script)
     # Keep transition guidance last so the Agent ends the system message with
     # the exact outgoing edges it may choose from for this stage.
     parts.append(load_prompt("12_input_sources.md"))
+    if kind is SkillKind.SCENARIO:
+        for filename in SCENARIO_OWNER_ADDENDA[session.orchestration_owner]:
+            parts.append(load_prompt(filename))
     parts.append(_format_allowed_exits(stage))
     return "\n\n".join(p for p in parts if p.strip())

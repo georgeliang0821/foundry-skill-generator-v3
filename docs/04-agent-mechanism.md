@@ -7,6 +7,30 @@
 
 ## 0. 狀態機總覽
 
+### Scenario 的 Host／EAA owner
+
+Scenario 的作者選擇保存在 session `orchestration_owner`，不是模型自行推斷的執行模式。
+只有 scenario 會把 owner 寫入產物；既有未宣告 owner 的 Host 技能保留省略形式。
+`SCENARIO_OWNER_ADDENDA` 註冊 [18_scenario_ownership.md](../prompts/18_scenario_ownership.md)
+及僅限 EAA 的 [19_scenario_eaa.md](../prompts/19_scenario_eaa.md)，在共用規範之後注入，
+最末仍是允許的階段轉移。既有 scenario 格式中的 Host 專用流程表與 fetch 規則不套用到 EAA。
+
+- **Host**：宿主執行前置工作、取得 child 契約、組裝參數並串接能力；保留現有指標及確認關卡。
+- **EAA**：內部 Agent 讀自然語言正文、透過內部 skill tools 取得契約並調派能力。
+  PREPARE 不要求虛構 Host 工作，若 delegation 仍有 Host 專屬能力則阻擋進 DRAFT，
+  請作者調整範圍或切換 owner。不得假設公開 MCP `fetch_skill` 是內部工具。
+- `children` 是完整能力白名單，不是執行順序；EAA child 限可執行 inline／script，
+  仍檢查既有技能可讀性與禁止巢狀 scenario。
+- 正文保留補問、`needs_input`、明確同意後繼續、拒絕即停、模糊再問與不明結果先查核；
+  這些是 Agent 行為要求，不是固定流程引擎、程式強制閘門或 exactly-once 保證。
+- 不產生 `metadata.orchestration`、`orchestration_ref` 或專用流程檔案。
+  N1 僅對 EAA 正文中的已宣告 child 執行指令放行具名引用，description／路由替代不放行。
+- 已有正文時切 owner 需明確 UI 確認與重新生成；唯讀 Previous Scenario 提供業務規則來源，
+  不能被當成待還原的原稿。成功存檔前遠端不變；一般 MODIFY 不切 owner 的行為不變。
+
+測試的 L1 共用靜態檢核；Host 的 L2／L3 保持原邏輯，EAA L2 改檢查 parent 解析，
+L3 child 執行顯示未驗證。綠燈不代表發布同意、真實產物、使用者授權或多輪執行已驗收。
+
 本系統的 Agent 採用 **單一協調器 (Orchestrator)** 架構，維護一個具備 **五個核心階段** 的有限狀態機 (PREPARE → DRAFT → REFINE → TEST → DONE)。
 Agent 每一回合僅吐出單一 JSON 結構，其中包裹對話文字與一組 **工具呼叫 (Tool Calls)**，藉此更新 session 資料、驅動前端 UI 並推動階段轉移。
 

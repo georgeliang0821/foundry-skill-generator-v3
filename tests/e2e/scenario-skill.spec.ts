@@ -31,7 +31,7 @@ test("creates, validates, saves, and tests a scenario skill", async ({ page, req
   await expect(page.getByTestId("file-editor")).toHaveValue(/children:\s+\- hr-leave-system/);
 
   await openTab(page, "topology");
-  await expect(page.getByTestId("topology-results").locator("[data-topology-rule]")).toHaveCount(19);
+  await expect(page.getByTestId("topology-results").locator("[data-topology-rule]")).toHaveCount(21);
   await expect(page.getByTestId("topology-results").locator(".topology-rule.failed")).toHaveCount(0);
 
   await openTab(page, "files");
@@ -60,6 +60,76 @@ test("creates, validates, saves, and tests a scenario skill", async ({ page, req
   expect(session.test_runs).toHaveLength(1);
   expect(session.test_runs[0].scenario_layers.map((layer: { layer: string }) => layer.layer)).toEqual(["L1", "L2", "L3"]);
   expect(session.test_runs[0].scenario_layers.every((layer: { passed: boolean }) => layer.passed)).toBe(true);
+});
+
+test("owner controls are scenario-only and EAA resolution does not claim execution", async ({ page, request }) => {
+  await openApp(page);
+  await openTab(page, "checklist");
+  await expect(page.getByTestId("scenario-owner-panel")).toHaveCount(0);
+  await page.getByTestId("skill-kind-select").selectOption("scenario");
+  await page.getByTestId("new-session-button").click();
+  await openTab(page, "checklist");
+  await expect(page.getByTestId("scenario-owner-select")).toHaveValue("host");
+  await page.getByTestId("scenario-owner-select").selectOption("eaa");
+  await page.getByTestId("save-owner-button").click();
+  await expect(page.getByTestId("scenario-owner-panel")).toContainText("Mode B");
+  await sendChat(page, "Create an EAA leave scenario.");
+  await openTab(page, "files");
+  await expect(page.getByTestId("file-editor")).toHaveValue(/orchestration_owner: eaa/);
+  await expect(page.getByTestId("file-editor")).not.toHaveValue(/fetch_skill\(/);
+  await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-leave-workflow");
+  const sid = await currentSessionId(page);
+  await page.reload();
+  await page.getByRole("combobox", { name: "Session", exact: true }).selectOption(sid);
+  await openTab(page, "checklist");
+  await expect(page.getByTestId("scenario-owner-select")).toHaveValue("eaa");
+  await openTab(page, "tests");
+  await page.getByTestId("run-tests-button").click();
+  await expect(page.getByTestId("test-results")).toContainText("EAA scenario resolution");
+  await expect(page.getByTestId("test-results")).toContainText("Child execution (not verified)");
+  const session = await readSession(request, sid);
+  expect(session.test_runs[0].scenario_layers[2].passed).toBeNull();
+});
+
+test("owner conversion confirms before clearing a stored scenario draft", async ({ page, request }) => {
+  await seedSkill(request, "e2e-leave-workflow", "scenario");
+  const created = await request.post("/api/sessions", {
+    data: { mode: "modify", target_skill_id: "e2e-leave-workflow", start_stage: "refine" },
+  });
+  expect(created.ok()).toBeTruthy();
+  const sid = (await created.json()).id;
+  await openApp(page);
+  await page.getByRole("combobox", { name: "Session", exact: true }).selectOption(sid);
+  await openTab(page, "checklist");
+  await page.getByTestId("scenario-owner-select").selectOption("eaa");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByTestId("save-owner-button").click();
+  await expect(page.getByTestId("scenario-owner-select")).toHaveValue("host");
+  expect((await readSession(request, sid)).current_skill.skill_md).not.toBe("");
+  await page.getByTestId("scenario-owner-select").selectOption("eaa");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByTestId("save-owner-button").click();
+  await expect(page.getByTestId("scenario-owner-panel")).toContainText("Reconfirm PREPARE");
+  await expect(page.getByTestId("skill-binding-status")).toContainText("unsaved changes");
+  let session = await readSession(request, sid);
+  expect(session.current_stage).toBe("prepare");
+  expect(session.current_skill.skill_md).toBe("");
+  expect(session.remote_skill_id).toBe("e2e-leave-workflow");
+  await page.reload();
+  await page.getByRole("combobox", { name: "Session", exact: true }).selectOption(sid);
+  await openTab(page, "checklist");
+  await expect(page.getByTestId("scenario-owner-select")).toHaveValue("eaa");
+  await expect(page.getByTestId("skill-binding-status")).toContainText("unsaved changes");
+  await sendChat(page, "Reconfirm and generate the EAA version.");
+  await openTab(page, "files");
+  await expect(page.getByTestId("file-editor")).toHaveValue(/orchestration_owner: eaa/);
+  const accepted = page.waitForResponse((response) => response.url().endsWith("/tool-result") && response.request().method() === "POST");
+  await page.getByTestId("accept-draft-button").click();
+  expect((await accepted).ok()).toBeTruthy();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-leave-workflow");
+  session = await readSession(request, sid);
+  expect(session.owner_regeneration_pending).toBe(false);
 });
 
 test("runtime input sources persist without changing authentication fields", async ({ page, request }) => {

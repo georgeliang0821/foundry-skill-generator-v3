@@ -37,6 +37,7 @@ import {
   undoSessionPatch,
   updateChecklistItem,
   updateSessionChildren,
+  updateOrchestrationOwner,
   updateSamples,
   updateNeighbors,
   openNeighborEdit,
@@ -982,8 +983,8 @@ function skillBindingState() {
   const localVersion = session?.current_skill?.version_hash || "";
   const hasFiles = Boolean(session?.current_skill?.skill_md?.trim());
   const hasRemote = Boolean(remoteName);
-  const unsaved = Boolean(hasRemote && (localEditorDirty || (remoteVersion && localVersion && remoteVersion !== localVersion)));
-  const unknown = Boolean(hasRemote && !remoteVersion);
+  const unsaved = Boolean(hasRemote && (session?.owner_regeneration_pending || localEditorDirty || (remoteVersion && localVersion && remoteVersion !== localVersion)));
+  const unknown = Boolean(hasRemote && !remoteVersion && !session?.owner_regeneration_pending);
   return {
     remoteName,
     remoteVersion,
@@ -2620,7 +2621,7 @@ function renderDelegationPanel() {
           : "";
         return `<div><dt><code>${escapeHtml(item.child_skill || "(unnamed)")}</code></dt><dd>${escapeHtml(key)}${pointer}${ops}</dd></div>`;
       }).join("")}</dl>`
-    : `<p class="spl-hint">The agent records child input data field names, section pointers, host capabilities, and handshakes after children are selected.</p>`;
+    : `<p class="spl-hint">The agent records child contracts, operations, and handshakes${session.orchestration_owner === "eaa" ? " for the EAA internal Agent" : ", including Host-only capabilities"} after children are selected.</p>`;
   const delegated = new Set(delegation.map((item) => item.child_skill).filter(Boolean));
   const plain = children.filter((child) => child && !delegated.has(child));
   const internalNote = delegation.length
@@ -2656,6 +2657,46 @@ async function saveBriefChildren() {
   } catch (err) {
     if (status) status.textContent = "Save failed";
     appendConversationStatus(`Could not save children: ${err.message}`, { failed: true });
+  }
+}
+
+function renderOrchestrationOwner() {
+  if (session?.skill_kind !== "scenario") return "";
+  const owner = session.orchestration_owner || "host";
+  return `<div class="check-item" data-testid="scenario-owner-panel">
+    <label for="scenarioOwner"><strong>Orchestration owner</strong></label>
+    <select id="scenarioOwner" data-testid="scenario-owner-select">
+      <option value="host"${owner === "host" ? " selected" : ""}>Host Agent (default)</option>
+      <option value="eaa"${owner === "eaa" ? " selected" : ""}>EAA internal Agent</option>
+    </select>
+    <button type="button" class="icon-button" data-owner-save data-testid="save-owner-button">Apply owner</button>
+    <p class="spl-hint">${owner === "eaa"
+      ? "EAA reads the instructions and dispatches declared capabilities. Requires Mode B and interactive delegated/OBO identity; app-only Routine and static fallback are unsupported."
+      : "Host reads the instructions, performs Host-only pre-work and chains child capabilities."}</p>
+    ${session.owner_regeneration_pending ? `<p class="spl-hint" role="status">Owner changed. Reconfirm PREPARE, regenerate and save. The stored skill is unchanged.</p>` : ""}
+  </div>`;
+}
+
+async function saveOrchestrationOwner() {
+  if (session?.skill_kind !== "scenario") return;
+  const picker = document.querySelector("#scenarioOwner");
+  const owner = picker?.value;
+  if (!owner || owner === session.orchestration_owner) return;
+  const hasDraft = !!session.current_skill?.skill_md?.trim()
+    || !!(session.remote_skill_id && !session.owner_regeneration_pending);
+  if (hasDraft && !window.confirm("Changing the orchestration owner clears the draft, pending patches, tests and confirmations, and returns to PREPARE for regeneration. The stored skill is unchanged until you accept and save the new draft. Continue?")) {
+    picker.value = session.orchestration_owner;
+    return;
+  }
+  try {
+    session = await updateOrchestrationOwner(session.id, owner, hasDraft);
+    topologyData = null;
+    lastGateMissing = [];
+    persistSessionState();
+    renderSession();
+  } catch (err) {
+    picker.value = session.orchestration_owner;
+    appendConversationStatus(`Could not change orchestration owner: ${err.message}`, { failed: true });
   }
 }
 
@@ -2983,12 +3024,12 @@ function renderPrepareChecklist() {
           ${childrenMissing ? `<span class="check-status pending">${svgIcon("i-warning")} Required first</span>` : ""}
         </summary>
         <div class="check-body">
-          <p class="spl-hint">Every skill this scenario's flow uses, not just the ones it delegates a payload to. The host treats this as a whitelist: a skill left out is simply never available, with no error message -- when in doubt, list it. Declare them before the routing step, since a declared skill is excluded from the neighbor comparison instead of competing with this one.</p>
+          <p class="spl-hint">Every capability this scenario uses, including necessary direct dependencies. This is a whitelist, not execution order: an omitted capability is unavailable. Declare them before the routing step so they are excluded from the neighbor comparison.</p>
           ${renderDelegationPanel()}
         </div>
       </details>`
     : "";
-  el("checklist").innerHTML = childrenBlock + keys.map((key) => {
+  el("checklist").innerHTML = renderOrchestrationOwner() + childrenBlock + keys.map((key) => {
     const isConfirmed = checks[key] === true;
     const label = PREPARE_CHECKPOINT_LABELS[key];
     const evidence = prepareCheckpointEvidence(key);
@@ -4341,7 +4382,7 @@ function renderScenarioLayers(run) {
         ? `<p class="test-layer-diagnosis">${escapeHtml(String(layer.diagnosis))}</p>`
         : "";
       const results = (Array.isArray(layer.results) ? layer.results : [])
-        .map((r, index) => renderSampleResult(r, index, layer.layer === "L2" ? "negative" : "positive"))
+        .map((r, index) => renderSampleResult(r, index, layer.layer === "L2" && layer.title !== "EAA scenario resolution" ? "negative" : "positive"))
         .join("");
       return `<details class="sample-result sample-${state}" ${layer.passed === false ? "open" : ""}>
         <summary>
@@ -6620,6 +6661,10 @@ document.addEventListener("click", async (event) => {
   }
   if (event.target.closest("[data-delegation-save]")) {
     await saveBriefChildren();
+    return;
+  }
+  if (event.target.closest("[data-owner-save]")) {
+    await saveOrchestrationOwner();
     return;
   }
   if (event.target.closest("[data-nb-save]")) {

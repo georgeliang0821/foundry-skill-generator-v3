@@ -142,6 +142,19 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 3. 若 EAA 驗證的是另一支 app，將那支 app 的 audience 填入 `MCP_OAUTH_AUDIENCE`。
 4. 確認 `lint_skill_package` 回報 `ruleset_version >= 1.2`，具備 skill 類型與套件一致性檢查。低於此版號或無法辨識版號時，所有類型的儲存都會回 HTTP 503；可識別為無效的套件仍回 HTTP 400。
 
+**EAA owner 的部署驗收**：啟用 EAA scenario 前，管理員須確認目標環境可接受只有
+`metadata.orchestration_owner: eaa`、非空 `children` 與自然語言正文的實際技能，
+不要求舊版流程設定。新版 lint 回應可包含 `skill_type_contract_version`、
+`generator_skill_types` 與 `orchestration_owners`；不再依賴 `scenario_contract_version`。
+版本或 owner 清單相同不保證實際契約相同。Generator 不會在每次存檔額外送一份測試技能，
+只送真正要儲存的套件；`completed` 不代表有效，仍須 `valid: true` 且沒有 errors。
+
+EAA 編排的**真實執行**另需 Mode B 與互動 delegated/OBO；MCP 靜態 lint 的 app-only
+身分不能當成已具備執行資格。App-only Routine、靜態 fallback 均不支援 EAA 編排，
+不得改以 MI 冒充使用者或同意。部署前還須驗收 children 已部署、使用者可讀、
+同一 `session_id`／`scenario` 的 `needs_input` 接續、同意／拒絕／模糊回答，以及發布
+結果不明時的遠端查核。Generator 的 route-only 不會執行這些業務動作。
+
 > audience 不符時，儲存會因 lint 取不到判定而回 HTTP 503，路由測試則回 HTTP 502。lint 的完整行為見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)，呼叫身分的細節見 [03-architecture.md](03-architecture.md#24-呼叫-eaa-mcp-的身分)。
 
 ---

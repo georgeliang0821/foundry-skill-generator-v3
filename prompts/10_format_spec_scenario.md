@@ -1,9 +1,10 @@
 # Scenario Skill Format Spec
 
-A scenario skill is an ORCHESTRATION skill. It is not executed by the backend.
-It tells the HOST agent what to do: which of its own capabilities to use first,
-how to assemble the payload, which child capability skill to delegate to, and
-how to react to each returned branch.
+A scenario skill is an ORCHESTRATION skill. Its author-selected owner is
+`metadata.orchestration_owner`: `host` (also the legacy default) or `eaa`.
+The common topology rules apply to both. The Host pointer and body templates
+below apply only to Host ownership; the registered EAA addendum replaces those
+requirements with natural-language instructions for the internal EAA Agent.
 
 ## Topology Rules (hard requirements)
 
@@ -50,6 +51,10 @@ violation is rejected at save time.
 - **T11** -- A scenario declares `scenario-orchestration` and has no script of
   its own. This Generator's other output types are `inline` and `script` for
   capability skills; never change a scenario to either by patching its type.
+- **T12** -- Only scenarios may declare `metadata.orchestration_owner`, with
+  value `host` or `eaa`. EAA needs non-empty body instructions and executable
+  inline/script children. Never emit orchestration/orchestration_ref or a flow
+  configuration file.
 
 ## Pointer Rules (hard requirements)
 

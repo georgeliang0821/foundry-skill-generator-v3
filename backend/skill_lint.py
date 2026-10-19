@@ -37,6 +37,7 @@ from typing import Collection, Iterable, Mapping, Sequence
 
 from .blob_store import parse_frontmatter, parse_frontmatter_meta
 from .models import SkillKind
+from .orchestration import is_eaa_metadata
 from .eaa_platform import (
     CONTENT_ERROR_HARD_PATTERNS,
     MI_ENV_KEYS,
@@ -255,6 +256,20 @@ def check_named_skill_references(
     if kind is SkillKind.SCENARIO:
         children = parse_frontmatter_meta(skill_md + "\n").get("children", [])
         declared = {child for child in children if isinstance(child, str)} if isinstance(children, list) else set()
+        if is_eaa_metadata(parse_frontmatter_meta(skill_md + "\n")):
+            pattern = re.compile(
+                r"(?<![a-z0-9_-])(?:" + "|".join(re.escape(name) for name in sorted(declared, key=len, reverse=True))
+                + r")(?![a-z0-9_-])", re.IGNORECASE,
+            ) if declared else None
+            if pattern:
+                chunks = re.split(r"(^##[ \t]+[^\n]*$)", body, flags=re.MULTILINE)
+                negative = False
+                for index, chunk in enumerate(chunks):
+                    if index % 2:
+                        negative = any(marker in normalize_section(chunk) for marker in ("whennottouse", "notapplicable", "不適用"))
+                    if not negative:
+                        chunks[index] = pattern.sub("", chunk)
+                body = "".join(chunks)
         masked = list(body)
         for call in re.finditer(r"\bfetch_skill\s*\([^)]*\)", body, re.DOTALL):
             headings = list(re.finditer(r"^##[ \t]+(.+)$", body[:call.start()], re.MULTILINE))
@@ -3313,9 +3328,11 @@ def _lint_scenario(
     child_full_md: Mapping[str, str] | None,
     host_capabilities: Sequence[str],
 ) -> list[LintIssue]:
-    issues = _check_step_host_capability(skill_md, host_capabilities)
+    eaa = is_eaa_metadata(parse_frontmatter_meta(skill_md))
+    issues = [] if eaa else _check_step_host_capability(skill_md, host_capabilities)
     for name, child_md in (child_full_md or {}).items():
-        issues.extend(_check_return_branches(skill_md, name, child_md))
+        if not eaa:
+            issues.extend(_check_return_branches(skill_md, name, child_md))
         issues.extend(_check_operation_coverage(skill_md, name, child_md))
     return issues
 

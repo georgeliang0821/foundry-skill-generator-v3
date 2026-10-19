@@ -89,6 +89,7 @@ from .models import (
     MaterialUpsertRequest,
     MessageRole,
     Mode,
+    OrchestrationOwnerUpdateRequest,
     PatchRecord,
     NeighborEdit,
     NeighborNoticeOutcome,
@@ -113,6 +114,7 @@ from .models import (
     delegation_children,
 )
 from .patch import PatchError, apply_v4a_to_content, v4a_from_contents, version_hash
+from .orchestration import skill_orchestration_owner
 from .form_conversion import FormConversionError, convert_session_form
 from .session_store import LocalSessionStore, make_session_store
 from .history import add_history, display_detail, record_result, record_tool, sync_history
@@ -755,7 +757,7 @@ def _hydrate_current_skill_from_remote(session: Session) -> bool:
     there. In later stages an empty local draft with a remote binding is stale
     session state; reloading the saved skill keeps the Files tab usable.
     """
-    if (session.current_skill.skill_md or "").strip():
+    if session.owner_regeneration_pending or (session.current_skill.skill_md or "").strip():
         return False
     if session.current_stage == Stage.PREPARE.value:
         return False
@@ -1120,6 +1122,12 @@ def _save_skill_dual_write(
     # Validate topology and every ACL before the first write, then commit Blob,
     # SQL metadata, and grants.
     started = now_ms()
+    try:
+        _assert_owner_preserved(session, session.current_skill.skill_md)
+    except ValueError as exc:
+        raise _lint_failure("orchestration_owner_invalid", "Orchestration owner validation failed", [str(exc)]) from exc
+    if session.owner_regeneration_pending and session.current_stage == Stage.PREPARE:
+        raise HTTPException(status_code=409, detail="Reconfirm PREPARE and generate the replacement draft before saving.")
     skill_name = infer_skill_name(session, requested_name)
     old_name = safe_skill_name(session.remote_skill_id) if (session.remote_skill_id or "").strip() else ""
     if session.mode == "modify" and not old_name:
@@ -1376,6 +1384,8 @@ def _save_skill_dual_write(
     session.children = declared_children
     session.blob_store_id = _active_store_id()
     session.eaa_ruleset_version = eaa_lint.ruleset_version
+    session.owner_regeneration_pending = False
+    session.owner_source_skill_md = ""
     _flush_neighbor_notices(session, saved.name)
     if eaa_lint.warnings:
         _note_eaa_warnings(session, eaa_lint.warnings, eaa_lint.ruleset_version)
@@ -1421,6 +1431,10 @@ def current_content(session: Session, target_file: str) -> str:
 
 def set_current_content(session: Session, target_file: str, content: str, new_hash: str) -> None:
     if target_file == "SKILL.md":
+        try:
+            _assert_owner_preserved(session, content)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         session.current_skill.skill_md = content
     else:
         raise HTTPException(status_code=400, detail=f"Unknown target file: {target_file}")
@@ -1579,6 +1593,8 @@ def session_binding_state(session: Session, *, allow_unsaved: bool = False) -> t
     remote_name = session.remote_skill_id or session.target_skill_id or ""
     remote_version = session.remote_version_hash or ""
     local_version = session.current_skill.version_hash or ""
+    if session.owner_regeneration_pending:
+        return remote_name or "NEW", False, "The orchestration owner changed. Generate and save the replacement skill before testing."
     if not remote_name:
         return "NEW", False, "This skill has not been saved to Blob yet. Save it before running selection tests."
     if not remote_version:
@@ -2053,7 +2069,7 @@ def _assert_children_before_routing(session: Session, item: str, confirmed: bool
 
 
 # What decides which layer the file belongs to.
-_LAYER_RULES = frozenset({"T4", "T5", "T10", "T11"})
+_LAYER_RULES = frozenset({"T4", "T5", "T10", "T11", "T12"})
 # What decides whether the frontmatter parses at all.
 _PARSEABILITY_RULES = frozenset({"T1", "T2", "T3"})
 
@@ -2077,6 +2093,7 @@ def _assert_topology_preserved(session: Session, skill_md: str, *, tool: str) ->
     correct.
     """
     kind = SkillKind(session.skill_kind)
+    _assert_owner_preserved(session, skill_md)
     issues = _topology_errors(skill_md, kind, session.current_skill.script)
     before_meta = parse_frontmatter_meta(session.current_skill.skill_md)
     after_meta = parse_frontmatter_meta(skill_md)
@@ -2108,6 +2125,18 @@ def _assert_topology_preserved(session: Session, skill_md: str, *, tool: str) ->
             "A common cause is a stray leading space in front of a top-level key such as "
             "`description`, which YAML reads as a continuation of the previous value."
         )
+
+
+def _assert_owner_preserved(session: Session, skill_md: str) -> None:
+    if SkillKind(session.skill_kind) is not SkillKind.SCENARIO or not skill_md.strip():
+        return
+    owner = skill_orchestration_owner(skill_md)
+    if owner != session.orchestration_owner:
+        raise ValueError("The draft's orchestration owner differs from the session. Use the scenario owner selector and confirm regeneration.")
+    before = parse_frontmatter_meta(session.current_skill.skill_md)
+    after = parse_frontmatter_meta(skill_md)
+    if "orchestration_owner" in before and "orchestration_owner" not in after:
+        raise ValueError("Keep metadata.orchestration_owner intact; use the owner selector to change orchestration.")
 
 
 def _catalog_skill_names() -> set[str]:
@@ -2320,7 +2349,7 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
     if tool == "propose_skill_draft":
         if session.current_stage != Stage.DRAFT.value:
             raise ValueError(f"propose_skill_draft only allowed in DRAFT stage (current={session.current_stage})")
-        if session.current_skill.skill_md.strip() and session.remote_skill_id:
+        if session.current_skill.skill_md.strip() and session.remote_skill_id and not session.owner_regeneration_pending:
             raise ValueError("propose_skill_draft cannot replace a saved skill; use propose_patch in REFINE instead")
         proposed = args.get("skill_md", "")
         _assert_topology_preserved(session, proposed, tool="propose_skill_draft")
@@ -2699,15 +2728,38 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
     )
     if req.mode != "modify" and req.target_skill_id:
         log_event("session.create.target_ignored", level="warning", mode=req.mode, target_skill_id=req.target_skill_id)
+    if req.orchestration_owner is not None and (req.mode == "modify" or req.skill_kind != SkillKind.SCENARIO):
+        raise HTTPException(status_code=400, detail="Choose an orchestration owner only for a new/import scenario; MODIFY reads it from the stored skill.")
     session = Session(
         **({"id": session_id} if session_id else {}),
         mode=req.mode,
         skill_kind=req.skill_kind or SkillKind.CAPABILITY,
+        orchestration_owner=req.orchestration_owner or "host",
         target_skill_id=req.target_skill_id if req.mode == "modify" else None,
         materials=req.materials,
         owner_upn=upn,
         neighbor_notice_review=review,
     )
+    if req.mode == Mode.IMPORT:
+        for material in req.materials:
+            _, source = parse_frontmatter_block(material.content)
+            if not source:
+                continue
+            meta = source.get("metadata", {})
+            if isinstance(meta, dict) and meta.get("skill_type") == SCENARIO_SKILL_TYPE and declared_children_of(source):
+                if req.skill_kind is SkillKind.CAPABILITY:
+                    raise HTTPException(status_code=400, detail="The imported scenario requires scenario skill kind.")
+                try:
+                    owner = skill_orchestration_owner(material.content)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                if req.orchestration_owner is not None and req.orchestration_owner != owner:
+                    raise HTTPException(status_code=400, detail="Import the original owner first, then use the confirmed owner switch.")
+                session.skill_kind = SkillKind.SCENARIO
+                session.orchestration_owner = owner
+                session.children = declared_children_of(source)
+                session = Session.model_validate(session.model_dump())
+                break
     if req.mode == "modify" and req.target_skill_id and req.start_stage == "refine":
         session.current_stage = Stage.REFINE
     if req.mode == "modify" and req.target_skill_id:
@@ -2756,7 +2808,7 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
         inferred_kind = SkillKind.SCENARIO if has_children else SkillKind.CAPABILITY
         type_errors = [
             issue.message for issue in validate_topology(files.skill_md, inferred_kind, mode=Mode.MODIFY, script=files.script)
-            if issue.rule in {"T3", "T4", "T5", "T10", "T11"} and issue.severity is Severity.ERROR
+            if issue.rule in {"T3", "T4", "T5", "T10", "T11", "T12"} and issue.severity is Severity.ERROR
         ]
         if type_errors:
             raise _lint_failure("skill_type_invalid", "Skill type validation failed", type_errors)
@@ -2766,6 +2818,7 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
                 detail=f"Requested skill_kind does not match the existing skill topology ({inferred_kind.value}).",
             )
         session.skill_kind = inferred_kind
+        session.orchestration_owner = skill_orchestration_owner(files.skill_md)
         session.children = children
         session = Session.model_validate(session.model_dump(mode="json"))
         # After the round-trip above, which drops asset content.
@@ -2856,6 +2909,53 @@ def refresh_session_children(
     session.touch()
     persist_session(session)
     return session
+
+
+@app.post("/api/sessions/{session_id}/orchestration-owner")
+def update_session_orchestration_owner(
+    session_id: str, req: OrchestrationOwnerUpdateRequest, upn: str = Depends(require_upn),
+) -> Session:
+    with _skill_mutation_lock:
+        session = get_session_for_user(session_id, upn)
+        if SkillKind(session.skill_kind) is not SkillKind.SCENARIO:
+            raise HTTPException(status_code=400, detail="Only a scenario skill has an orchestration owner.")
+        if req.owner == session.orchestration_owner:
+            return session
+        has_draft = bool(session.current_skill.skill_md.strip())
+        needs_confirmation = has_draft or bool(session.remote_skill_id and not session.owner_regeneration_pending)
+        if needs_confirmation and not req.confirm_restart:
+            raise HTTPException(status_code=409, detail={
+                "kind": "owner_restart_required", "recoverable": True,
+                "message": "Changing the owner clears the draft and requires PREPARE confirmation and regeneration. The stored skill is not changed.",
+            })
+        before = session.orchestration_owner
+        if has_draft or session.remote_skill_id or session.owner_regeneration_pending:
+            if has_draft:
+                session.owner_source_skill_md = session.current_skill.skill_md
+            session.current_skill = SkillDraft()
+            session.owner_regeneration_pending = True
+        session.orchestration_owner = req.owner
+        session.pending_tool_calls.clear()
+        session.patch_history.clear()
+        session.test_runs.clear()
+        session.iteration_reflections.clear()
+        session.pending_change_summaries.clear()
+        brief = session.prepare_brief
+        brief.verify_checklist = {key: False for key in brief.verify_checklist}
+        brief.verify_evidence.clear()
+        brief.verify_updated_at.clear()
+        brief.revisit = True
+        brief.last_updated = now_ms()
+        session.conversation.append(ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=f"Orchestration owner changed from {before} to {req.owner}. Reconfirm the scenario and regenerate; the stored skill remains unchanged until a successful save.",
+        ))
+        if Stage(session.current_stage) is not Stage.PREPARE:
+            transition(session, Stage.PREPARE, "Orchestration owner changed; regenerate the scenario.")
+        session.touch()
+        persist_session(session)
+        log_event("session.orchestration_owner.changed", session_id=session.id, previous=before, owner=req.owner)
+        return session
 
 
 @app.get("/api/sessions/{session_id}/skill-form")
@@ -3952,6 +4052,10 @@ def save_session_skill(session_id: str, req: SaveSessionSkillRequest, upn: str =
 @app.put("/api/sessions/{session_id}/draft")
 def update_session_draft(session_id: str, draft: SkillDraft, upn: str = Depends(require_upn)) -> Session:
     session = get_session_for_user(session_id, upn)
+    try:
+        _assert_owner_preserved(session, draft.skill_md)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     # The script only ever comes from a code material or the stored skill, never from an editor.
     draft.script = session.current_skill.script
     if draft.skill_md != session.current_skill.skill_md:
@@ -5287,6 +5391,8 @@ PROMPT_INDEX: list[dict[str, str]] = [
     {"filename": "09_best_practices.md", "title": "Writing Best Practices", "scope": "Embedded inside Global System"},
     {"filename": "10_format_spec.md", "title": "Skill Format Spec", "scope": "Embedded inside Global System (capability skills)"},
     {"filename": "10_format_spec_scenario.md", "title": "Scenario Skill Format Spec", "scope": "Replaces the format spec for scenario skills"},
+    {"filename": "18_scenario_ownership.md", "title": "Scenario ownership", "scope": "Shared owner contract and Host behavior for scenario skills"},
+    {"filename": "19_scenario_eaa.md", "title": "EAA scenario addendum", "scope": "Overrides Host-only authoring and testing rules when owner is eaa"},
     {"filename": "11_output_rules.md", "title": "Output Rules", "scope": "Parsed into the per-turn user prompt (output shape + rules)"},
     {"filename": "14_skill_assets.md", "title": "Skill Assets", "scope": "Appended during Draft, Refine and Test when the session carries skill assets"},
 ]
@@ -5311,6 +5417,7 @@ TOPOLOGY_RULES: list[dict[str, str]] = [
     {"rule": "T9", "description": "Scenario skills must not contain capability-only sections."},
     {"rule": "T10", "description": "Scenario skill_type and children must appear together."},
     {"rule": "T11", "description": "Generator skill_type must match the skill layer and bundled script."},
+    {"rule": "T12", "description": "Scenario ownership must be host/eaa; EAA uses a non-empty body and executable children, not flow DSL."},
     {"rule": "P1", "description": "Every fetch_skill target must be declared in metadata.children."},
     {"rule": "P2", "description": "Every requested section name must resolve to a child's ## heading."},
     {"rule": "P3", "description": "Each skill is fetched once, naming all its sections at that call."},
@@ -5357,12 +5464,14 @@ def inspect_agent() -> dict[str, Any]:
         {
             "kind": SkillKind.SCENARIO.value,
             "label": "Scenario",
-            "description": "A host-selected orchestration skill that delegates work to child capabilities.",
+            "description": "A scenario with author-selected Host or EAA Agent orchestration over child capabilities.",
             "prompts": common_prompts + [
                 "01_prepare_scenario_addendum.md",
                 "02_draft_scenario.md",
                 "04_test_scenario_addendum.md",
                 "10_format_spec_scenario.md",
+                "18_scenario_ownership.md",
+                "19_scenario_eaa.md",
             ],
         },
     ]

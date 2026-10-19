@@ -128,6 +128,16 @@ export async function updateSessionChildren(sessionId, children) {
   return res.json();
 }
 
+export async function updateOrchestrationOwner(sessionId, owner, confirmRestart) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/orchestration-owner`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner, confirm_restart: confirmRestart }),
+  });
+  if (!res.ok) throw await responseError(res);
+  return res.json();
+}
+
 export async function fetchSessionTopology(sessionId) {
   const res = await apiFetch(`/api/sessions/${sessionId}/topology`);
   if (!res.ok) throw await responseError(res);

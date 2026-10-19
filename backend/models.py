@@ -19,6 +19,8 @@ from pydantic import (
     model_validator,
 )
 
+from .orchestration import OrchestrationOwner, skill_orchestration_owner
+
 
 def utc_now_iso() -> str:
     """Return a stable UTC timestamp string."""
@@ -680,6 +682,10 @@ class Session(BaseModel):
     # Sessions persisted before the two-tier topology existed are capability
     # sessions, which is exactly what the default gives them.
     skill_kind: SkillKind = SkillKind.CAPABILITY
+    orchestration_owner: OrchestrationOwner = "host"
+    # Confirmed owner change awaiting a replacement draft and successful save.
+    owner_regeneration_pending: bool = False
+    owner_source_skill_md: str = ""
     target_skill_id: str | None = None
     remote_skill_id: str | None = None
     remote_version_hash: str = ""
@@ -733,6 +739,16 @@ class Session(BaseModel):
     aca_env_error: str = ""
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _restore_orchestration_owner(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "orchestration_owner" not in data and data.get("skill_kind") == "scenario":
+            draft = data.get("current_skill")
+            skill_md = draft.skill_md if isinstance(draft, SkillDraft) else draft.get("skill_md", "") if isinstance(draft, dict) else ""
+            if skill_md:
+                data = dict(data, orchestration_owner=skill_orchestration_owner(skill_md))
+        return data
 
     @model_validator(mode="after")
     def _align_checklist_to_kind(self) -> "Session":
@@ -812,6 +828,7 @@ def delegation_children(session: "Session") -> list[str]:
 class CreateSessionRequest(BaseModel):
     mode: Mode = Mode.NEW
     skill_kind: SkillKind | None = None
+    orchestration_owner: OrchestrationOwner | None = None
     target_skill_id: str | None = None
     # Modify only: "refine" skips PREPARE and opens straight on the stored skill.
     start_stage: Literal["prepare", "refine"] | None = None
@@ -837,6 +854,11 @@ class SaveSessionSkillRequest(BaseModel):
 
 class ChildrenUpdateRequest(BaseModel):
     children: list[str] = Field(default_factory=list)
+
+
+class OrchestrationOwnerUpdateRequest(BaseModel):
+    owner: OrchestrationOwner
+    confirm_restart: bool = False
 
 
 class RunSessionTestRequest(BaseModel):

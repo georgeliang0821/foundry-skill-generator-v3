@@ -3,6 +3,10 @@
 Goal: emit ONE complete orchestration SKILL.md via `propose_skill_draft` and
 wait for the user's accept/reject.
 
+The common frontmatter, whitelist, acceptance and preservation rules apply to
+both owners. Host-specific templates, fetch calls and payload instructions below
+apply only to `host`; for `eaa` follow the registered EAA owner addendum instead.
+
 ## Rules
 
 - You may call `propose_skill_draft` **only while the current draft is empty**,

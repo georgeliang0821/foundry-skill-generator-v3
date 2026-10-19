@@ -44,6 +44,20 @@ def test_clean_report_passes_and_carries_the_ruleset(monkeypatch: pytest.MonkeyP
     assert calls == [("https://eaa.example/mcp", "demo", SKILL)]
 
 
+def test_lint_accepts_new_capabilities_without_scenario_contract_version(monkeypatch):
+    _mcp(monkeypatch, {
+        "status": "completed", "valid": True, "ruleset_version": "1.3",
+        "skill_type_contract_version": "1.1",
+        "generator_skill_types": ["scenario-orchestration", "inline", "script"],
+        "orchestration_owners": ["host", "eaa"],
+    })
+    result = lint_skill_package("demo", SKILL)
+    assert result.valid
+    assert result.skill_type_contract_version == "1.1"
+    assert result.orchestration_owners == ["host", "eaa"]
+    assert result.generator_skill_types == ["scenario-orchestration", "inline", "script"]
+
+
 def test_errors_make_the_report_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     _mcp(monkeypatch, {"status": "completed", "valid": False, "errors": ["reads OBO_CLIENT_SECRET"], "warnings": []})
     result = lint_skill_package("demo", SKILL)

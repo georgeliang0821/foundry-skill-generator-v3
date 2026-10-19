@@ -37,6 +37,7 @@ import yaml
 from pydantic import BaseModel
 
 from .models import GENERATOR_SKILL_TYPES, SCENARIO_SKILL_TYPE, Mode, SkillKind
+from .orchestration import is_eaa_metadata, orchestration_errors
 from .sections import (
     ambiguous_titles,
     h2_sections,
@@ -183,6 +184,12 @@ def validate_topology(
     _check_name(frontmatter, expected_name, add)
     _check_children_shape(frontmatter, kind, add)
     _check_skill_type(frontmatter, add, kind=kind, script=script)
+    owner_errors = orchestration_errors(frontmatter)
+    for message in owner_errors:
+        add("T12", message)
+    eaa = not owner_errors and is_eaa_metadata(frontmatter.get("metadata", {}))
+    if eaa and not _FRONTMATTER_RE.sub("", stripped, count=1).strip():
+        add("T12", "An EAA scenario requires non-empty orchestration instructions in the SKILL.md body.")
     _check_metadata_size(frontmatter, add)
     _check_section_contract(stripped, kind, add, script)
 
@@ -190,13 +197,14 @@ def validate_topology(
         _check_scenario_body(stripped, add)
         if child_resolver is not None:
             children = declared_children(frontmatter)
-            _check_children_resolve(children, child_resolver, add)
+            _check_children_resolve(children, child_resolver, add, eaa=eaa)
             _check_pointer_contract(
                 stripped,
                 children,
                 child_resolver,
                 add,
                 own_name=str(frontmatter.get("name") or "").strip(),
+                eaa=eaa,
             )
 
     return issues
@@ -346,6 +354,8 @@ def _check_children_resolve(
     children: list[str],
     child_resolver: Callable[[str], str | None],
     add,
+    *,
+    eaa: bool = False,
 ) -> None:
     for child in children:
         child_md = child_resolver(child)
@@ -353,8 +363,15 @@ def _check_children_resolve(
             add("T7", f"Child skill `{child}` does not exist or is not accessible to you.")
             continue
         _, child_fm = parse_frontmatter_block(child_md)
+        if eaa and child_fm is None:
+            add("T12", f"EAA child `{child}` must have valid frontmatter.")
         if child_fm and declared_children(child_fm):
             add("T7", f"Child skill `{child}` declares its own `children`; only one level of nesting is allowed.")
+        if eaa and child_fm:
+            meta = child_fm.get("metadata", {})
+            child_type = meta.get("skill_type") if isinstance(meta, dict) else None
+            if not isinstance(meta, dict) or "skill_type" in child_fm or orchestration_errors(child_fm) or child_type not in (None, "inline", "code-generation", "script"):
+                add("T12", f"EAA child `{child}` must be an executable inline or script capability.")
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +422,7 @@ def _check_pointer_contract(
     add,
     *,
     own_name: str = "",
+    eaa: bool = False,
 ) -> None:
     pointers = _pointers(skill_md)
     declared = set(children)
@@ -447,7 +465,9 @@ def _check_pointer_contract(
                 "every section you need in that single call.",
             )
 
-    if pointers and "list_skills" not in (skill_md or ""):
+    if pointers and eaa:
+        add("T12", "EAA scenarios read child contracts with internal skill tools, not public MCP fetch_skill calls.")
+    if pointers and not eaa and "list_skills" not in (skill_md or ""):
         add(
             "P4",
             "The body points at child sections but never states that these skills are absent from "

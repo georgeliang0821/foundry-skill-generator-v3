@@ -43,6 +43,8 @@
 
 ## 核心功能
 
+- **Scenario 雙模式編排**：scenario 的 Checklist 可明確選擇 Host Agent 或 EAA internal Agent；未宣告 owner 的舊技能仍由 Host 編排。兩種模式都以正文描述流程，不使用流程設定檔；EAA 模式由內部 Agent 調派白名單中的能力，需 Mode B／互動 OBO。已有正文時切換 owner，必須確認並重新生成，遠端技能直到成功儲存才改變。操作與測試邊界見 [scenario 使用指南](07-generator-guide.md#12-建立-scenario-型-skill)。
+
 - **對話式產生 SKILL.md**：使用者用自然語言描述需求，AI 透過工具呼叫（tool calls）逐步產出與修改 `SKILL.md`。
 - **五階段工作流**（見下方流程圖）：PREPARE → DRAFT → REFINE → TEST → DONE，每個階段有明確產出與品質關卡（quality gate）。
 - **既有 Skill 重複偵測**：PREPARE 階段比對知識庫（SQL + Blob），協助判斷該「新增」還是「修改既有 Skill」。

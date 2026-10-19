@@ -15,7 +15,7 @@ import os
 import re
 import urllib.parse
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import yaml
@@ -219,6 +219,9 @@ class EaaLintResult:
     errors: list[str]
     warnings: list[str]
     ruleset_version: str
+    skill_type_contract_version: str = ""
+    generator_skill_types: list[str] = field(default_factory=list)
+    orchestration_owners: list[str] = field(default_factory=list)
 
 
 def _strings(value: Any, field: str) -> list[str]:
@@ -255,4 +258,7 @@ def lint_skill_package(skill_name: str, files: Mapping[str, str], *, timeout: fl
         errors=errors,
         warnings=_strings(payload.get("warnings"), "warnings"),
         ruleset_version=str(payload.get("ruleset_version") or ""),
+        skill_type_contract_version=str(payload.get("skill_type_contract_version") or ""),
+        generator_skill_types=_strings(payload.get("generator_skill_types"), "generator_skill_types"),
+        orchestration_owners=_strings(payload.get("orchestration_owners"), "orchestration_owners"),
     )

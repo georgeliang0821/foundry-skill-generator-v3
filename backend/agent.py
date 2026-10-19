@@ -386,7 +386,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "record_delegation",
-        "description": "SCENARIO SKILLS ONLY (rejected in a capability session). Persist the delegation_ok checkpoint. Two separate things are recorded. (1) `delegation`: for each child capability skill this scenario skill hands work to, record which child it is, the single `credentials` key the serialized payload goes under, which of the child's `##` sections the scenario will point at with fetch_skill, what the HOST must do itself because the child cannot, which of the child's operations this scenario drives, every round trip the child can demand before it completes, and one realistic sample payload. (2) `dependency_skills`: EVERY OTHER already-existing skill the scenario's flow uses at any step, even generic ones. `metadata.children` is the union of both and the host treats it as a whitelist -- a skill left out simply never becomes available, with no error message, so list it if in doubt. Read the credentials key, the supported operations and the failure messages from the child's full SKILL.md injected under '## Child Skills (full SKILL.md)'; record the section NAMES rather than copying the field table. A scenario skill has no variables of its own, so this REPLACES record_variables.",
+        "description": "SCENARIO SKILLS ONLY. Persist the delegation_ok checkpoint: delegation contains child capabilities and their published input contracts, contract sections, operations and handshakes; dependency_skills contains other required direct capabilities. Their union is metadata.children, the complete capability whitelist, not execution order. The scenario ownership addendum defines which executor reads the contracts and handles questions. Host-only capabilities apply only to Host ownership; EAA ownership has none. Contracts come from the current child SKILL.md, never invented fields. This replaces record_variables.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -396,27 +396,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "type": "object",
                         "properties": {
                             "child_skill": {"type": "string", "description": "The existing capability skill that performs the work. It must already exist and be accessible; a scenario session never creates its child."},
-                            "credentials_key": {"type": "string", "description": "The single key under `credentials` that the host puts the serialized payload under, e.g. hr_leave_json."},
+                            "credentials_key": {"type": "string", "description": "The child's published legacy input data key, if any; not a new Host wrapper for EAA orchestration."},
                             "input_bindings": {"type": "array", "items": InputBinding.model_json_schema(), "description": "Copy the child's explicit input-bindings contract exactly. Supports credentials, request, or mixed sources. When used, leave the legacy credentials_key empty. Never invent or override child sources."},
                             "sections": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "The child's `##` section names this scenario will fetch, e.g. Required Inputs and the [NEEDS_INFO] contract section. Use the headings exactly as they appear in the child's body; the scenario points at them instead of restating the field table.",
+                                "description": "The child's published contract headings. Host uses section pointers; EAA reads these contracts through its internal skill tools.",
                             },
                             "host_capabilities": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "What the host must perform itself because the child cannot, each with the reason why the child cannot do it.",
+                                "description": "Host-only work and its reasons, for Host ownership. Empty for EAA ownership.",
                             },
                             "operations": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "The child operations this scenario will drive, taken from the child's own SKILL.md. List every operation the child supports first, confirm each one with the user, then record only the ones that are in scope -- an operation the child supports and this scenario never drives is a capability the host can never reach through it. The ones left out belong in the drafted 'not applicable' section with their reason.",
+                                "description": "The child operations this scenario will drive, taken from the child's own SKILL.md. List every supported operation, confirm scope with the author, and record the included operations. An omitted operation is unreachable through this scenario; record exclusions and their reasons.",
                             },
                             "handshakes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Every round trip the child can demand before completing: the needs_input reason, what the host does about it, and whether the same session_id is reused.",
+                                "description": "Child needs_input reasons, the selected executor's response and session_id continuity.",
                             },
                         },
                         "required": ["child_skill"],
@@ -776,7 +776,7 @@ def _redact_materials(snapshot: dict[str, Any]) -> None:
 
 
 def _session_context(session: Session) -> str:
-    snapshot = session.model_dump(mode="json", exclude={"ui_history", "ui_history_cursor"})
+    snapshot = session.model_dump(mode="json", exclude={"ui_history", "ui_history_cursor", "owner_source_skill_md"})
     # Keep the prompt bounded while still giving the model the operational state.
     if snapshot.get("conversation"):
         snapshot["conversation"] = snapshot["conversation"][-12:]

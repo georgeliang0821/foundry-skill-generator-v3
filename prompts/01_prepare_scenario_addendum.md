@@ -4,6 +4,9 @@ This session is authoring a SCENARIO (orchestration) skill. The PREPARE stage
 prompt above still applies, with the two overrides below. Where they disagree
 with the stage prompt, this addendum wins.
 
+The Host-specific details below apply to `host`. For `eaa`, use the registered
+owner addendum: confirm internal capability delegation without Host-only tasks.
+
 ## Override for block 1(b): `input_sources`
 
 For a scenario skill, `input_sources` does NOT mean "data sources the skill

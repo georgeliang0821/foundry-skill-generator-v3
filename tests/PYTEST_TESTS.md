@@ -8,6 +8,12 @@ deterministic, and should be the first line of defense for backend behavior.
 Pytest covers:
 
 - Pydantic model validation and defaults.
+- Scenario Host/EAA ownership: strict frontmatter rules, legacy Host omission,
+  owner-specific quality gates/prompts/named-child references and route-only
+  parent resolution (`tests/unit/test_orchestration.py`). Confirmed owner switches,
+  source preservation, persistence, hydration protection, replacement acceptance
+  and actual-package-only fail-closed lint are covered in
+  `tests/api/test_orchestration_owner_api.py`; no live EAA is contacted.
 - Stage transition rules.
 - Prompt assembly and runtime state formatting.
 - V4A patch parsing and application.

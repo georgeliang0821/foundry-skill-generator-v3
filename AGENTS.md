@@ -18,6 +18,18 @@ Read these before making non-trivial changes — do not duplicate their content 
 Prose docs are written in Traditional Chinese; code, comments and prompt files are in
 English. Keep each in its existing language.
 
+## Scope and cost confirmation
+
+- Before implementation, proactively explain and confirm the expected change
+  scope and implementation, testing, and maintenance costs with the user.
+  Distinguish the minimum necessary fix from optional enhancements.
+- If a small request would expand into multi-file or cross-workflow changes,
+  explain why, offer a smaller alternative, and obtain explicit confirmation
+  before proceeding. Reconfirm if the scope or costs grow during implementation.
+- Do not treat "complete support" or a broadly approved plan as blanket approval
+  for scope expansion. Keep the discussion proportionate to the task; do not
+  create extra workflows or planning documents just to satisfy this rule.
+
 ## Commands (PowerShell)
 
 ```powershell

@@ -40,6 +40,8 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
         "10_format_spec_scenario.md",
         "11_output_rules.md",
         "14_skill_assets.md",
+        "18_scenario_ownership.md",
+        "19_scenario_eaa.md",
     }
     assert all("<!-- Missing:" not in prompt["content"] for prompt in body["prompts"])
     assert {transition["from"] for transition in body["transitions"]} == {
@@ -55,8 +57,10 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
     assert "02_draft_scenario.md" not in kinds["capability"]["prompts"]
     assert "02_draft_scenario.md" in kinds["scenario"]["prompts"]
     assert "10_format_spec_scenario.md" in kinds["scenario"]["prompts"]
+    assert {"18_scenario_ownership.md", "19_scenario_eaa.md"} <= set(kinds["scenario"]["prompts"])
+    assert "19_scenario_eaa.md" not in kinds["capability"]["prompts"]
     assert {rule["rule"] for rule in body["topology_rules"]} == {
-        "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
+        "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12",
         "P1", "P2", "P3", "P4", "P5", "P6",
         "C1", "C2", "C3",
     }

@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from .diagnostics import elapsed_ms, log_event, log_exception, now_ms
-from .blob_store import parse_frontmatter, safe_skill_name
+from .blob_store import parse_frontmatter, parse_frontmatter_meta, safe_skill_name
 from .models import (
     Delegation,
     Mode,
@@ -33,6 +33,7 @@ from .skill_lint import (
     script_argument_flags,
 )
 from .topology import has_errors, validate_topology
+from .orchestration import is_eaa_metadata, is_eaa_scenario
 
 _TEST_INSTRUCTION = (
     "IMPORTANT (selection-test mode): Complete the user's request normally. "
@@ -675,6 +676,12 @@ SCENARIO_DISCOVERABILITY_NOTE = (
     "evidence that the host will select this skill."
 )
 
+EAA_SCENARIO_EXECUTION_NOTE = (
+    "EAA route_only verifies scenario resolution only. Child execution, user consent, "
+    "publication, multi-turn continuation and exactly-once behavior were NOT verified. "
+    "Real execution requires Mode B and interactive delegated/OBO identity."
+)
+
 _L2_DIAGNOSIS = (
     "The scenario skill appeared in skills_referenced, so it was not excluded "
     "from the backend's candidate set. There are exactly two possible causes and "
@@ -784,6 +791,7 @@ def _run_scenario_tests(
         # executes the child, so nothing downstream can catch a stale contract.
         lint = _scenario_lint(skill_content, delegation, child_resolver)
         if lint:
+            l1.passed = not any(issue.severity == "error" for issue in lint)
             l1.details.extend(f"{i.rule} [{i.severity}] {i.message}" for i in lint)
             l1.diagnosis = (
                 "Topology passes, but the body is out of step with the child. Fix it with "
@@ -792,10 +800,13 @@ def _run_scenario_tests(
     layers = [l1]
     if not l1.passed:
         return layers
+    eaa = is_eaa_scenario(skill_content)
+    if eaa and run_mode != ROUTE_ONLY:
+        raise ValueError("EAA scenario tests must use route_only; real orchestration may have side effects.")
 
     # --- L2: the parent must NOT be in the backend's candidate set ----------
     probe = next((q for q in positive_samples if q.strip()), "")
-    l2 = ScenarioLayerResult(layer="L2", title="Parent absence from skills_referenced")
+    l2 = ScenarioLayerResult(layer="L2", title="EAA scenario resolution" if eaa else "Parent absence from skills_referenced")
     if not probe:
         l2.details = ["Skipped: no positive sample to probe with."]
         layers.append(l2)
@@ -806,18 +817,31 @@ def _run_scenario_tests(
     referenced = output.get("skills_referenced")
     if not isinstance(referenced, list):
         referenced = _extract_skills_referenced(output.get("raw_response"))
-    result = _evaluate_apim_result(probe, output, None, skill_name, run_mode=run_mode)
+    result = _evaluate_apim_result(probe, output, skill_name if eaa else None, skill_name, run_mode=run_mode)
     l2.results = [result]
     if output.get("error"):
         l2.passed = None
         l2.details = [f"Not established: {output['error']}"]
     else:
         parent_present = safe_skill_name(skill_name) in {safe_skill_name(r) for r in referenced}
-        l2.passed = not parent_present
+        raw = output.get("raw_response")
+        runtime_failed = eaa and isinstance(raw, dict) and (
+            raw.get("success") is False or raw.get("status") in ("failed", "error")
+        )
+        l2.passed = parent_present and not runtime_failed if eaa else not parent_present
+        result.passed = l2.passed
         l2.details = [f"skills_referenced: {', '.join(referenced) or '(none)'}"]
-        if parent_present:
+        if eaa and not l2.passed:
+            l2.diagnosis = "The EAA scenario was not successfully resolved. Check the saved owner, target deployment, Mode B and delegated authorization; child execution was not attempted."
+        elif not eaa and parent_present:
             l2.diagnosis = _L2_DIAGNOSIS
     layers.append(l2)
+    if eaa:
+        layers.append(ScenarioLayerResult(
+            layer="L3", title="Child execution (not verified)", passed=None,
+            details=[EAA_SCENARIO_EXECUTION_NOTE],
+        ))
+        return layers
     if l2.passed is not True:
         return layers
 
@@ -879,7 +903,9 @@ def run_selection_tests(
         run = TestRun(
             skill_version_hash=version_hash,
             scenario_layers=layers,
-            notes=[SCENARIO_DISCOVERABILITY_NOTE],
+            notes=[SCENARIO_DISCOVERABILITY_NOTE] + (
+                [EAA_SCENARIO_EXECUTION_NOTE] if is_eaa_metadata(parse_frontmatter_meta(skill_content)) else []
+            ),
         )
         log_event(
             "selection_test.scenario.done",

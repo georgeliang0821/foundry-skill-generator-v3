@@ -20,7 +20,8 @@ from .models import (
     TestRun,
 )
 from .skill_lint import script_argument_flags
-from .testing import ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, _check_requested_scripts, verify_mode_echo
+from .orchestration import is_eaa_scenario
+from .testing import EAA_SCENARIO_EXECUTION_NOTE, ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, _check_requested_scripts, verify_mode_echo
 
 _scenario = "new_skill_happy_path"
 
@@ -132,13 +133,16 @@ metadata:
 
 ## Scenario Layer
 
-The host reads the user's calendar, then delegates the HR operation to `hr-leave-system`.
+The host reads the user's calendar, then delegates the HR operation.
+Children absent from `list_skills` may still be fetched by name.
+
+fetch_skill(skill_name="hr-leave-system")
 
 ## Request Flow
 
 1. Read the requested date range from the host calendar capability.
 2. Serialize the leave request under `credentials.hr_leave_json`.
-3. Invoke `hr-leave-system` and preserve its session id for any follow-up handshake.
+3. Invoke the selected HR capability and preserve its session id for any follow-up handshake.
 
 ## Not Applicable
 
@@ -179,9 +183,33 @@ def fake_run_selection_tests(
     skill_name, _ = parse_frontmatter(skill_content)
     skill_name = skill_name or "e2e-calendar-skill"
     if kind is SkillKind.SCENARIO:
-        child = next((item for item in delegation or [] if item.child_skill), Delegation())
         probe = next((item for item in positive_samples if item.strip()), "Run the E2E leave workflow")
         verify_mode_echo(run_mode, _fake_apim_echo(run_mode).get("mode"))
+        if is_eaa_scenario(skill_content):
+            if run_mode != ROUTE_ONLY:
+                raise ValueError("EAA scenario tests must use route_only; real orchestration may have side effects.")
+            result = TestResult(
+                query=probe,
+                expected_skill=skill_name,
+                actual_skill=skill_name,
+                skills_referenced=[skill_name],
+                passed=True,
+                reasoning="E2E fake EAA parent resolution only",
+                apim_status="fake",
+                apim_raw_response={"mode": run_mode, "success": True},
+                request_sent=probe,
+                duration_ms=1,
+            )
+            return TestRun(
+                skill_version_hash=version_hash,
+                scenario_layers=[
+                    ScenarioLayerResult(layer="L1", title="Static EAA scenario contract", passed=True),
+                    ScenarioLayerResult(layer="L2", title="EAA scenario resolution", passed=True, details=[f"skills_referenced: {skill_name}"], results=[result]),
+                    ScenarioLayerResult(layer="L3", title="Child execution (not verified)", passed=None, details=[EAA_SCENARIO_EXECUTION_NOTE]),
+                ],
+                notes=[SCENARIO_DISCOVERABILITY_NOTE, EAA_SCENARIO_EXECUTION_NOTE],
+            )
+        child = next((item for item in delegation or [] if item.child_skill), Delegation())
         l2_result = TestResult(
             query=probe,
             expected_skill=None,
@@ -414,7 +442,7 @@ class FakeE2EAgent:
                         {
                             "child_skill": "hr-leave-system",
                             "credentials_key": "hr_leave_json",
-                            "host_capabilities": [
+                            "host_capabilities": [] if session.orchestration_owner == "eaa" else [
                                 "Read the user's calendar because the HR child cannot access it."
                             ],
                             "operations": ["get_balance", "submit_request"],
@@ -471,6 +499,9 @@ class FakeE2EAgent:
             return
         files = e2e_scenario_skill_files() if SkillKind(session.skill_kind) is SkillKind.SCENARIO else e2e_skill_files()
         skill_md = files.skill_md
+        if SkillKind(session.skill_kind) is SkillKind.SCENARIO and session.orchestration_owner == "eaa":
+            skill_md = skill_md.split("---", 2)[1]
+            skill_md = "---" + skill_md.replace("  skill_type: scenario-orchestration", "  skill_type: scenario-orchestration\n  orchestration_owner: eaa") + "---\n\n## Instructions\nRead the declared child contracts with internal skill tools. Use `hr-leave-system` for get_balance and submit_request. Ask for missing inputs; return needs_input for confirmation before submitting. Stop on refusal and verify unknown outcomes before retrying.\n"
         if session.current_skill.script is not None:
             skill_md = skill_md.replace("skill_type: inline", "skill_type: script", 1)
         if get_scenario() == "lint_failure":

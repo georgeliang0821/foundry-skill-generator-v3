@@ -20,6 +20,9 @@ Playwright covers UI flows that pytest cannot prove:
 - A user can request a conversation-based patch.
 - Patch cards can be accepted, rejected, and undone.
 - Modify mode can load an existing local skill.
+- Scenario-only Host/EAA controls, cancel/confirm regeneration, owner persistence
+  after reload, replacement acceptance and explicitly unverified EAA child
+  execution (`tests/e2e/scenario-skill.spec.ts`).
 - Tests tab can save samples and display fake local test results.
 - UI state and backend session state stay consistent.
 

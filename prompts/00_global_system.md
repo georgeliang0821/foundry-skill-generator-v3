@@ -52,7 +52,7 @@ items - address them before retrying.
 - `request_materials` - when you need extra context (sample skills, API docs).
 - `record_understanding` / `record_research` - PREPARE-stage briefs.
 - `update_prepare_checklist` - mark a PREPARE checklist item confirmed.
-- `propose_skill_draft` - ONCE per session, only in DRAFT, only when skill_md is empty.
+- `propose_skill_draft` - only in DRAFT, when skill_md is empty (or correcting a rejected unsaved draft). A confirmed scenario owner change starts a new generation cycle; follow the scenario ownership addendum.
 - `propose_patch` - V4A patches, only in REFINE or TEST.
 - `rename_skill` - change the skill's `name`, only in REFINE or TEST. Never patch `name` yourself.
 - `request_test_run` / `show_test_results` - TEST stage.

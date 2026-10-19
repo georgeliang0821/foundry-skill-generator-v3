@@ -3,6 +3,10 @@
 This session is authoring a SCENARIO (orchestration) skill. The TEST stage
 prompt above still applies to the routing samples, with the redefinition below.
 
+The L2 parent-absence and L3 child-reachability ladder below is Host-only.
+For `eaa`, the owner addendum replaces L2 with scenario resolution and explicitly
+leaves child execution unverified. Never run real orchestration automatically.
+
 ## What can and cannot be tested automatically
 
 The host chooses a scenario skill by reading its `name` and `description`. The

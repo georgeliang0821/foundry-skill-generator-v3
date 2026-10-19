@@ -1,0 +1,10 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "uv": true,
+        "npx playwright": true,
+        "/^node --check frontend\\\\js\\\\main\\.js; node --check frontend\\\\js\\\\api\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

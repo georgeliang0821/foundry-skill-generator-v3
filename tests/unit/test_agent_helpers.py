@@ -45,7 +45,10 @@ def test_output_rules_come_from_the_prompt_file() -> None:
 def test_output_rules_forbid_named_handoffs_and_require_scope_only() -> None:
     _, rules = _load_output_rules()
     text = "\n".join(rules)
-    assert "No named references to other skills anywhere in SKILL.md" in text
+    assert "No named references to other skills in descriptions or routing alternatives" in text
+    assert "For an EAA-owned scenario" in text
+    assert "children already in metadata.children" in text
+    assert "Host scenarios retain the fetch_skill-argument exception only" in text
     assert "stopping conditions" in text
     assert "in-scope portion" in text
     assert "-> use `neighbor-skill`" not in text
@@ -125,6 +128,20 @@ def test_session_context_excludes_visual_history_without_changing_recent_message
     assert "ui_history_cursor" not in context
     assert [message["content"] for message in context["conversation"]] == [str(index) for index in range(8, 20)]
     assert len(session.conversation) == 20
+
+
+def test_session_context_does_not_duplicate_previous_scenario() -> None:
+    session = Session(
+        skill_kind="scenario",
+        orchestration_owner="eaa",
+        owner_regeneration_pending=True,
+        owner_source_skill_md="Previous scenario carried in the system prompt",
+    )
+    context = json.loads(_session_context(session))
+    assert context["orchestration_owner"] == "eaa"
+    assert context["owner_regeneration_pending"] is True
+    assert "owner_source_skill_md" not in context
+    assert session.owner_source_skill_md == "Previous scenario carried in the system prompt"
 
 
 def test_normalize_openai_style_function_call() -> None:
