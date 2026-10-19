@@ -106,6 +106,48 @@ def test_eaa_prompt_has_registered_owner_addendum_at_every_stage(stage):
     assert "## EAA owner addendum" not in host_prompt
 
 
+@pytest.mark.parametrize("stage", list(Stage))
+def test_eaa_prompt_requires_business_specific_evidence_based_continuation(stage):
+    prompt = build_system_prompt(Session(
+        skill_kind=SkillKind.SCENARIO, orchestration_owner="eaa", current_stage=stage,
+    ))
+    text = " ".join(prompt.split())
+    for requirement in (
+        "Generate a business-specific interaction and continuation section",
+        "where THIS business pauses, what it asks, and which evidence allows it to continue",
+        "missing-input and required-consent conditions",
+        "short single-line `[NEEDS_INFO]: ...` question and end the current invocation",
+        "Do not perform actions that depend on the answer before it arrives",
+        "identify the case or target, the work already completed, and the specific operation awaiting approval",
+        "original request, earlier responses, pending question and workspace evidence",
+        "do not unconditionally restart from the first action",
+        "File existence alone is not proof of success",
+        "same case and specific operation",
+        "On refusal, stop and summarize completed work",
+        "ambiguous or conditional answers",
+        "unclear confirmation target, or a changed operation scope, ask again",
+        "Never reuse another case's consent",
+        "partial write or interruption does not mean the operation never ran",
+        "Renewed approval alone must not trigger resubmission",
+        "Do not invent a manifest, verification API or tool",
+        "evidence is insufficient to establish progress or authorization",
+        "do not pretend recovery is established",
+        "resends the same `session_id` and `scenario` on every continuation call",
+        "not recovery from a fixed step ID",
+        "Do not generate resume tokens, stage-state JSON, workflow YAML, custom persistence",
+        "not programmatically enforced consent gates, no-rerun guarantees or exactly-once execution",
+    ):
+        assert requirement in text
+
+
+@pytest.mark.parametrize("stage", list(Stage))
+@pytest.mark.parametrize("kind", [SkillKind.SCENARIO, SkillKind.CAPABILITY])
+def test_eaa_continuation_addendum_does_not_leak_to_host_or_capability(stage, kind):
+    prompt = build_system_prompt(Session(skill_kind=kind, current_stage=stage))
+    assert "### Interaction and continuation requirements" not in prompt
+    assert "Generate a business-specific interaction and continuation section" not in prompt
+
+
 @pytest.mark.parametrize("owner", ["host", "eaa"])
 @pytest.mark.parametrize("mode", list(Mode))
 def test_scenario_prepare_discloses_owner_choices_before_dependency_review(owner, mode):

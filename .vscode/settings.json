@@ -9,6 +9,10 @@
         "/^git --no-pager diff --check; node --check frontend\\\\js\\\\main\\.js$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^uv run --no-sync python -m pytest tests\\\\unit\\\\test_orchestration\\.py -q$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

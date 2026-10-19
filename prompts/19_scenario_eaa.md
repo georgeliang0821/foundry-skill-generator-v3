@@ -54,20 +54,52 @@ tools. Do not assume the public MCP `fetch_skill` exists internally, do not emit
 `fetch_skill(...)` calls, and do not invent names or signatures for internal tools.
 Do not instruct the Host to fetch or chain children, or to assemble their payloads.
 
-Describe the actual business behavior in prose, for example:
+### Interaction and continuation requirements
 
-1. Ask for a missing case identifier; never guess.
-2. Read the selected child contracts, perform OCR, and analyze only after success.
-3. When analysis is ready, return `needs_input` asking whether to generate and
-   publish the deliverables.
-4. Continue only on explicit approval. Stop on refusal; clarify ambiguous answers.
-5. If publication has an unknown outcome, verify remotely before considering a retry.
-6. Summarize only evidenced results and actual artifact links.
+Generate a business-specific interaction and continuation section in the parent
+body, in the skill's language. Specify where THIS business pauses, what it asks,
+and which evidence allows it to continue; do not merely copy generic runtime
+documentation or impose an OCR/procurement workflow on unrelated scenarios.
+Preserve the child's own Quality Gates and output validation.
 
-These numbered sentences are instructions, not a workflow DSL or programmatic
-guarantee. Preserve the child's own Quality Gates and output validation.
-Continuation uses the same `session_id`, `scenario`, and `needs_input`; no new
-continue tool, operation ID, or confirmation token is introduced.
+- Define missing-input and required-consent conditions. At an interaction point,
+  instruct the Agent to return a short single-line `[NEEDS_INFO]: ...` question
+  and end the current invocation. Do not perform actions that depend on the
+  answer before it arrives. The public response uses `needs_input`; this is not
+  a separate paused-state protocol.
+- Make confirmation questions self-contained: identify the case or target, the
+  work already completed, and the specific operation awaiting approval. Do not
+  ask only "Continue?" or claim work completed without evidence.
+- Before continuing, reconcile the original request, earlier responses, pending
+  question and workspace evidence against the child contracts. Reuse valid
+  completed results; do not unconditionally restart from the first action.
+  File existence alone is not proof of success.
+- Match the user's answer to the pending question for the same case and specific
+  operation. Continue that operation only on explicit approval. On refusal, stop
+  and summarize completed work. For ambiguous or conditional answers, an unclear
+  confirmation target, or a changed operation scope, ask again. Never reuse
+  another case's consent.
+- Distinguish waiting for input from uncertain execution: a publication timeout,
+  partial write or interruption does not mean the operation never ran. Check
+  available local and remote evidence using the child's published verification
+  procedure before deciding what to do. Renewed approval alone must not trigger
+  resubmission. Do not invent a manifest, verification API or tool.
+- If conversation or artifact evidence is insufficient to establish progress or
+  authorization, state the uncertainty and ask for the necessary clarification
+  or decision; do not pretend recovery is established.
+
+The shared generation rules define these principles; the parent body supplies
+business-specific stop points, questions and continuation criteria. Child
+contracts remain authoritative for inputs, success evidence, errors and checks
+for uncertain outcomes. The Host relays the user's answer and resends the same
+`session_id` and `scenario` on every continuation call; it does not chain children.
+
+This is Agent-driven continuation from saved conversation and workspace evidence,
+not recovery from a fixed step ID. Do not generate resume tokens, stage-state
+JSON, workflow YAML, custom persistence, a new continue tool, operation IDs or
+confirmation tokens. These are Agent instructions, not programmatically enforced
+consent gates, no-rerun guarantees or exactly-once execution. Summarize only
+evidenced results and actual artifact links.
 
 ### TEST and deployment boundary
 
