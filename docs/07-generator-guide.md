@@ -265,14 +265,15 @@ scenario 用來描述跨 Skill 的編排與交接；capability 負責可重複�
 
 1. 選擇 **Mode = new**、**Kind = scenario**，再按 **New session**。
 2. 對話會主動說明 **Host Agent** 與 **EAA internal Agent** 的差異及目前設定；目標清楚後，會在確認能力分工前依需求提出有理由的建議，讓你保留、切換或請它協助判斷。預設 Host 不代表你已同意採用。
-   - **Host**：宿主讀取子 Skill 契約、組裝輸入並串接執行，適合需要宿主專屬工具或由宿主掌控編排的流程。
-   - **EAA**：內部 Agent 讀契約並調派子 Skill，宿主轉達問題與結果；適合由既有可執行子 Skill 完成工作，且已具備 Mode B／互動 OBO 的環境。不確定部署條件時，可先釐清，不會只因預設值就建議 Host。
+   - **Host**：宿主解讀 parent、決定下一步、追問與階段接續，讀取子 Skill 契約、組裝輸入並委派；children 仍可全部在 EAA 執行，不需要刻意安排宿主專屬工作。
+   - **EAA**：內部 Agent 讀契約、調派子 Skill 並負責階段接續與追問，宿主啟動並轉達問題與結果。選擇須有明確責任理由，例如希望 EAA 持有接續與追問責任，或多個 Host 共用後端編排；真實執行仍需 Mode B／互動 OBO。
+   - **選擇依據**：capability 的執行位置不等於編排決策的責任歸屬；不能只因 children 全由 EAA 執行就選 EAA，也不代表 EAA 必然更快、更省或品質更好。你未指定且資訊不足時，對話會先詢問責任歸屬，不會依 children 的執行位置自動選擇；部署條件不明也會先釐清。
    - **對話確認即可切換**：選擇切換後，Agent 直接更新 session，右側選單同步，並自動繼續 PREPARE；不需再按 **Apply owner** 或傳「繼續」。已有草稿時，原問題卡會先說明清稿與重新生成影響，選擇切換即代表同意；未事先說明影響的自由文字要求才補問一次。空白新 scenario 不需要清稿確認。
    - Checklist 的 **Orchestration owner → Apply owner** 保留為手動替代入口。只有 scenario 有此選項；開啟既有技能會保留原 owner，未宣告仍是 Host；已確認的選擇不會每回合重問。
 3. 在 **Dependency whitelist (metadata.children)** 選擇流程可能使用的所有子 Skill；需要多個時用 **+ Add skill**。
 4. 點選 **Save children**，等待儲存完成；**先宣告依賴，再進行路由與鄰近 Skill 比較**。
 5. 提供流程需求並逐項確認。Host 模式確認宿主前置工作、契約指標與能力交接；EAA 模式確認內部 Agent 如何讀契約、調派能力、補問、取得同意與處理不明結果，不需要 Host 逐一串接 children。
-6. 審閱草稿並查看 **Topology**，處理未通過項目後再儲存與測試。兩種模式都用技能正文描述流程，不產生固定流程設定檔。
+6. 審閱草稿並查看 **Topology**，處理未通過項目後再儲存與測試。兩種模式都用技能正文描述流程，不產生固定流程設定檔。另須核對正文責任：EAA owner 指示 EAA 編排、Host 啟動並轉交問題與結果；Host owner 指示 Host 編排與委派，不得仍要求 Host 不參與階段接續。
 
 **切換已有技能的 owner**：可直接在對話選擇，或在 MODIFY 開啟 scenario 後改選 owner 並按 Apply owner。
 兩種入口都必須先說明並取得同意，才會清除草稿、待接受 patch、失效測試與確認，回到 PREPARE 重新確認並生成；

@@ -12,6 +12,21 @@ the EAA addendum below replaces those instructions, not the common quality rules
 - `metadata.orchestration_owner` accepts only `host` or `eaa`, only for scenarios.
   Missing owner means Host. Preserve an existing declaration; preserve omission
   in a legacy Host scenario. Never write owner into inline or script skills.
+- Capability execution location is not orchestration decision ownership.
+  Never choose `eaa` merely because all children execute in EAA. All children
+  may execute in EAA even when the owner is `host`. Recommend EAA only with an
+  explicit reason to place responsibility there, such as EAA owning stage
+  continuation and follow-up questions or multiple Hosts sharing backend
+  orchestration. Do not claim EAA is inherently faster, cheaper or higher quality.
+  If the author has not specified an owner and responsibility is unclear, ask
+  before proceeding with owner-specific decisions; do not infer it from children.
+- The parent body must match the selected owner. For `eaa`, instruct EAA to
+  orchestrate; the Host starts the scenario and relays questions and results.
+  For `host`, instruct the Host to read the parent, decide the next step and
+  delegate, including stage continuation and follow-up questions. Do not tell
+  a Host owner to stay out of stage continuation. Remove contradictory
+  instructions when drafting or refining, including from imported or previous
+  bodies; do not change the selected owner to accommodate contradictory prose.
 - Never emit `metadata.orchestration`, `orchestration_ref`, or a dedicated
   `workflow.yaml`. Do not relocate a flow DSL elsewhere. No strategy, step ID,
   outputs DSL, confirmation token, or operation ID requirement.
@@ -63,9 +78,11 @@ not fenced, because the files contain their own code blocks.
 
 ### Host owner
 
-The Host reads the body and performs Host-only pre-work, retrieves child
-contracts, assembles parameters and delegates. Preserve the existing Host format
-spec, section pointers and return-branch requirements.
+The Host reads the body, decides the next step, retrieves child contracts,
+assembles parameters and delegates. It owns stage continuation and follow-up
+questions, and performs Host-only pre-work only when needed. All children may
+execute in EAA. Preserve the existing Host format spec, section pointers and
+return-branch requirements.
 
 Use `fetch_skill(skill_name=..., sections="A, B")` once per child and collect the
 needed sections in that call. State that children absent from `list_skills` may

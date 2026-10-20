@@ -197,6 +197,54 @@ def test_owner_tool_schema_and_shared_prompt_support_single_informed_confirmatio
             assert "direct them to the scenario owner selector" not in prompt
 
 
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+@pytest.mark.parametrize("mode", list(Mode))
+def test_prepare_owner_recommendation_requires_orchestration_responsibility(owner, mode):
+    prompt = build_system_prompt(Session(
+        skill_kind=SkillKind.SCENARIO, orchestration_owner=owner,
+        mode=mode, current_stage=Stage.PREPARE,
+        children=["child-skill"], child_full_md={"child-skill": CHILD},
+    ))
+    start = prompt.index("## Proactive owner choice before dependency review")
+    end = prompt.index("## Override for block 1(b)")
+    text = " ".join(prompt[start:end].split())
+    for requirement in (
+        "The Host reads the parent, decides the next step and delegates",
+        "All children may still execute in EAA",
+        "Capability execution location is not orchestration decision ownership",
+        "Never recommend EAA merely because all children execute in EAA",
+        "EAA should own stage continuation and follow-up questions",
+        "multiple Hosts should share backend orchestration",
+        "Do not claim EAA is inherently faster, cheaper or higher quality",
+        "If the author has not specified an owner and responsibility is unclear, ask",
+        "do not infer EAA ownership from child execution location",
+    ):
+        assert requirement in text
+
+
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+@pytest.mark.parametrize("stage", list(Stage))
+def test_parent_body_responsibility_matches_selected_owner(owner, stage):
+    prompt = build_system_prompt(Session(
+        skill_kind=SkillKind.SCENARIO, orchestration_owner=owner, current_stage=stage,
+    ))
+    start = prompt.index("## Scenario ownership contract")
+    text = " ".join(prompt[start:].split())
+    for requirement in (
+        "Capability execution location is not orchestration decision ownership",
+        "Never choose `eaa` merely because all children execute in EAA",
+        "All children may execute in EAA even when the owner is `host`",
+        "If the author has not specified an owner and responsibility is unclear, ask",
+        "Do not claim EAA is inherently faster, cheaper or higher quality",
+        "For `eaa`, instruct EAA to orchestrate",
+        "the Host starts the scenario and relays questions and results",
+        "For `host`, instruct the Host to read the parent, decide the next step and delegate",
+        "Do not tell a Host owner to stay out of stage continuation",
+        "Remove contradictory instructions when drafting or refining",
+    ):
+        assert requirement in text
+
+
 @pytest.mark.parametrize("stage", list(Stage))
 def test_proactive_owner_choice_is_scoped_to_scenario_prepare(stage):
     scenario = build_system_prompt(Session(skill_kind=SkillKind.SCENARIO, current_stage=stage))
@@ -204,6 +252,7 @@ def test_proactive_owner_choice_is_scoped_to_scenario_prepare(stage):
     heading = "## Proactive owner choice before dependency review"
     assert (heading in scenario) is (stage is Stage.PREPARE)
     assert heading not in capability
+    assert "Capability execution location is not orchestration decision ownership" not in capability
 
 
 def test_eaa_named_children_are_allowed_only_in_execution_body():

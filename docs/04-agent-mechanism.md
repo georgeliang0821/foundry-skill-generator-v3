@@ -18,6 +18,10 @@ Scenario 的作者選擇保存在 session `orchestration_owner`，不是模型�
 PREPARE 的 scenario addendum 要求對話主動揭露兩種 owner 與目前設定，不把預設 Host
 當成作者已同意。目標清楚後、確認 `input_sources` 與 owner 專屬分工之前，以單一問題卡
 說明差異、依需求／已知 child 契約給出有理由的建議，並提供保留、切換及協助判斷的選項；
+capability 的執行位置不等於編排決策的責任歸屬，不能只因 children 全由 EAA 執行就建議 EAA。
+選擇 EAA 須有明確責任理由，例如讓 EAA 持有階段接續與追問責任，或讓多個 Host 共用後端編排；
+不得宣稱 EAA 必然更快、更省或品質更好。作者未指定且責任歸屬資訊不足時，先詢問誰決定下一步、
+追問與接續，不依 children 的執行位置自動選擇。
 部署條件不明時須明說，不得虛構 Host 工作或宣稱 EAA 已可部署。既有對話尚未揭露時，
 下一回合補上；已有知情選擇且符合 session owner，或剛完成已確認切換者，不重複詢問。
 不新增 checklist 欄位。作者明確選擇切換後，Agent 呼叫 `set_orchestration_owner`，
@@ -28,10 +32,14 @@ PREPARE，不需手動 Apply 或再傳「繼續」。已有草稿或尚未進入
 空白新 scenario 不需清稿確認。後端拒絕未確認的破壞性切換，且在切換工具成功或被拒絕後
 停止處理該回合其餘工具，避免套用以舊 owner 生成的內容。一般 draft／patch 仍不可直接改 metadata。
 
-- **Host**：宿主執行前置工作、取得 child 契約、組裝參數並串接能力；保留現有指標及確認關卡。
+- **Host**：宿主解讀 parent、決定下一步、追問與階段接續、取得 child 契約、組裝參數並委派；
+  有需要才執行宿主專屬前置工作，children 仍可全部在 EAA 執行；保留現有指標及確認關卡。
 - **EAA**：內部 Agent 讀自然語言正文、透過內部 skill tools 取得契約並調派能力。
   PREPARE 不要求虛構 Host 工作，若 delegation 仍有 Host 專屬能力則阻擋進 DRAFT，
   請作者調整範圍或切換 owner。不得假設公開 MCP `fetch_skill` 是內部工具。
+- **Parent 正文與 owner 一致**：EAA 正文指示 EAA 編排，Host 啟動並轉交問題與結果；
+  Host 正文指示 Host 編排與委派，不得同時要求 Host 不參與階段接續。草稿與修訂須移除
+  匯入或舊正文中矛盾的責任指示，不能為遷就正文而自行改 owner。
 - `children` 是完整能力白名單，不是執行順序；EAA child 限可執行 inline／script，
   仍檢查既有技能可讀性與禁止巢狀 scenario。
 - `record_delegation` 依 `child_skill` 增量合併契約，只更新本次提供的欄位；

@@ -20,7 +20,10 @@ introduce the choice at the next reply instead of continuing to assume Host.
 Explain the practical difference without requiring the author to know metadata:
 
 - Host Agent -- the Host reads child contracts, assembles inputs, chains children
-  and performs any work requiring its own tools.
+  and performs any work requiring its own tools. The Host reads the parent,
+  decides the next step and delegates, including stage continuation and follow-up
+  questions. All children may still execute in EAA; Host ownership does not
+  require Host-only work.
 - EAA internal Agent -- EAA reads child contracts and dispatches the declared
   executable children. The Host invokes the scenario and relays questions/results;
   it does not chain individual children. Real execution requires Mode B and
@@ -28,12 +31,20 @@ Explain the practical difference without requiring the author to know metadata:
   unsupported. Generator route-only tests do not verify real child execution.
 
 State a recommendation and its concrete reason from the goal, supplied materials
-and known child contracts, not from the default setting. Recommend Host when the
-flow needs Host-only tools or Host-controlled orchestration. Recommend EAA when
-the work belongs to existing executable children and internal orchestration is
-desired, conditional on its deployment prerequisites. If these facts are unknown,
-say what is unknown and offer to clarify; do not invent Host-only work or claim
-EAA is deployable. A recommendation is not an owner change or author confirmation.
+and known child contracts, not from the default setting. Capability execution
+location is not orchestration decision ownership. Never recommend EAA merely
+because all children execute in EAA. Recommend Host when the flow needs Host-only
+tools or the Host should control orchestration. Recommend EAA only with an
+explicit responsibility-based reason, such as the author specifying that EAA
+should own stage continuation and follow-up questions, or that multiple Hosts
+should share backend orchestration, conditional on its deployment prerequisites.
+Do not claim EAA is
+inherently faster, cheaper or higher quality.
+If the author has not specified an owner and responsibility is unclear, ask
+who should decide the next step, own follow-up questions and continue the flow;
+do not infer EAA ownership from child execution location. Say what is unknown
+and offer to clarify; do not invent Host-only work or claim EAA is deployable.
+A recommendation is not an owner change or author confirmation.
 
 Use one `ask_user_input` card labelled `definition_clear -- Orchestration owner
 (before input_sources)` with a brief comparison, current owner, recommendation
