@@ -9,12 +9,13 @@
 
 設定順序：
 
-1. 安裝前置工具（[§1](#1-前置工具與外部服務)）。
-2. 準備雲端資源、指派權限，並記下各項值（[§2](#2-準備雲端資源)）。
-3. 複製 `.env.example` 為 `.env` 並填值（[§3](#3-填寫-env)）。
-4. 啟動並登入（[§4](#4-啟動與登入)）。
+1. 與企業網路、資安及 Azure 管理員確認連線與存取條件（[導入前確認](#導入前確認網路連線與存取需求)）。
+2. 安裝前置工具（[§1](#1-前置工具與外部服務)）。
+3. 準備雲端資源、指派權限，並記下各項值（[§2](#2-準備雲端資源)）。
+4. 複製 `.env.example` 為 `.env` 並填值（[§3](#3-填寫-env)）。
+5. 啟動並登入（[§4](#4-啟動與登入)）。
 
-下列變數全部填好，就能啟動並儲存 skill：
+完成上述連線與授權確認後，填妥下列變數，才能啟動並儲存 skill：
 
 | 變數 | 去哪裡取得 | 準備步驟 |
 | --- | --- | --- |
@@ -30,6 +31,84 @@
 | `MCP_ENDPOINT` | EAA 管理員提供（`https://<eaa-host>/mcp`） | [2.6](#26-eaa-mcp) |
 
 選用功能（TEST 路由測試、ACA 查詢與 script 型 skill、多實例）見 [§5](#5-選用功能)。
+
+---
+
+## 導入前確認：網路連線與存取需求
+
+### 適用範圍與架構圖
+
+本節以 **Generator 在使用者本機執行、存取 Azure 公有雲服務**的版本為準。瀏覽器連到本機 FastAPI；Foundry、Blob、SQL 與 EAA 的服務請求由本機 Python 後端發出，不是由瀏覽器直接存取。本機執行不代表離線執行，每位執行 Generator 的使用者都需要符合下列連線條件。
+
+![Generator 本機版網路連線與存取架構：瀏覽器連到本機後端，後端依服務網路設定，經企業出口或私網路徑存取 Azure 與 EAA 服務。](images/generator-local-network.png)
+
+> 圖中 Blob／SQL 的 Private Endpoint 是部署範例，不代表所有環境都採用私網；Foundry／EAA 的 Public 或 Private 狀態須向管理員確認，並選擇對應路徑。SQL 以 **Azure SQL Database** 為目標，不代表 SQL Managed Instance 或 Fabric SQL Database 已通過相容性驗證。本圖呈現連線需求，不代表已驗證客戶環境。
+
+### 必要服務連線清單
+
+請由企業管理員依實際環境填入各服務的完整 FQDN、來源 IP／子網與 Public／Private 設定，作為網路開通依據；不要直接以整個 Azure 網域作為放行範圍。
+
+| 連線來源 | 目的服務／對應設定 | 協定／Port | 必要性與無法連線時的影響 |
+| --- | --- | --- | --- |
+| 使用者瀏覽器 | 本機 Generator：`http://localhost:6274` | HTTP／TCP `6274`（loopback） | 必要；無法操作 UI 與 API，不需對外開放本機 Port |
+| 使用者瀏覽器 | Microsoft Entra 登入服務，以 `login.microsoftonline.com` 為核心，另含租戶登入、MFA 或聯邦驗證所需端點 | HTTPS／TCP `443` | 必要；無法登入 |
+| 本機 Generator 後端 | Entra token endpoint：`login.microsoftonline.com`；身分由 `MICROSOFT_*`／`AZURE_*` 等設定決定 | HTTPS／TCP `443` | 必要；無法換取或更新所需 token |
+| 本機 Generator 後端 | Foundry Project／Agent：`FOUNDRY_PROJECT_ENDPOINT` | HTTPS／TCP `443` | 必要；無法進行 AI 對話與 Skill 生成 |
+| 本機 Generator 後端 | Azure Blob Storage：`AZURE_STORAGE_ACCOUNT_URL` | HTTPS／TCP `443` | 必要；無法讀寫 Skill 正文、script 與資產；不是 Table Storage |
+| 本機 Generator 後端 | Azure SQL Database：`AZURE_SQL_SERVER` | SQL/TDS／TCP `1433` 起，見下方說明 | 必要；無法查詢或更新 Skill metadata、ACL 與通知資料 |
+| 本機 Generator 後端 | EAA MCP：`MCP_ENDPOINT` 的 `/mcp` 端點 | 通常 HTTPS／TCP `443`，依實際 URL | 儲存必要；無法取得 `lint_skill_package` 判定時拒絕儲存 |
+| 本機 Generator 後端 | EAA Router：`SKILL_SELECTION_TEST_RUN_URL` 的 `/run` 端點 | 通常 HTTPS／TCP `443`，依實際 URL | 選用；無法執行 route-only 路由測試，不影響其他功能 |
+
+目前 SQL 程式將初始連線 Port 設為 `1433`；完整放行需求須由管理員依實際 SQL connection policy 與公私網模式確認，不能一律假設只需此 Port。Router 可以直接連 EAA 或經由閘道提供，APIM 不是必要元件。
+
+即使服務使用 Public Endpoint，也要確認企業對外連線政策、服務端網路限制與授權。瀏覽器能開啟入口網站，不代表 Python 後端、Azure SDK、SQL driver 或 `az login` 都能成功連線。
+
+### Private Endpoint 與私網環境
+
+資源關閉公開存取時，**只申請 Firewall 放行並不足以連到 Private Endpoint**。需要同時確認：
+
+1. **私網路徑**：本機可透過 VPN、企業內網銜接的 ExpressRoute 等核准路徑，連到資源所在或可達的 VNet。ExpressRoute 不代表每台辦公室電腦自動具備存取資格。
+2. **DNS**：從本機解析服務 FQDN 時，必須得到正確的私有 IP；企業 DNS 可能需要條件式轉送與 Azure Private DNS 設定。保留原始服務 FQDN，不要直接把設定改成私有 IP；SQL 使用 `<server>.database.windows.net`。
+3. **路由與網路控制**：確認企業 Firewall、NSG、UDR 與回程路徑均允許所需流量。
+
+EAA 若使用 Container Apps 的內部入口，應依該環境的實際入口與 DNS 配置確認，不能一律視為 Private Endpoint。Foundry 的私網能力也須依實際部署類型驗證。
+
+**網路可達不代表已授權。** 各服務使用的身分與權限見 [§2](#2-準備雲端資源)及 [03-architecture.md 的雲端存取身分](03-architecture.md#雲端存取身分)，不要假設網頁登入者就是所有 Azure 服務的連線身分。
+
+資源關閉 Public Access 與完全禁止對外連線是不同情境。目前實作仍使用公有 Entra 登入與 token 端點，不能直接承諾支援完全離線／air-gapped 環境。Foundry Web search 是 Foundry 側的能力與資料處理議題，須另外確認網路隔離相容性與企業政策；不是要求本機直接連 Bing，也不能因 Foundry API 可達就推定搜尋一定可用。
+
+### 企業 HTTP Proxy 與客製 Proxy
+
+「Generator 跑在本機」與「經 Proxy 存取服務」並不衝突，但需先區分兩種方案：
+
+- **標準 HTTP forward proxy**：企業核准的 HTTP 出口。可依各用戶端能力評估 `HTTPS_PROXY`／`NO_PROXY` 等設定；Python、Azure SDK、Azure CLI 與 SQL driver 不能視為相同行為。原生 SQL/TDS 連線不會因設定 `HTTPS_PROXY` 自動從 TCP `1433` 改走 HTTPS `443`。
+- **客製應用程式 Proxy**：例如在 App Service 提供公開的已驗證入口，再經 VNet Integration 存取私網資源。這是額外的服務與信任邊界，不是 Generator 內建的通用代理功能；公開入口仍須具備驗證與存取控制。
+
+現有版本沒有一個可代理所有服務的客製 Proxy 設定，須逐項確認：
+
+| 服務 | 現有程式與客製 Proxy 的相容性要求 |
+| --- | --- |
+| EAA MCP／Router | 可評估替換 `MCP_ENDPOINT`／`SKILL_SELECTION_TEST_RUN_URL`，但須保留原 MCP JSON-RPC 或 `/run` 契約、必要 headers 與驗證；替換 URL 不會自動增加 API key 或改變 token audience |
+| Blob | `AZURE_STORAGE_ACCOUNT_URL` 交給 Blob SDK 使用，代理須相容其 Blob REST API、路徑、query string、Bearer token、`x-ms-*`、ETag 與條件式讀寫；自訂讀寫 HTTP API 不能只靠替換 URL 使用 |
+| SQL | `AZURE_SQL_SERVER` 是 SQL 主機名稱，不是 HTTPS API URL；自訂 SQL HTTP API 需要資料存取層適配。若提供 SQL/TDS 隧道，仍須驗證本機入口、Port、TLS 與身分驗證相容性 |
+
+導入前需取得 Proxy 的介面範例及驗證規格，並分別確認 **Generator → Proxy** 與 **Proxy → 下游服務**的身分；Proxy 可能轉送原 token，也可能改用自己的身分，不能直接沿用直連情境的權限假設。前段使用 HTTPS 不代表後段 SQL 不再需要 SQL/TDS 連線。以上均為相容性確認事項，不是已驗證的客製 Proxy 部署步驟。
+
+企業若有 TLS inspection，須確認各用戶端信任企業 CA，不應關閉憑證驗證。安裝／更新時使用的 Python、uv、Azure CLI、npm 與套件來源另行確認；可採內部鏡像或預先備妥套件，見 [§6](#6-疑難排解公司網路擋住公開-pypi)。前端套件安裝完成後由 Generator 同源提供，不需要瀏覽器另連公開 JavaScript CDN。
+
+### 導入驗收清單
+
+以下需在目標環境實際驗證；不是只確認設定檔已填值，也不能以 ping 或 TCP Port 可達代替功能驗收。讀寫測試請使用管理員核准的測試資料，不修改既有正式 Skill。
+
+- [ ] 記錄各服務實際 FQDN、Public／Private 狀態、來源 IP／子網、Port 與核准連線路徑；私網服務從本機解析得到正確位址。
+- [ ] 瀏覽器可登入 Generator，後端可向 Entra 換取及更新 token。
+- [ ] Foundry Agent 能回覆實際對話，不只入口網站可開啟。
+- [ ] SQL 可使用指定 service principal 查詢必要資料，並具備 [§2.4](#24-azure-sql) 的最小權限。
+- [ ] Blob 可使用預期身分讀寫測試套件；若啟用歷史備份，另驗證歷史容器權限。
+- [ ] EAA MCP 能取得有效 lint 判定，並符合 [§2.6](#26-eaa-mcp) 的規則版本要求。
+- [ ] 新增測試 Skill、儲存後重新載入，確認正文、資產、metadata 與授權正確，再依核准流程清理測試資料。
+- [ ] 若啟用 Router，使用同一登入者完成 route-only 測試；這不代表 Skill 的真實業務執行已驗證。
+- [ ] 若使用客製 Proxy，逐項驗證協定、錯誤回應與兩段身分，不以 Proxy 的健康檢查成功代替下游存取驗證。
 
 ---
 
