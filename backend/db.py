@@ -36,6 +36,15 @@ def _connection_string() -> str:
             "AZURE_SQL_SERVER and AZURE_SQL_DATABASE must be set for SQL access."
         )
 
+    port = os.getenv("AZURE_SQL_PORT", "1433").strip()
+    if not (
+        port.isascii()
+        and port.isdecimal()
+        and len(port) <= 5
+        and 1 <= int(port) <= 65535
+    ):
+        raise RuntimeError("AZURE_SQL_PORT must be an integer between 1 and 65535.")
+
     tenant = os.getenv("AZURE_TENANT_ID", "").strip()
     client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
     client_secret = os.getenv("AZURE_CLIENT_SECRET", "").strip()
@@ -46,7 +55,7 @@ def _connection_string() -> str:
         )
 
     return (
-        f"Server=tcp:{server},1433;"
+        f"Server=tcp:{server},{port};"
         f"Database={database};"
         "Encrypt=yes;TrustServerCertificate=no;"
         f"UID={client_id};PWD={client_secret};"

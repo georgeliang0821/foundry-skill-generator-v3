@@ -55,11 +55,11 @@
 | 本機 Generator 後端 | Entra token endpoint：`login.microsoftonline.com`；身分由 `MICROSOFT_*`／`AZURE_*` 等設定決定 | HTTPS／TCP `443` | 必要；無法換取或更新所需 token |
 | 本機 Generator 後端 | Foundry Project／Agent：`FOUNDRY_PROJECT_ENDPOINT` | HTTPS／TCP `443` | 必要；無法進行 AI 對話與 Skill 生成 |
 | 本機 Generator 後端 | Azure Blob Storage：`AZURE_STORAGE_ACCOUNT_URL` | HTTPS／TCP `443` | 必要；無法讀寫 Skill 正文、script 與資產；不是 Table Storage |
-| 本機 Generator 後端 | Azure SQL Database：`AZURE_SQL_SERVER` | SQL/TDS／TCP `1433` 起，見下方說明 | 必要；無法查詢或更新 Skill metadata、ACL 與通知資料 |
+| 本機 Generator 後端 | Azure SQL Database：`AZURE_SQL_SERVER` | SQL/TDS／TCP `AZURE_SQL_PORT`（預設 `1433`）起，見下方說明 | 必要；無法查詢或更新 Skill metadata、ACL 與通知資料 |
 | 本機 Generator 後端 | EAA MCP：`MCP_ENDPOINT` 的 `/mcp` 端點 | 通常 HTTPS／TCP `443`，依實際 URL | 儲存必要；無法取得 `lint_skill_package` 判定時拒絕儲存 |
 | 本機 Generator 後端 | EAA Router：`SKILL_SELECTION_TEST_RUN_URL` 的 `/run` 端點 | 通常 HTTPS／TCP `443`，依實際 URL | 選用；無法執行 route-only 路由測試，不影響其他功能 |
 
-目前 SQL 程式將初始連線 Port 設為 `1433`；完整放行需求須由管理員依實際 SQL connection policy 與公私網模式確認，不能一律假設只需此 Port。Router 可以直接連 EAA 或經由閘道提供，APIM 不是必要元件。
+SQL 初始連線 Port 由 `AZURE_SQL_PORT` 設定，未設定時使用 `1433`；完整放行需求須由管理員依實際 SQL connection policy 與公私網模式確認，不能一律假設只需此 Port。Router 可以直接連 EAA 或經由閘道提供，APIM 不是必要元件。
 
 即使服務使用 Public Endpoint，也要確認企業對外連線政策、服務端網路限制與授權。瀏覽器能開啟入口網站，不代表 Python 後端、Azure SDK、SQL driver 或 `az login` 都能成功連線。
 
@@ -189,6 +189,7 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 > **資料庫的建置與授權應該已在部署 EAA 時完成，請勿重複執行。** EAA repo 的 `skill_rbac_schema v2.sql` 建立 `dbo.skills`、`dbo.user_skill_grants` 與 `dbo.v_my_skills`；`sql-database-permission.sql` 的 Case C 以最小權限把 Skill Generator 的 service principal 加入資料庫。若不確定是否已執行，請向 EAA 管理員確認。
 
 1. Azure 入口網站 → SQL database 的 Overview：**Server name** → `AZURE_SQL_SERVER`（例如 `your-server.database.windows.net`），資料庫名稱 → `AZURE_SQL_DATABASE`。
+   `AZURE_SQL_SERVER` 只填主機名稱，不附加 Port。`AZURE_SQL_PORT` 可省略，預設 `1433`；若管理員提供不同 Port，請另外填入此變數。設定值去除前後空白後，須為 1–65535 的十進位整數；空值或無效值會在開啟連線時明確報錯，不會退回預設 Port。修改後須重新啟動後端；此設定不改變驗證方式，也不代表已驗證其他 SQL 服務的相容性。
 2. 確認 `sql-database-permission.sql` Case C 中的 service principal 名稱就是 [2.2](#22-後端-service-principal) 那一支。Case C 授予 `dbo.skills` 與 `dbo.user_skill_grants` 的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`。若名稱不同，請 EAA 管理員以這支 service principal 執行 Case C。
 3. 確認 SQL Server 的防火牆允許你本機的 IP。
 4. 確認 `dbo.skills` 具有 `created_by VARCHAR(256) NULL` 欄位，且沒有以 SQL 連線身分填值的預設值。Generator 首次儲存時由後端填入已驗證登入者的小寫 email；內容更新與重新命名保留建立者。空白建立者不會列入 MODIFY，也不能修改；需要修改的資料由管理員確認建立者後補登，不從 grants 推定。
@@ -270,6 +271,7 @@ Copy-Item .env.example .env
 | 變數 | 必要 | 說明 |
 | --- | --- | --- |
 | `AZURE_SQL_SERVER` | 是 | 例如 `your-server.database.windows.net` |
+| `AZURE_SQL_PORT` | 否 | 未設定時為 `1433`；指定時須為 1–65535 的整數，不可留空 |
 | `AZURE_SQL_DATABASE` | 是 | 資料庫名稱 |
 | `AZURE_TENANT_ID` | 是 | 後端 service principal 的 tenant ID；Foundry 與 SQL 共用 |
 | `AZURE_CLIENT_ID` | 是 | 同上，client ID |

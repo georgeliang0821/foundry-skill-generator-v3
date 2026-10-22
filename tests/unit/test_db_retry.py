@@ -1,5 +1,4 @@
-"""Retry behaviour of backend.db: transient failures must retry, and the caller
-must see the original driver exception -- never RuntimeError from contextlib."""
+"""SQL connection settings and retries preserve explicit failures."""
 from __future__ import annotations
 
 import pytest
@@ -10,6 +9,61 @@ LINK_FAILURE = (
     "Driver Error: Communication link failure; DDBC Error: [Microsoft]"
     "TCP Provider: An existing connection was forcibly closed by the remote host."
 )
+
+
+@pytest.fixture()
+def sql_environment(monkeypatch):
+    monkeypatch.setenv("AZURE_SQL_SERVER", "test.database.windows.net")
+    monkeypatch.setenv("AZURE_SQL_DATABASE", "test-db")
+    monkeypatch.setenv("AZURE_TENANT_ID", "test-tenant")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "test-client")
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", "test-secret")
+    monkeypatch.delenv("AZURE_SQL_PORT", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("port", "expected"),
+    [(None, "1433"), ("1433", "1433"), ("3342", "3342"),
+     ("1", "1"), ("65535", "65535"), (" 3342 ", "3342")],
+)
+def test_sql_port_reaches_driver(sql_environment, monkeypatch, port, expected):
+    if port is not None:
+        monkeypatch.setenv("AZURE_SQL_PORT", port)
+    received = []
+    connection = FakeConnection()
+
+    def connect(connection_string):
+        received.append(connection_string)
+        return connection
+
+    monkeypatch.setattr(db.mssql_python, "connect", connect)
+    assert db._new_connection() is connection
+    assert received == [
+        f"Server=tcp:test.database.windows.net,{expected};"
+        "Database=test-db;"
+        "Encrypt=yes;TrustServerCertificate=no;"
+        "UID=test-client;PWD=test-secret;"
+        "Authentication=ActiveDirectoryServicePrincipal;"
+    ]
+    assert connection.autocommit is False
+
+
+@pytest.mark.parametrize(
+    "port",
+    ["", " ", "0", "-1", "65536", "1433.0", "abc", "+1433",
+     "1_433", "1433;Encrypt=no", "9" * 5000, "\u0661\u0664\u0663\u0663"],
+)
+def test_invalid_sql_port_fails_before_connect(sql_environment, monkeypatch, port):
+    monkeypatch.setenv("AZURE_SQL_PORT", port)
+
+    def unexpected_connect(*args, **kwargs):
+        pytest.fail("Invalid SQL port must not reach the driver.")
+
+    monkeypatch.setattr(db.mssql_python, "connect", unexpected_connect)
+    with pytest.raises(
+        RuntimeError, match="AZURE_SQL_PORT must be an integer between 1 and 65535"
+    ):
+        db._new_connection()
 
 
 class FakeCursor:
