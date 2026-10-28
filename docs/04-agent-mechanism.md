@@ -373,6 +373,11 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | **Output** | `request_test_run` ➔ `show_test_results` ➔ `record_reflection` |
 | **解鎖下一關條件** | `record_reflection` 觸編後系統**自動將狀態轉移回 REFINE**，若測試全數亮綠燈安全，使用者亦可點擊 DONE 完成。 |
 
+`record_reflection` 的 `test_run_id` 與 `confidence_delta` 為選填欄位。
+工具入口在欄位省略或明確傳入 `null` 時，分別補為 `""` 與 `0.0`；
+有效值維持不變，其他值仍須通過 `IterationReflection` 的 Pydantic 驗證，
+不以預設值掩蓋非法輸入。此處的 `0.0` 是缺值預設，不代表測試通過率。
+
 > 🔒 **執行模式（`mode`）：**
 >
 > - 選擇測試一律以 `mode="route_only"` 送出：capability 的正負樣本與 scenario 的每一層都是，**沒有任何一層會執行技能**。Router 照常路由、回傳它本來會執行的腳本，但不執行、不寫入，因此負面樣本不會誤觸有寫入行為的 skill。若查詢缺少必要輸入，runtime 可能不產生腳本，而是依 skill 契約直接回 `[NEEDS_INFO]`；回應（去掉前導空白後）以 `[NEEDS_INFO]` 開頭即屬此類，這是**正確處理缺漏欄位的合法結果**，不是錯誤。

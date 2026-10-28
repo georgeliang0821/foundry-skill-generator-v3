@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from backend.blob_store import compute_hash
 from backend.models import NegativeSample, Session, SkillKind, Stage
@@ -197,6 +198,80 @@ def test_apply_tool_effect_updates_state(backend_main) -> None:
         {"target_stage": Stage.REFINE.value, "reason": "draft accepted"},
     )
     assert session.current_stage == Stage.REFINE.value
+
+
+@pytest.mark.parametrize(
+    ("optional_args", "expected_run_id", "expected_delta"),
+    [
+        ({}, "", 0.0),
+        ({"test_run_id": "run-1"}, "run-1", 0.0),
+        ({"confidence_delta": 0.25}, "", 0.25),
+        ({"test_run_id": None, "confidence_delta": 0.25}, "", 0.25),
+        ({"test_run_id": "run-1", "confidence_delta": None}, "run-1", 0.0),
+        ({"test_run_id": None, "confidence_delta": None}, "", 0.0),
+        ({"test_run_id": "", "confidence_delta": 0.0}, "", 0.0),
+        ({"test_run_id": "run-1", "confidence_delta": -0.25}, "run-1", -0.25),
+    ],
+)
+def test_record_reflection_defaults_and_persistence(
+    backend_main, optional_args, expected_run_id, expected_delta
+) -> None:
+    session = Session(current_stage=Stage.TEST.value)
+    args = {
+        "what_went_wrong": ["A positive sample missed the skill."],
+        "what_to_change": ["Clarify the description's routing boundary."],
+        "raw": "Full reflection\nwith supporting details.",
+        **optional_args,
+    }
+
+    backend_main.apply_tool_effect(session, "record_reflection", args)
+
+    assert session.current_stage == Stage.REFINE.value
+    assert len(session.iteration_reflections) == 1
+    reflection = session.iteration_reflections[0]
+    assert reflection.test_run_id == expected_run_id
+    assert reflection.confidence_delta == expected_delta
+    assert reflection.what_went_wrong == args["what_went_wrong"]
+    assert reflection.what_to_change == args["what_to_change"]
+    assert reflection.raw == args["raw"]
+    assert backend_main.open_fix_items(session) == ([], args["what_to_change"])
+
+    backend_main.persist_session(session)
+    restored = backend_main.session_store.load(session.id)
+
+    assert restored is not None
+    assert restored.current_stage == Stage.REFINE.value
+    assert restored.iteration_reflections == session.iteration_reflections
+    assert backend_main.open_fix_items(restored) == ([], args["what_to_change"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("test_run_id", False),
+        ("test_run_id", 123),
+        ("confidence_delta", ""),
+        ("confidence_delta", []),
+        ("confidence_delta", "invalid"),
+    ],
+)
+def test_record_reflection_rejects_invalid_values(backend_main, field, value) -> None:
+    session = Session(current_stage=Stage.TEST.value)
+    args = {
+        "test_run_id": "run-1",
+        "confidence_delta": 0.25,
+        "what_went_wrong": ["A positive sample missed the skill."],
+        "what_to_change": ["Clarify the description's routing boundary."],
+        "raw": "Full reflection.",
+        field: value,
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        backend_main.apply_tool_effect(session, "record_reflection", args)
+
+    assert [error["loc"] for error in exc_info.value.errors()] == [(field,)]
+    assert session.iteration_reflections == []
+    assert session.current_stage == Stage.TEST.value
 
 
 def test_extract_section_pulls_when_to_use(backend_main) -> None:

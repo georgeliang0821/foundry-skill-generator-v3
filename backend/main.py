@@ -2657,11 +2657,13 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
 
     if tool == "record_reflection":
         from backend.models import IterationReflection
+        test_run_id = args.get("test_run_id")
+        confidence_delta = args.get("confidence_delta")
         reflection = IterationReflection(
-            test_run_id=args.get("test_run_id"),
+            test_run_id="" if test_run_id is None else test_run_id,
             what_went_wrong=[str(x) for x in (args.get("what_went_wrong") or [])],
             what_to_change=[str(x) for x in (args.get("what_to_change") or [])],
-            confidence_delta=args.get("confidence_delta"),
+            confidence_delta=0.0 if confidence_delta is None else confidence_delta,
             raw=str(args.get("raw", "")),
         )
         session.iteration_reflections.append(reflection)
