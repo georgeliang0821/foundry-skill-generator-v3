@@ -4,6 +4,7 @@ import re
 import json
 import hashlib
 from datetime import datetime
+from unittest.mock import Mock
 
 import pytest
 
@@ -212,6 +213,28 @@ def test_azure_store_rejects_a_prefix_that_drifts_from_the_computed_column(monke
     monkeypatch.setenv("AZURE_BLOB_CONTAINER", "skills-container/not-skills")
     with pytest.raises(ValueError, match="AZURE_BLOB_CONTAINER"):
         AzureBlobSkillStore()
+
+
+def test_azure_store_credential_uses_60_second_process_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT_URL", "https://example.blob.core.windows.net")
+    monkeypatch.setenv("AZURE_BLOB_CONTAINER", "skills-container")
+    monkeypatch.delenv("AZURE_BLOB_HISTORY_CONTAINER", raising=False)
+    credential_factory = Mock()
+    service_factory = Mock()
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", credential_factory)
+    monkeypatch.setattr("azure.storage.blob.BlobServiceClient", service_factory)
+
+    store = AzureBlobSkillStore()
+
+    credential_factory.assert_called_once_with(
+        exclude_environment_credential=True,
+        process_timeout=60,
+    )
+    service_factory.assert_called_once_with(
+        account_url="https://example.blob.core.windows.net",
+        credential=credential_factory.return_value,
+    )
+    assert store.service is service_factory.return_value
 
 
 def test_local_store_save_load_and_list() -> None:

@@ -448,7 +448,10 @@ class AzureBlobSkillStore:
         # return 403 (AuthorizationPermissionMismatch). Excluding it falls back
         # to ``az login`` locally / the managed identity in Azure, which MUST
         # have the "Storage Blob Data Contributor" role on the storage account.
-        credential = DefaultAzureCredential(exclude_environment_credential=True)
+        credential = DefaultAzureCredential(
+            exclude_environment_credential=True,
+            process_timeout=60,
+        )
         self.service = BlobServiceClient(account_url=account_url, credential=credential)
         # Stable identifier for *which* blob store this is, so a session can be
         # pinned to the store it modified and skill lists can be filtered to it.

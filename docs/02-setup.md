@@ -207,7 +207,7 @@ EAA runtime 直接從 SQL + Blob 載入 skill，因此這裡要指向 **EAA runt
 2. 執行 `az login`，並在儲存體帳戶上將 **Storage Blob Data Contributor** 指派給該登入帳號。一般 **Contributor** 不包含 Blob data-plane 讀寫權限，仍會發生 403。
 3. 若需要覆寫前自動備份或使用 Manage Skills 的刪除功能，在同一帳戶預先建立獨立容器（例如 `skill-history`），將名稱填入 `AZURE_BLOB_HISTORY_CONTAINER`。此容器不能與 `AZURE_BLOB_CONTAINER` 相同，也不能附帶路徑。Generator 不會自動建立容器；沿用上述 Blob 身分，須具有正式容器的讀取權與歷史容器的讀寫權。容器請維持非匿名存取，僅授予需要存取歷史的管理員與應用程式身分。
 
-> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True)`，刻意忽略 `AZURE_*` service principal，也不支援連線字串。
+> Blob 驗證使用 `DefaultAzureCredential(exclude_environment_credential=True, process_timeout=60)`，刻意忽略 `AZURE_*` service principal，也不支援連線字串。CLI 等開發者認證的單次子行程等待上限為 60 秒（SDK 預設為 10 秒），避免較慢環境取 token 時出現 `Failed to invoke the Azure CLI`，底層原因為 `subprocess.TimeoutExpired`。此設定不是整條認證鏈或 Blob HTTP 請求的總逾時，不會加快 CLI；認證失敗時也可能等待更久。
 
 > 儲存體帳戶可啟用或不啟用階層命名空間（ADLS Gen2）；啟用時列出的目錄項目（`hdi_isfolder`）不會被當成 skill 資產，刪除 skill 時也會一併移除其目錄。
 
