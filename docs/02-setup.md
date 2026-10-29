@@ -317,7 +317,7 @@ npm ci
 再啟動後端與前端靜態網站：
 
 ```powershell
-uv run python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 6274
+uv run --no-sync python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 6274
 ```
 
 > Agent Graph 使用 Cytoscape，檔案由 `node_modules` 掛載至 `/vendor`。若未先執行 `npm ci`，右側可能有狀態文字，但不會畫出圖形。
@@ -331,6 +331,16 @@ uv run python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 6274
 1. 點前端的登入按鈕（或造訪 `/api/auth/login`）開始 Microsoft 登入。
 2. 完成授權後會自動導回並設定登入 cookie，即可開始使用。
 3. 登出：呼叫 `POST /api/auth/logout`。
+
+### 登入期限與自動續期
+
+- 每次登入的 Session 與 `sgv2_auth` Cookie 固定最長 **8 小時**，從登入完成時計算，不因操作或續期延長；不是閒置 8 小時。
+- 登入會要求 `offline_access`。後端保存 Microsoft 回傳的 Refresh Token；API 驗證身分或取得委派 Token 時，若 Access Token 已過期或剩餘不超過 30 秒，會自動向 Microsoft 換取新 Token。閒置時不發送定時續期請求，回來操作時才續期。
+- 新 Refresh Token 會替換舊值；Microsoft 未回傳新 Refresh Token 時保留原值。Token 不傳給前端，也不寫入續期日誌。未取得 Refresh Token 時，Access Token 到期仍需登入。
+- Session 滿 8 小時、Refresh Token 遭撤銷，或 Entra 要求重新登入／同意時，仍須 sign-in。Entra 的條件式存取與登入頻率政策可能提早要求驗證。
+- Microsoft 暫時故障、限流或網路錯誤回傳 `503`，保留登入紀錄供重試；續期回應缺少必要欄位回傳 `502`。前端查詢登入失敗時顯示錯誤，可重新整理重試，不把這類錯誤直接當成登出。
+- 預設 `SGV2_AUTH_STORE=local` 只保存於行程記憶體，**後端重啟或 `--reload` 仍會遺失登入紀錄**；自動續期不解決此問題。一般使用、不需要即時載入程式變更時，可移除 `--reload`，但這不等於登入持久化。
+- 更新前的登入紀錄沒有 Refresh Token 與 8 小時 Session 期限，維持原有到期行為；請重新登入一次以啟用新流程。
 
 ---
 

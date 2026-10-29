@@ -7148,7 +7148,9 @@ async function refreshAuthStatus() {
   try {
     authStatus = await fetchAuthStatus();
   } catch (err) {
-    authStatus = { authenticated: false, error: err.message };
+    appLog(`Sign-in check failed: ${err.message}`);
+    el("authStatus").textContent = "Sign-in check failed; reload to retry";
+    return;
   }
   renderAuthStatus();
   // v7 RLS: show/hide login gate based on auth.

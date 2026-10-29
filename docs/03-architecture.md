@@ -321,7 +321,7 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 
 ### 流程概觀
 
-`GET /api/auth/login` 產生 state + PKCE 後把使用者導去 Entra 登入 → 使用者授權後帶授權碼回 `GET /api/auth/callback` → 後端用授權碼（加 PKCE 與 client secret）跟 Entra 換到 `access_token` → 解析出使用者 email 當身分，並把 token 記錄留在後端、只發一個 cookie 給瀏覽器。
+`GET /api/auth/login` 產生 state + PKCE 並要求 `offline_access` 後把使用者導去 Entra 登入 → 使用者授權後帶授權碼回 `GET /api/auth/callback` → 後端用授權碼（加 PKCE 與 client secret）跟 Entra 換到 `access_token` / `refresh_token` → 解析出使用者 email 當身分，並把 token 記錄留在後端、只發一個 cookie 給瀏覽器。
 
 ### 如何拿到 email
 
@@ -329,10 +329,30 @@ MODIFY 選單使用 `GET /api/skills?purpose=modify`，只列出 `created_by` �
 
 ### Token 存放在哪裡
 
-- 換到的 `access_token`（連同 `expires_at` / `scope` / `profile`）存成一筆記錄，放在後端 **`auth_store`**，以一個隨機 `auth_id` 當 key（本機＝程序記憶體；可選 `SGV2_AUTH_STORE=blob` 改存 Azure Blob）。
-- 瀏覽器只拿到一個 **httponly cookie `sgv2_auth=auth_id`**——**cookie 內只有不可猜的 `auth_id`，真正的 access token 不會外流到前端**。
+- 換到的 `access_token` / `refresh_token`（連同 `expires_at` / `session_expires_at` / `scope` / `profile`）存成一筆記錄，放在後端 **`auth_store`**，以一個隨機 `auth_id` 當 key（本機＝程序記憶體；可選 `SGV2_AUTH_STORE=blob` 改存 Azure Blob）。
+- 瀏覽器只拿到一個 **httponly cookie `sgv2_auth=auth_id`**——**cookie 內只有不可猜的 `auth_id`，真正的 Access / Refresh Token 不會外流到前端**。Cookie 與 `session_expires_at` 均從登入完成起固定 8 小時，不採滑動延長。
 - 後端要對下游系統做 OBO 委派呼叫時，用 `get_delegated_token()` 從這筆記錄取出 `access_token`。
 - 登出 `POST /api/auth/logout` 會刪除該 token 記錄並清掉 cookie。
+
+### 請求時自動續期
+
+`acl.py` 的身分擷取與 `get_auth_record()` 都先經過 `auth_store.get_auth_token()`；
+不能只讀記憶體快取，否則會繞過續期與 Session 期限。
+Session 尚未到期且 Access Token 剩餘不超過 30 秒（包含已過期）時，
+`refresh_auth_record()` 以 `grant_type=refresh_token` 呼叫 Entra。
+新 Access Token 與輪替後的 Refresh Token 一起保存，保留原始 profile 與 Session 到期時間。
+`GET /api/auth/status` 額外回傳 `session_expires_at`，不回傳任何 Token。
+
+同一行程內，同一登入的讀取／續期／刪除由可重入鎖序列化，避免並行 API 重複換 Token，
+以及登出被尚未完成的續期重新建立。Blob store 沿用相同流程寫回 Token；
+這不是跨實例分散式鎖，多實例續期與 Blob 部署仍需另外驗證，不在本機測試的保證範圍內。
+
+Entra 明確回覆 `invalid_grant`、`interaction_required`、`login_required` 或
+`consent_required` 時，刪除該登入並要求重新驗證；網路、限流、服務或應用程式設定錯誤
+則回 `503` 並保留紀錄，無效的成功回應回 `502`。
+ACL 不吞掉續期錯誤，以免將暫時故障誤回 `401`。
+前端查詢登入失敗時保留原狀態並顯示重試提示；只有明確未登入或 API `401` 才顯示登入視窗。
+Refresh Token 不存在時維持到期後重新登入；舊紀錄不自動延長成 8 小時。
 
 ---
 

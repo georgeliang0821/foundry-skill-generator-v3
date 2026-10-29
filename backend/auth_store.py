@@ -9,10 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .diagnostics import elapsed_ms, log_event, log_exception, now_ms
+
+
+AUTH_SESSION_SECONDS = 8 * 60 * 60
+RefreshAuth = Callable[[dict[str, Any]], dict[str, Any] | None]
 
 
 def _normalize_prefix(prefix: str) -> str:
@@ -34,6 +39,8 @@ def _expired(record: dict[str, Any] | None) -> bool:
 
 
 class AuthStore(Protocol):
+    refresh_auth: RefreshAuth | None
+
     def save_oauth_state(self, state: str, record: dict[str, Any]) -> None: ...
     def pop_oauth_state(self, state: str) -> dict[str, Any] | None: ...
     def save_auth_token(self, auth_id: str, record: dict[str, Any]) -> None: ...
@@ -45,7 +52,12 @@ class LocalAuthStore:
     def __init__(self, auth_tokens: dict[str, dict[str, Any]], oauth_states: dict[str, dict[str, Any]]) -> None:
         self.auth_tokens = auth_tokens
         self.oauth_states = oauth_states
+        self.refresh_auth: RefreshAuth | None = None
+        self._token_locks = [threading.RLock() for _ in range(64)]
         log_event("auth_store.local.ready")
+
+    def _token_lock(self, auth_id: str):
+        return self._token_locks[hash(auth_id) % len(self._token_locks)]
 
     def save_oauth_state(self, state: str, record: dict[str, Any]) -> None:
         self.oauth_states[state] = dict(record)
@@ -55,17 +67,38 @@ class LocalAuthStore:
         return None if _expired(record) else record
 
     def save_auth_token(self, auth_id: str, record: dict[str, Any]) -> None:
-        self.auth_tokens[auth_id] = dict(record)
+        with self._token_lock(auth_id):
+            self.auth_tokens[auth_id] = dict(record)
+
+    def _load_auth_token(self, auth_id: str) -> dict[str, Any] | None:
+        return self.auth_tokens.get(auth_id)
 
     def get_auth_token(self, auth_id: str) -> dict[str, Any] | None:
-        record = self.auth_tokens.get(auth_id)
-        if _expired(record):
-            self.auth_tokens.pop(auth_id, None)
+        with self._token_lock(auth_id):
+            record = self._load_auth_token(auth_id)
+            if not record:
+                return None
+            deadline = record.get("session_expires_at")
+            if deadline is not None and float(deadline) <= time.time():
+                log_event("auth.session.expired")
+                self.delete_auth_token(auth_id)
+                return None
+            if not _expired(record):
+                self.auth_tokens[auth_id] = record
+                return record
+            if deadline is not None and record.get("refresh_token") and self.refresh_auth is not None:
+                refreshed = self.refresh_auth(dict(record))
+                if refreshed is not None and float(deadline) > time.time():
+                    refreshed["session_expires_at"] = deadline
+                    self.save_auth_token(auth_id, refreshed)
+                    return refreshed
+            log_event("auth.session.reauthentication_required")
+            self.delete_auth_token(auth_id)
             return None
-        return record
 
     def delete_auth_token(self, auth_id: str) -> None:
-        self.auth_tokens.pop(auth_id, None)
+        with self._token_lock(auth_id):
+            self.auth_tokens.pop(auth_id, None)
 
 
 class AzureBlobAuthStore(LocalAuthStore):
@@ -154,20 +187,17 @@ class AzureBlobAuthStore(LocalAuthStore):
         return None if _expired(record) else record
 
     def save_auth_token(self, auth_id: str, record: dict[str, Any]) -> None:
-        super().save_auth_token(auth_id, record)
-        self._save_blob("auth-tokens", auth_id, record)
+        with self._token_lock(auth_id):
+            self._save_blob("auth-tokens", auth_id, record)
+            super().save_auth_token(auth_id, record)
 
-    def get_auth_token(self, auth_id: str) -> dict[str, Any] | None:
-        record = self.auth_tokens.get(auth_id) or self._load_blob("auth-tokens", auth_id)
-        if _expired(record):
-            self.delete_auth_token(auth_id)
-            return None
-        self.auth_tokens[auth_id] = record
-        return record
+    def _load_auth_token(self, auth_id: str) -> dict[str, Any] | None:
+        return self.auth_tokens.get(auth_id) or self._load_blob("auth-tokens", auth_id)
 
     def delete_auth_token(self, auth_id: str) -> None:
-        super().delete_auth_token(auth_id)
-        self._delete_blob("auth-tokens", auth_id)
+        with self._token_lock(auth_id):
+            super().delete_auth_token(auth_id)
+            self._delete_blob("auth-tokens", auth_id)
 
 
 def make_auth_store(auth_tokens: dict[str, dict[str, Any]], oauth_states: dict[str, dict[str, Any]]) -> AuthStore:

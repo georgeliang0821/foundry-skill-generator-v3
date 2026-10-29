@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from . import skills_repo
+from .auth_store import _expired
 from .diagnostics import log_event
 
 
@@ -91,17 +92,11 @@ def extract_upn_from_request(request: Request, auth_tokens: dict[str, dict[str, 
     auth_id = request.cookies.get("sgv2_auth")
     if not auth_id:
         return e2e_default_upn()
-    record = auth_tokens.get(auth_id)
-    if not record and auth_store is not None:
-        try:
-            record = auth_store.get_auth_token(auth_id)
-            if record:
-                auth_tokens[auth_id] = record
-        except Exception:
-            record = None
-    if not record:
+    record = auth_store.get_auth_token(auth_id) if auth_store is not None else None
+    record = record or auth_tokens.get(auth_id)
+    if not record or _expired(record):
         return None
-    if float(record.get("expires_at", 0)) <= time.time() + 30:
+    if record.get("session_expires_at") is not None and float(record["session_expires_at"]) <= time.time():
         return None
     profile = record.get("profile") or {}
     upn = (profile.get("email") or profile.get("username") or "").strip().lower()

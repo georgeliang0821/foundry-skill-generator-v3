@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 import time
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent import FOUNDRY_MAX_RETRIES, FOUNDRY_OUTPUT_RULES, FOUNDRY_OUTPUT_SHAPE, FOUNDRY_TIMEOUT_SECONDS, TOOL_SCHEMAS, OrchestratorAgent
-from .auth_store import _expired as auth_record_expired, make_auth_store
+from .auth_store import AUTH_SESSION_SECONDS, _expired as auth_record_expired, make_auth_store
 from .blob_store import (
     MAX_SKILL_NAME_LEN,
     CachedSkillStore,
@@ -687,6 +687,7 @@ sessions: dict[str, Session] = session_store.load_all()
 auth_tokens: dict[str, dict[str, Any]] = {}
 oauth_states: dict[str, dict[str, Any]] = {}
 auth_store = make_auth_store(auth_tokens, oauth_states)
+auth_store.refresh_auth = lambda record: refresh_auth_record(record)
 require_upn = acl_mod.make_upn_dependency(auth_tokens, auth_store)
 optional_upn = acl_mod.make_optional_upn_dependency(auth_tokens, auth_store)
 _session_store_location = str(getattr(session_store, "root", getattr(session_store, "id", "")))
@@ -1414,7 +1415,9 @@ def get_auth_record(request: Request) -> dict[str, Any] | None:
     if not auth_id:
         return None
     record = auth_store.get_auth_token(auth_id) or auth_tokens.get(auth_id)
-    if auth_record_expired(record):
+    if not record or auth_record_expired(record):
+        return None
+    if record.get("session_expires_at") is not None and float(record["session_expires_at"]) <= time.time():
         return None
     return record
 
@@ -3381,6 +3384,68 @@ def profile_from_claims(claims: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def refresh_auth_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    config = oauth_config()
+    payload = urlencode({
+        "client_id": config["client_id"],
+        "client_secret": config["client_secret"],
+        "grant_type": "refresh_token",
+        "refresh_token": record["refresh_token"],
+        "scope": f"openid profile offline_access {config['scope']}",
+    }).encode("utf-8")
+    token_request = UrlRequest(
+        config["token_url"],
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    log_event("auth.refresh.start")
+    try:
+        with urlopen(token_request, timeout=30) as response:
+            tokens = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+        except (ValueError, UnicodeError):
+            error_payload = {}
+        error_code = error_payload.get("error", "") if isinstance(error_payload, dict) else ""
+        log_event("auth.refresh.failed", level="warning", status=exc.code, error_code=error_code)
+        if exc.code in {400, 401} and error_code in {"invalid_grant", "interaction_required", "login_required", "consent_required"}:
+            return None
+        raise HTTPException(
+            status_code=503,
+            detail="Microsoft token renewal is unavailable. Please retry.",
+            headers={"Retry-After": "30"},
+        ) from exc
+    except (URLError, OSError, ValueError, UnicodeError) as exc:
+        log_event("auth.refresh.failed", level="warning", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Microsoft token renewal is unavailable. Please retry.",
+            headers={"Retry-After": "30"},
+        ) from exc
+    try:
+        if not isinstance(tokens, dict) or not isinstance(tokens.get("access_token"), str) or not tokens["access_token"]:
+            raise ValueError("Missing access token")
+        expires_in = int(tokens["expires_in"])
+        if expires_in <= 30:
+            raise ValueError("Invalid token lifetime")
+        refresh_token = tokens.get("refresh_token", record["refresh_token"])
+        if not isinstance(refresh_token, str) or not refresh_token:
+            raise ValueError("Invalid refresh token")
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        log_event("auth.refresh.invalid_response", level="error")
+        raise HTTPException(status_code=502, detail="Microsoft returned an invalid token renewal response.") from exc
+    log_event("auth.refresh.done", expires_in=expires_in)
+    return {
+        **record,
+        "access_token": tokens["access_token"],
+        "refresh_token": refresh_token,
+        "expires_at": time.time() + expires_in,
+        "scope": tokens.get("scope", record.get("scope", config["scope"])),
+    }
+
+
 @app.get("/api/auth/status")
 def auth_status(request: Request) -> dict[str, Any]:
     config = oauth_config()
@@ -3399,6 +3464,7 @@ def auth_status(request: Request) -> dict[str, Any]:
     return {
         "authenticated": bool(record),
         "expires_at": record.get("expires_at") if record else None,
+        "session_expires_at": record.get("session_expires_at") if record else None,
         "scope": config["scope"],
         "client_id": config["client_id"],
         "profile": record.get("profile") if record else None,
@@ -3512,13 +3578,14 @@ def auth_callback(request: Request, code: str = "", state: str = "", error: str 
 
     access_token = token_payload.get("access_token")
     if not access_token:
-        log_event("auth.token_exchange.missing_access_token", level="error", response=token_payload)
-        raise HTTPException(status_code=502, detail=f"Token response did not include access_token: {token_payload}")
+        log_event("auth.token_exchange.missing_access_token", level="error")
+        raise HTTPException(status_code=502, detail="Token response did not include access_token.")
     claims = decode_jwt_claims(access_token)
     profile = profile_from_claims(claims)
     log_event(
         "auth.token_exchange.done",
         access_token=mask_token(access_token),
+        has_refresh_token=bool(token_payload.get("refresh_token")),
         expires_in=token_payload.get("expires_in", 3600),
         scope=token_payload.get("scope", config["scope"]),
         profile=profile,
@@ -3527,7 +3594,9 @@ def auth_callback(request: Request, code: str = "", state: str = "", error: str 
     auth_id = secrets.token_urlsafe(32)
     auth_record = {
         "access_token": access_token,
+        "refresh_token": token_payload.get("refresh_token"),
         "expires_at": time.time() + int(token_payload.get("expires_in", 3600)),
+        "session_expires_at": time.time() + AUTH_SESSION_SECONDS,
         "scope": token_payload.get("scope", config["scope"]),
         "profile": profile,
     }
@@ -3539,7 +3608,7 @@ def auth_callback(request: Request, code: str = "", state: str = "", error: str 
         httponly=True,
         secure=False,
         samesite="lax",
-        max_age=int(token_payload.get("expires_in", 3600)),
+        max_age=AUTH_SESSION_SECONDS,
     )
     return response
 

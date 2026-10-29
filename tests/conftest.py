@@ -203,6 +203,7 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     monkeypatch.setenv("SGV2_SESSION_DIR", str(tmp_path / "sessions"))
     # Opt into the in-memory local skill store so import does not require Azure Blob.
     monkeypatch.setenv("SGV2_SKILL_STORE", "local")
+    monkeypatch.setenv("SGV2_AUTH_STORE", "local")
     # Dummy Microsoft Entra config so oauth_config() succeeds during tests.
     monkeypatch.setenv("MICROSOFT_TENANT_ID", "test-tenant")
     monkeypatch.setenv("MICROSOFT_CLIENT_ID", "test-client")
@@ -224,6 +225,16 @@ def backend_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_sql: _Fak
     module.sessions = {}
     module.auth_tokens = {}
     module.oauth_states = {}
+    module.auth_store = module.make_auth_store(module.auth_tokens, module.oauth_states)
+    module.auth_store.refresh_auth = lambda record: module.refresh_auth_record(record)
+    monkeypatch.setitem(
+        module.app.dependency_overrides, module.require_upn,
+        module.acl_mod.make_upn_dependency(module.auth_tokens, module.auth_store),
+    )
+    monkeypatch.setitem(
+        module.app.dependency_overrides, module.optional_upn,
+        module.acl_mod.make_optional_upn_dependency(module.auth_tokens, module.auth_store),
+    )
     from backend import neighbor_notice_repo
     monkeypatch.setattr(neighbor_notice_repo, "_local_repo", neighbor_notice_repo.LocalNeighborNoticeRepo())
     # Unset MCP_ENDPOINT / ACA_* values can still come from .env during import.
