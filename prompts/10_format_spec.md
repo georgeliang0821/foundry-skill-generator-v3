@@ -116,12 +116,12 @@ routing -- routing is the frontmatter `description`):
   `main()`. Give the envelope variable its own `[NEEDS_INFO]` code -- a payload
   sent in the free-text `request` parameter instead of `credentials` is the
   commonest caller error, and a field-level code cannot report it. On the
-  success path, the
-  final primary output of `main()` (the last `print`) must be a natural-language
-  summary written for a general end user -- plain prose stating the result and
-  its key points, NOT a raw dict/list/JSON or structured `result` dump. Print
-  structured/JSON as the primary output only when the user explicitly asks for
-  it. This applies to the success path only; the `[NEEDS_INFO]` line format is
+  success path, apply the shared Output Channel Contract: distinguish the
+  program's result from the final user-facing reply and identify their
+  consumers. JSON or a structured result is valid when required by the program's
+  consumer; the last `print` is not automatically a user-facing reply. Preserve
+  existing output contracts and document any supported presentation step
+  separately; do not invent Host reformatting. The `[NEEDS_INFO]` line format is
   unchanged. When a Tier 1 (`code`) material is attached and covers one of this
   skill's operations, the sample code must be DERIVED FROM IT rather than written
   afresh, preserving its guard clauses, the order of its security gates, its

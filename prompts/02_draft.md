@@ -86,14 +86,12 @@ user's accept/reject.
      catches the `KeyError`, and never reaches a `print` or a log call. Its
      absence is a non-zero exit, NOT a `[NEEDS_INFO]` line - the caller cannot
      supply it. Never hard-code a value that is
-     declared as a variable. **Success-path output must be reader-friendly:**
-     after `main()` finishes the core logic, its FINAL primary output (the last
-     `print`) must be a natural-language summary written for a general end user
-     that states the result and its key points in plain prose - NOT a raw dump
-     of a dict/list/JSON or a structured `result` object. Only when the user has
-     explicitly asked for structured/JSON output should the code print
-     structured data as the primary output. This rule governs only the success
-     path; the `[NEEDS_INFO]` line and its format stay exactly as defined above.
+     declared as a variable. **Distinguish result and presentation channels:**
+     apply the shared Output Channel Contract. Preserve structured program
+     output required by its consumer; describe a readable final user-facing
+     reply separately when the runtime supports that step. Do not assume the
+     last `print` is the final reply or invent Host post-processing. The
+     `[NEEDS_INFO]` line and its format stay exactly as defined above.
   Do NOT emit `## When to Use This Skill`. The `in_aca` flag is a deployment TODO
   and must never appear in the skill text. Do not split into multiple files.
 - **Material fidelity.** The prose sections are built from the Prepare Brief;

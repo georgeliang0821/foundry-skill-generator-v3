@@ -116,10 +116,120 @@ def test_type_conflict_is_rejected_without_writes(client, backend_main, fake_sql
     assert session.current_skill.skill_md == original
 
 
-@pytest.mark.parametrize("script, declared", [(None, "script"), (SCRIPT, "inline")])
-def test_modify_rejects_explicit_type_conflict(client, backend_main, grant_skill, script, declared) -> None:
+@pytest.mark.parametrize("stage", ["prepare", "refine"])
+@pytest.mark.parametrize("script, declared", [
+    (None, "script"), (SCRIPT, "inline"), (None, "unknown"),
+    (None, ""), (None, "null"), (None, "123"),
+])
+def test_modify_opens_type_conflict_for_repair_without_writes(
+    client, backend_main, grant_skill, monkeypatch, script, declared, stage,
+) -> None:
     saved = _seed(backend_main, grant_skill, "demo", script=script)
     saved.skill_md = saved.skill_md.replace("description:", f"metadata:\n  skill_type: {declared}\ndescription:")
+    saved = backend_main.store.save_skill(saved)
+    calls = _lint_recorder(backend_main, monkeypatch)
+    response = client.post("/api/sessions", json={
+        "mode": "modify", "target_skill_id": "demo", "start_stage": stage,
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["current_stage"] == stage
+    assert body["skill_kind"] == "capability"
+    assert body["skill_form"] == ("script" if script is not None else "inline")
+    assert body["current_skill"]["skill_md"] == saved.skill_md
+    assert body["current_skill"]["script"] == script
+    assert body["remote_version_hash"] == saved.version_hash
+    assert any("T11" in event["data"].get("text", "") for event in body["ui_history"])
+    assert any(message["metadata"].get("stored_type_issues") for message in body["conversation"])
+    assert backend_main.session_store.load(body["id"]).current_skill.skill_md == saved.skill_md
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
+    rejected = client.post(f"/api/sessions/{body['id']}/save", json={})
+    assert rejected.status_code == 400
+    assert "T11" in rejected.json()["detail"]
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
+    assert not calls
+
+
+@pytest.mark.parametrize("stage", ["prepare", "refine"])
+def test_modify_missing_type_stays_unchanged_until_save(
+    client, backend_main, grant_skill, monkeypatch, stage,
+) -> None:
+    saved = _seed(backend_main, grant_skill, "azure-diagrams-tips", script=None)
+    calls = _lint_recorder(backend_main, monkeypatch)
+    response = client.post("/api/sessions", json={
+        "mode": "modify", "target_skill_id": saved.name, "start_stage": stage,
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["current_skill"]["skill_md"] == saved.skill_md
+    assert backend_main.store.load_skill(saved.name).skill_md == saved.skill_md
+    assert not calls
+    stored = client.post(f"/api/sessions/{body['id']}/save", json={})
+    assert stored.status_code == 200, stored.text
+    assert "skill_type: inline" in stored.json()["current_skill"]["skill_md"]
+    assert "skill_type: inline" in calls[0]["files"]["SKILL.md"]
+
+
+@pytest.mark.parametrize("script, expected", [(None, "inline"), (SCRIPT, "script")])
+def test_modify_repairs_invalid_type_through_accepted_patch(
+    client, backend_main, grant_skill, monkeypatch, script, expected,
+) -> None:
+    saved = _seed(backend_main, grant_skill, "demo", script=script)
+    saved.skill_md = saved.skill_md.replace("description:", "metadata:\n  skill_type:\ndescription:")
+    backend_main.store.save_skill(saved)
+    calls = _lint_recorder(backend_main, monkeypatch)
+    response = client.post("/api/sessions", json={
+        "mode": "modify", "target_skill_id": "demo", "start_stage": "refine",
+    })
+    assert response.status_code == 200, response.text
+    session = backend_main.sessions[response.json()["id"]]
+    session.aca_env_result = FLAGS_ON
+    assert "## Repairing Existing Skill Types" in build_system_prompt(session)
+    call = PendingToolCall(call_id="repair-type", tool="propose_patch", args={
+        "target_file": "SKILL.md",
+        "patch": f"*** Begin Patch\n*** Update File: SKILL.md\n@@\n-  skill_type:\n+  skill_type: {expected}\n*** End Patch",
+        "reason": "Repair the legacy type declaration.",
+    })
+    session.pending_tool_calls.append(call)
+    accepted = client.post(f"/api/sessions/{session.id}/tool-result", json={
+        "tool_call_id": call.call_id, "result": {"action": "accept"},
+    })
+    assert accepted.status_code == 200, accepted.text
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md.replace("  skill_type:\n", f"  skill_type: {expected}\n")
+    assert backend_main.store.load_skill("demo").script == script
+    assert calls[0]["files"]["SKILL.md"] == backend_main.store.load_skill("demo").skill_md
+    assert session.patch_history[0].content_before == saved.skill_md
+
+
+def test_repaired_type_still_requires_eaa_lint_before_writing(
+    client, backend_main, grant_skill, monkeypatch,
+) -> None:
+    saved = _seed(backend_main, grant_skill, "demo", script=None)
+    saved.skill_md = saved.skill_md.replace("description:", "metadata:\n  skill_type: unknown\ndescription:")
+    backend_main.store.save_skill(saved)
+    response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo"})
+    assert response.status_code == 200, response.text
+    sid = response.json()["id"]
+    fixed = saved.skill_md.replace("skill_type: unknown", "skill_type: inline")
+    edited = client.put(f"/api/sessions/{sid}/draft", json={"skill_md": fixed})
+    assert edited.status_code == 200, edited.text
+    monkeypatch.setattr(
+        backend_main, "lint_skill_package",
+        lambda *args, **kwargs: backend_main.EaaLintResult(
+            valid=False, errors=["Package rejected"], warnings=[], ruleset_version="1.2",
+        ),
+    )
+    rejected = client.post(f"/api/sessions/{sid}/save", json={})
+    assert rejected.status_code == 400, rejected.text
+    assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
+    assert backend_main.session_store.load(sid).current_skill.skill_md == fixed
+
+
+def test_modify_still_rejects_scenario_with_own_script(client, backend_main, grant_skill) -> None:
+    saved = _seed(backend_main, grant_skill, "demo")
+    saved.skill_md = saved.skill_md.replace(
+        "description:", "metadata:\n  skill_type: scenario-orchestration\n  children: [child]\ndescription:",
+    )
     backend_main.store.save_skill(saved)
     response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "demo"})
     assert response.status_code == 400

@@ -252,6 +252,20 @@ modify 模式下的 Session 清單會依目前 Skill 篩選，沒看到對話時
 | **quick edit** | 調整少量描述、修正條件、處理既有 finding | 以已儲存內容為基準，從 REFINE 開始。 |
 | **re-plan** | 重新定義目標、資料來源、能力範圍或重要輸入 | 載入既有內容，從 PREPARE 重新確認。 |
 
+### 修復舊版 Skill 的類型
+
+舊 capability 缺少 `metadata.skill_type`、欄位為空或宣告值不符合套件形式時，
+仍可用 **modify** 開啟，不必改用 new 重建。載入保留原稿與正式套件；
+不合法的類型會在對話狀態與 **Topology** 顯示待修正原因，Agent 也能取得此資訊。
+缺少欄位會在通過驗證的儲存流程補上；已有不合法值則需先確認修正方向，
+在 **quick edit** 審閱類型修正 Patch，或編輯 Source 後儲存。
+capability 的既有形式依實際附帶腳本判定，不會因舊宣告自動新增或刪除腳本。
+
+**可載入不代表可發布。** 存檔與接受 Patch 後的同步仍受完整本機驗證及 EAA lint
+限制；不合法值不能透過刪除欄位逃過 Patch 檢查。請先修正類型，再進行路由測試或驗收。
+scenario／children 宣告矛盾、scenario 附帶自己的腳本、編排責任宣告不合法，
+或套件檔案無法安全攜帶時，仍會阻擋開啟，這不是通用的損壞套件修復模式。
+
 ![quick edit 載入既有 Skill，從 REFINE 開始且內容尚未修改](images/generator/15-quick-edit.png)
 
 6. 說明具體要改什麼、哪些行為必須保留。

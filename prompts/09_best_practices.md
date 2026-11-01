@@ -18,11 +18,37 @@
   availability or booking, complete only the attribute filtering.
 - Keep environment variable instructions explicit and actionable.
 - Preserve user-provided constraints and avoid inventing unsupported capabilities.
-- On the success path, make the sample code's final primary output a natural-language summary a general end user can read, not a raw dict/list/JSON dump; use structured/JSON output only when the user explicitly asks for it.
+- Apply the Output Channel Contract below when generating or reviewing outputs.
 - **The backend sees only `name` and `description` when it picks a skill.** The
   body plays no part in selection -- it is read after the skill is already
   chosen, for comprehension and recovery. Putting routing signal in the body
   does nothing; it belongs in the `description`.
+
+## Output Channel Contract
+
+Machine-readable results and user-facing replies are different output channels.
+
+- Program/tool stdout may carry JSON, dict/list data, or another structured result
+  required by its declared consumer. Preserve that contract for EAA, the Host,
+  or subsequent processing; machine-readable JSON does not require the end user
+  to have asked for JSON.
+- The final user-facing reply should state verified results and key points in
+  readable prose by default. Honor an explicit user request for structured/JSON
+  replies. When a file is produced, use its verified filename or location, not
+  an invented artifact or an unsupported success claim.
+- Do not assume that the Host reformats stdout. If a confirmed runtime contract
+  exposes stdout directly to the user, make that output reader-friendly only
+  where the runtime permits it. If stdout must remain machine-readable, keep it
+  intact and describe the final presentation separately only when a supported
+  presentation step is known. Do not invent a wrapper or summarization capability.
+- Do not treat a prose mention of JSON, dict/list, or `stdout` as an output-format
+  defect. Neither structured program output nor a skill's output instructions
+  alone prove that a raw JSON reply reaches the user. If the consumer or
+  presentation behavior is unknown, clarify it instead of prescribing a change.
+- The `script` form's JSON stdout and `[NEEDS_INFO]` contracts are unchanged.
+  Never replace their machine-readable output with prose to satisfy a
+  presentation preference. Preserve the needs-info marker and failure behavior
+  in every form.
 
 ## Error Taxonomy (capability skills)
 
@@ -126,4 +152,3 @@ reachable code path.
   `is_public`. Marking a shared skill internal takes it out of everyone's
   catalog, so it belongs only on a capability skill that exists to serve one
   parent.
-

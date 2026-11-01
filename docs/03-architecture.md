@@ -81,6 +81,12 @@ flowchart LR
 [topology.py](../backend/topology.py) 以 T12 驗證欄位位置、舊流程欄位禁用、
 EAA 非空正文與可執行的 children。Generator 仍只產出 scenario-orchestration／inline／script。
 
+MODIFY 載入已知形式的 capability 時，T11 類型問題保留為修復診斷，
+不阻擋建立 session，也不改寫 Blob／SQL。診斷保存在 system conversation
+及 UI status history，沿用 Topology 檢查顯示目前狀態；缺少類型由既有存檔
+canonicalization 補齊。修訂後的類型、發布檢核及 scenario 結構／owner 守衛
+不放寬，類型修正沿用現有 Patch 審閱與同步流程。
+
 `POST /api/sessions/{id}/orchestration-owner` 只更新該使用者的 scenario session。
 對話工具 `set_orchestration_owner` 與此 UI API 共用 `_change_orchestration_owner`，
 只在作者明確選擇後套用，不允許模型自行決定。聊天問題卡事先說明切換影響後取得的同意，

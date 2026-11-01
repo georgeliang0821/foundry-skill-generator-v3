@@ -23,7 +23,7 @@ MD = (FIXTURE / "SKILL.md").read_text(encoding="utf-8")
 PY = (FIXTURE / "scripts" / "ms-graph-room-finder.py").read_text(encoding="utf-8")
 FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
 FLAGS_OFF = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "false"}}
-# sha256 of each inline prompt, including the Generator skill-type contract.
+# sha256 of each inline prompt, including the skill-type and output-channel contracts.
 BASELINE = json.loads((Path(__file__).parent / "inline_prompt_baseline.json").read_text(encoding="utf-8"))
 
 
@@ -52,7 +52,7 @@ def _session(stage: Stage, *, mode: str = "new", kind: str = "capability", aca=F
 
 
 def inline_cases() -> dict[str, Session]:
-    """Sessions with no code material: Phase 3 must leave their prompts byte-identical."""
+    """Sessions with no code material, locked to the approved prompt baseline."""
     cases = {f"new-{stage.value}": _session(stage, form=None if stage is Stage.PREPARE else "inline") for stage in Stage}
     cases["new-prepare-no-aca"] = _session(Stage.PREPARE, aca=None)
     cases["modify-refine"] = _session(Stage.REFINE, mode="modify", form="inline")
@@ -119,6 +119,55 @@ def _script_session(stage: Stage, **overrides) -> Session:
     session = _session(stage, form="script", **{"materials": [TEXT, CODE], **overrides})
     session.current_skill.script = PY
     return session
+
+
+@pytest.mark.parametrize("stage", [Stage.DRAFT, Stage.REFINE, Stage.TEST])
+@pytest.mark.parametrize("mode", ["new", "modify", "import"])
+@pytest.mark.parametrize("form", ["inline", "script"])
+def test_output_channels_stay_distinct_in_composed_prompts(stage, mode, form) -> None:
+    session = _script_session(stage, mode=mode) if form == "script" else _session(stage, mode=mode, form="inline")
+    prompt = " ".join(build_system_prompt(session).split())
+
+    for phrase in [
+        "## Output Channel Contract",
+        "Machine-readable results and user-facing replies are different output channels.",
+        "Do not assume that the Host reformats stdout.",
+        "Do not treat a prose mention of JSON, dict/list, or `stdout` as an output-format defect.",
+        "The `script` form's JSON stdout and `[NEEDS_INFO]` contracts are unchanged.",
+    ]:
+        assert phrase in prompt
+    for obsolete in [
+        "the sample code's final primary output a natural-language summary",
+        "the final primary output of `main()` must stay a natural-language summary",
+        "final primary output of `main()` (the last `print`) must be a natural-language summary",
+        "its FINAL primary output (the last `print`) must be a natural-language summary",
+    ]:
+        assert obsolete not in prompt
+    if form == "script":
+        assert load_prompt("02_draft_script_addendum.md" if stage != Stage.TEST else "04_test_script_addendum.md") in build_system_prompt(session)
+
+
+@pytest.mark.parametrize("stage", [Stage.REFINE, Stage.TEST])
+def test_instruction_only_json_output_is_not_evidence_of_a_defect(stage) -> None:
+    session = _session(stage, mode="modify", form="inline", materials=[TEXT])
+    session.current_skill.skill_md = (
+        "---\nname: azure-diagrams-tips\nmetadata:\n  skill_type: inline\n---\n\n"
+        "## Technical Requirements\n\n8. The code must contain three sections:\n"
+        "- C. Output Notes (JSON to stdout)\n"
+    )
+    prompt = " ".join(build_system_prompt(session).split())
+    assert "C. Output Notes (JSON to stdout)" in prompt
+    assert "Do not treat a prose mention of JSON, dict/list, or `stdout` as an output-format defect." in prompt
+    if stage == Stage.TEST:
+        for phrase in [
+            "### Output-format findings require channel evidence",
+            "quote the prepared-code output statement",
+            "identify its consumer",
+            "cite the confirmed requirement or applicable runtime contract",
+            "not a mandatory `what_to_change` item",
+            "route-only tests do not observe a final user-facing reply",
+        ]:
+            assert phrase in prompt
 
 
 @pytest.mark.parametrize(

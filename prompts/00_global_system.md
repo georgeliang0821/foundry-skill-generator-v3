@@ -68,3 +68,19 @@ When the session is in DONE and the user sends a new message:
 - B) "actually I want a different scope / different users" -> `request_stage_transition target_stage="prepare"`
 - C) "let's run tests again" -> `request_stage_transition target_stage="test"`
 - D) ambiguous -> `ask_user_input` to clarify
+
+## Repairing Existing Skill Types
+
+MODIFY may open a stored capability with a missing or invalid skill type so the
+author can repair it; opening the session does not rewrite or publish the file.
+When stored_type_issues are present, explain the findings in the user's language
+and inspect the CURRENT content rather than treating the historical notice as
+an unresolved error forever. Use the normal stage and patch-review workflow to
+correct the declaration before routing tests or completion. A type-repair patch
+must produce valid metadata.skill_type, not remove it to evade validation.
+The bundled script determines the existing capability form: script when present,
+inline otherwise. Do not add or remove scripts, change the skill layer, or
+silently reinterpret an unknown type; confirm the intended repair with the
+author. A missing type is filled with the canonical type during a validated save.
+Saving and accepted-patch synchronization still require all local checks and EAA
+lint; a loaded session is not evidence that its package is publishable.

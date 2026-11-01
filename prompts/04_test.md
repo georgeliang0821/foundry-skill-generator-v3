@@ -184,13 +184,35 @@ Report either as a USAGE (content) finding and fix it in REFINE.
 A12 catches the mechanical half: a call whose result is never looked at. The
 other half is yours -- read every string the code prints on its way out and ask
 whether the code KNOWS it is true. A line like "已成功送出" printed from a branch
-that only knows the call returned is a claim about a system nobody queried. The
-host shows a completed response to the user verbatim, so an unverified claim
-reaches them as fact, and a create/submit the user believes failed gets sent
-twice.
+that only knows the call returned is a claim about a system nobody queried.
+If the confirmed runtime contract forwards that response verbatim, the claim
+reaches the user directly; if a supported Agent presentation step consumes it,
+the result must still distinguish verified success from an unknown outcome.
+Never assume that the Host corrects unsupported success claims.
 
 The fix is almost never a bigger success message. It is to print what the tool
 actually returned, or to check the outcome before saying anything about it.
+
+### Output-format findings require channel evidence
+
+Apply the shared Output Channel Contract. For a semantic output-format finding,
+quote the prepared-code output statement, identify its consumer, and cite the
+confirmed requirement or applicable runtime contract that it violates. Keep
+mechanical `[error]` findings from the static checker as required above; do not
+replace a machine-readable contract with a presentation preference.
+
+A prose instruction such as `Output Notes (JSON to stdout)` is not evidence of
+a defective user-facing reply. Structured stdout consumed by EAA, the Host, or
+subsequent work is not a mandatory fix merely because it is JSON. With channel
+evidence of a presentation mismatch, distinguish fixing the user-facing reply
+from changing the program's stdout, and preserve required machine-readable data.
+
+Missing consumer evidence or unknown Host presentation behavior is a
+clarification, not a mandatory `what_to_change` item. Ask about the intended
+contract if needed; do not prescribe prose stdout or invent a presentation step.
+Remember that route-only tests do not observe a final user-facing reply: report
+only what the prepared code and known contracts establish, not a claimed
+execution result.
 
 ### 5. Resource reads
 

@@ -378,6 +378,24 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 有效值維持不變，其他值仍須通過 `IterationReflection` 的 Pydantic 驗證，
 不以預設值掩蓋非法輸入。此處的 `0.0` 是缺值預設，不代表測試通過率。
 
+#### 輸出格式：機器結果與使用者回覆分開判斷
+
+共用 [09_best_practices.md](../prompts/09_best_practices.md) 的
+`Output Channel Contract` 區分程式／工具結果與使用者最終回覆，
+DRAFT、REFINE、格式規範與 TEST 均沿用它。程式 stdout 可以依消費者契約
+使用 JSON 或結構化資料，不要求使用者先明確指定 JSON；最終回覆預設以可讀文字
+說明已驗證結果，使用者要求結構化回覆時則尊重該需求。
+不能假設 Host 一定整理 stdout，也不能虛構摘要步驟；若已知契約直接展示 stdout，
+須同時遵守 runtime 的輸出限制。script 的 JSON stdout、`[NEEDS_INFO]`
+及失敗處理契約不變，程式 lint 不因可讀性偏好而放寬。
+
+TEST 的語意輸出格式 finding 必須引用 prepared code 的輸出語句、指出消費者，
+並對應已確認需求或 runtime 契約。正文中的 `Output Notes (JSON to stdout)`
+只是指示，不足以證明使用者會收到不合需求的 JSON，也不能因此強制改成文字 stdout。
+缺少通道證據或不清楚 Host 呈現方式時，列為待釐清，不放入必修 `what_to_change`；
+機械式靜態檢核的 error 仍照原規則處理。`route_only` 不觀察實際最終回覆。
+pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實呈現已通過驗收。
+
 > 🔒 **執行模式（`mode`）：**
 >
 > - 選擇測試一律以 `mode="route_only"` 送出：capability 的正負樣本與 scenario 的每一層都是，**沒有任何一層會執行技能**。Router 照常路由、回傳它本來會執行的腳本，但不執行、不寫入，因此負面樣本不會誤觸有寫入行為的 skill。若查詢缺少必要輸入，runtime 可能不產生腳本，而是依 skill 契約直接回 `[NEEDS_INFO]`；回應（去掉前導空白後）以 `[NEEDS_INFO]` 開頭即屬此類，這是**正確處理缺漏欄位的合法結果**，不是錯誤。

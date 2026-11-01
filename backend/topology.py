@@ -323,7 +323,7 @@ def _check_skill_type(frontmatter: dict, add, *, kind: SkillKind, script: str | 
         resolved = "inline" if declared == "code-generation" else declared
         expected = expected_skill_type(kind, script)
         if not isinstance(resolved, str) or resolved not in GENERATOR_SKILL_TYPES:
-            add("T11", "Generator skill_type must be scenario-orchestration, inline or script.")
+            add("T11", f"Generator skill_type must be scenario-orchestration, inline or script. Received metadata.skill_type={declared!r}.")
         elif resolved != expected:
             add("T11", f"metadata.skill_type is `{declared}` but this package requires `{expected}`.")
     if kind == SkillKind.SCENARIO and script is not None:

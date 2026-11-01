@@ -2832,10 +2832,16 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
                 ),
             )
         inferred_kind = SkillKind.SCENARIO if has_children else SkillKind.CAPABILITY
-        type_errors = [
-            issue.message for issue in validate_topology(files.skill_md, inferred_kind, mode=Mode.MODIFY, script=files.script)
+        type_issues = [
+            issue for issue in validate_topology(files.skill_md, inferred_kind, mode=Mode.MODIFY, script=files.script)
             if issue.rule in {"T3", "T4", "T5", "T10", "T11", "T12"} and issue.severity is Severity.ERROR
         ]
+        # A known capability form can be repaired without changing its layer or files.
+        repairable = [
+            issue for issue in type_issues
+            if issue.rule == "T11" and inferred_kind is SkillKind.CAPABILITY
+        ]
+        type_errors = [issue.message for issue in type_issues if issue not in repairable]
         if type_errors:
             raise _lint_failure("skill_type_invalid", "Skill type validation failed", type_errors)
         if req.skill_kind is not None and SkillKind(req.skill_kind) is not inferred_kind:
@@ -2850,6 +2856,22 @@ def _create_session(req: CreateSessionRequest, upn: str, *, session_id: str | No
         # After the round-trip above, which drops asset content.
         session.assets = _load_stored_assets(session, files.name)
         session.assets_synced = True
+        if repairable:
+            detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in repairable)
+            notice = f"Stored skill opened for type repair; skill content unchanged.\n{detail}"
+            session.conversation.append(ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=notice,
+                metadata={"stored_type_issues": [issue.model_dump(mode="json") for issue in repairable]},
+            ))
+            add_history(session, "status", {"text": notice})
+            log_event(
+                "session.create.type_repair",
+                level="warning",
+                session_id=session.id,
+                target_skill_id=req.target_skill_id,
+                issues=[issue.model_dump(mode="json") for issue in repairable],
+            )
         log_event(
             "session.create.load_target.done",
             session_id=session.id,

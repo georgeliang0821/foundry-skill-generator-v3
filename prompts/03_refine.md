@@ -53,11 +53,14 @@ content and the metadata always stay consistent.
   preserve each field's source, update its binding and missing-data handling
   together, and never convert request fields to environment reads merely to
   satisfy the legacy recipe. A source change requires confirmation.
-- **Keep the success-path output reader-friendly.** When patching
-  `## API Reference / Sample Code`, the final primary output of `main()` must
-  stay a natural-language summary for a general end user (plain prose, not a raw
-  dict/list/JSON or structured `result` dump), unless the user explicitly asked
-  for structured/JSON output. The `[NEEDS_INFO]` line format is unchanged.
+- **Preserve result and presentation contracts.** Apply the shared Output
+  Channel Contract when patching prose or `## API Reference / Sample Code`.
+  A mention of JSON or `stdout` is not a reason to change the program's output.
+  Before an output-format patch, identify the actual consumer and the confirmed
+  requirement being violated. Keep required machine-readable output intact;
+  change final presentation only through a supported step and with the author's
+  agreement. If the channel is unknown, clarify it instead of proposing a fix.
+  The `[NEEDS_INFO]` line format is unchanged.
 - **Material fidelity survives REFINE.** A patch must never rewrite sample code
   that came from a Tier 1 (`code`) material back into an invented equivalent, and
   must never introduce a SQL object, stored procedure, table, column, endpoint or
