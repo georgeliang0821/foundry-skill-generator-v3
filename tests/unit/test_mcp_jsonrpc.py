@@ -160,6 +160,83 @@ def _tool_reply(inner: dict) -> bytes:
     return json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}}).encode()
 
 
+@pytest.mark.parametrize("with_data", [False, True])
+def test_aca_failed_status_preserves_error_and_reports_unknown_settings(monkeypatch, with_data) -> None:
+    from backend.models import Material, MaterialKind, Session
+    from backend.state_machine import (
+        SKILL_FORM_FLAGS_OFF_NOTE,
+        SKILL_FORM_LOOKUP_FAILED_NOTE,
+        build_system_prompt,
+        evaluate_skill_form,
+        flag_lookup_failed,
+        load_prompt,
+    )
+
+    error = "App Service deployment is not ACA."
+    payload = {"status": "failed", "error": error}
+    if with_data:
+        payload["data"] = {
+            "architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"},
+        }
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(_tool_reply(payload)))
+    events = []
+    monkeypatch.setattr(mcp_jsonrpc, "log_event", lambda event, **fields: events.append((event, fields)))
+
+    result, err = _call()
+
+    assert result is None
+    assert err == error
+    assert events[-1][0] == "mcp.aca_env.tool_error"
+    assert events[-1][1]["error"] == error
+    assert events[-1][1]["level"] == "error"
+    assert not any(event == "mcp.aca_env.done" for event, _ in events)
+
+    session = Session(
+        aca_env_result=result,
+        aca_env_error=err,
+        materials=[Material(kind=MaterialKind.CODE, content='print("example")\n')],
+    )
+    session = Session.model_validate_json(session.model_dump_json())
+    assert session.aca_env_result is None and session.aca_env_error == error
+    assert flag_lookup_failed(session)
+    flag = next(check for check in evaluate_skill_form(session).failures if check.check == "eaa_flags")
+    assert "Could not read the EAA script flags" in flag.message
+    assert error in flag.message
+    assert "unknown whether EAA runs script skills" in flag.message
+    prompt = build_system_prompt(session)
+    assert f"Lookup status: failed\n\nError: {error}" in prompt
+    assert load_prompt(SKILL_FORM_LOOKUP_FAILED_NOTE) in prompt
+    assert load_prompt(SKILL_FORM_FLAGS_OFF_NOTE) not in prompt
+
+
+@pytest.mark.parametrize("error_fields", [{}, {"error": ""}, {"error": None}])
+def test_aca_failed_status_without_error_is_still_a_failure(monkeypatch, error_fields) -> None:
+    payload = {"status": "failed", **error_fields}
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(_tool_reply(payload)))
+
+    result, err = _call()
+
+    assert result is None
+    assert err == "list_aca_environment_variables returned status=failed without an error message."
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_aca_success_preserves_environment_configuration(monkeypatch, wrapped) -> None:
+    data = {
+        "revision": "r1",
+        "variables": ["A"],
+        "architectural_config": {
+            "DYNAMIC_SKILLS_ENABLED": "true",
+            "SKILL_SCRIPTS_ENABLED": "true",
+            "OBO_SCOPE_REGISTRY": {"TOKEN": "api://example/read"},
+        },
+    }
+    payload = {"status": "completed", "data": data} if wrapped else data
+    monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(_tool_reply(payload)))
+
+    assert _call() == (data, None)
+
+
 def test_lint_skill_package_sends_files_as_a_json_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MICROSOFT_OBO_SCOPE", "api://app-id/user_impersonation")
     report = {"status": "completed", "valid": True, "errors": [], "warnings": [], "ruleset_version": "1.0"}

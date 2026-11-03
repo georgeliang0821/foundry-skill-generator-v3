@@ -393,6 +393,10 @@ def list_aca_environment_variables_jsonrpc(
 
     try:
         payload = _extract_tools_call_payload(data)
+        if isinstance(payload, dict) and payload.get("status") == "failed":
+            err = jsonrpc_error_message(payload) or "list_aca_environment_variables returned status=failed without an error message."
+            log_event("mcp.aca_env.tool_error", level="error", endpoint=mcp_url, error=err, duration_ms=elapsed_ms(started))
+            return None, err
         result = payload.get("data", payload) if isinstance(payload, dict) else payload
     except Exception as exc:  # noqa: BLE001
         log_exception("mcp.aca_env.parse_failed", exc, endpoint=mcp_url, duration_ms=elapsed_ms(started))

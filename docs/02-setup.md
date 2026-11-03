@@ -375,6 +375,8 @@ SKILL_SELECTION_TEST_RUN_URL=https://eaa.foundryeaa.org/run
 | `ACA_SUBSCRIPTION_ID` | 該 app 的訂閱 ID |
 
 - 這三個加上 `MCP_ENDPOINT` **四個都填才會啟用**；任一留空就不查詢，其他流程不受影響。
+- 若目標 **EAA 部署在 App Service 而非 ACA**，請將 `ACA_APP_NAME` 留空，以跳過 ACA 查詢；不要填 App Service 的名稱。`MCP_ENDPOINT` 仍供其他 MCP 工具（例如儲存時的 `lint_skill_package`）使用，不要因為停用 ACA 查詢而清空它。這裡指的是 EAA 的部署環境，不是 Generator 本身的執行位置。
+- 此查詢只適用於 ACA，不會讀取 App Service 的設定。MCP 工具若回傳 `{"status": "failed", "error": "實際錯誤訊息"}`，Generator 會保留錯誤並呈現查詢失敗／部署設定未知，不把它當成空的有效設定，也不代表目標環境沒有變數或不支援 script。一般 inline 流程可繼續；script 形式仍須取得有效旗標，既有鎖定與儲存規則不變。
 - **Script 型 skill**（`SKILL.md` 加上一支 `scripts/<name>.py`）需要這個查詢。只有當 ACA 上 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 都是 `true` 時才會產出 script 型；未啟用查詢時一律是 inline。旗標如何影響 PREPARE 與儲存，見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。
 
 ### 5.3 多實例部署
