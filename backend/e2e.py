@@ -75,12 +75,11 @@ def get_scenario() -> str:
 
 
 def fake_aca_env_result() -> dict[str, Any] | None:
-    """Stand-in ACA lookup: the script flags are on only in the script-form scenarios."""
-    if get_scenario() not in {"script_flags_on", "material_patch"}:
-        return None
+    """Stand-in ACA lookup: non-script scenarios explicitly disable script form."""
+    enabled = get_scenario() in {"script_flags_on", "material_patch"}
     return {
         "variables": [],
-        "architectural_config": {flag: "true" for flag in SCRIPT_SKILL_FLAGS},
+        "architectural_config": {flag: "true" if enabled else "false" for flag in SCRIPT_SKILL_FLAGS},
     }
 
 

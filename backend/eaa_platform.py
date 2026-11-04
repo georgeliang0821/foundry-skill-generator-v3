@@ -176,16 +176,14 @@ def obo_registry_keys(aca_env_result: Mapping[str, Any] | None) -> frozenset[str
     return keys or STATIC_OBO_REGISTRY_KEYS
 
 
-# Both must be on for EAA to load a script-based skill (core_handler.startup / skills_sync).
-SCRIPT_SKILL_FLAGS = ("DYNAMIC_SKILLS_ENABLED", "SKILL_SCRIPTS_ENABLED")
+SCRIPT_SKILL_FLAGS = ("SKILL_SCRIPTS_ENABLED",)
 
 
 def script_flags_off(aca_env_result: Mapping[str, Any] | None) -> list[str]:
-    """The script-skill flags that are not on in ``architectural_config``; a missing flag is off."""
+    """Script flags not enabled in ``architectural_config``; missing settings default to on."""
     config = aca_env_result.get("architectural_config") if isinstance(aca_env_result, Mapping) else None
     config = config if isinstance(config, Mapping) else {}
-    # EAA reads these as os.environ.get(NAME, "false").lower() == "true".
-    return [name for name in SCRIPT_SKILL_FLAGS if str(config.get(name, "false")).lower() != "true"]
+    return [name for name in SCRIPT_SKILL_FLAGS if str(config.get(name, "true")).lower() != "true"]
 
 
 def reserved_credentials_key_reason(name: str, registry_keys: Collection[str]) -> str | None:

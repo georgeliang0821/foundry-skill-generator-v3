@@ -1105,7 +1105,10 @@ def test_fake_runner_checks_requested_scripts_only_for_a_script_skill() -> None:
     assert run.negative_results[0].requested_scripts == []
 
 
-@pytest.mark.parametrize(("scenario", "flags_on"), [("new_skill_happy_path", False), ("script_flags_on", True)])
+@pytest.mark.parametrize(
+    ("scenario", "flags_on"),
+    [("new_skill_happy_path", False), ("script_flags_on", True), ("material_patch", True)],
+)
 def test_fake_aca_lookup_turns_the_script_flags_on_only_in_its_scenario(scenario: str, flags_on: bool) -> None:
     from backend.e2e import fake_aca_env_result, set_scenario
     from backend.eaa_platform import script_flags_off
@@ -1117,3 +1120,4 @@ def test_fake_aca_lookup_turns_the_script_flags_on_only_in_its_scenario(scenario
         set_scenario("new_skill_happy_path")
 
     assert (not script_flags_off(result)) is flags_on
+    assert result["architectural_config"] == {"SKILL_SCRIPTS_ENABLED": "true" if flags_on else "false"}

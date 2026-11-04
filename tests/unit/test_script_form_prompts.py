@@ -12,7 +12,6 @@ from backend.models import Material, MaterialKind, Session, Stage, TestResult as
 from backend.state_machine import (
     FORM_STAGE_ADDENDA,
     SKILL_FORM_FLAGS_OFF_NOTE,
-    SKILL_FORM_LOOKUP_FAILED_NOTE,
     build_system_prompt,
     load_prompt,
 )
@@ -21,8 +20,8 @@ REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "skills" / "ms-graph-room-finder"
 MD = (FIXTURE / "SKILL.md").read_text(encoding="utf-8")
 PY = (FIXTURE / "scripts" / "ms-graph-room-finder.py").read_text(encoding="utf-8")
-FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
-FLAGS_OFF = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "false"}}
+FLAGS_ON = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "true"}}
+FLAGS_OFF = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "false"}}
 # sha256 of each inline prompt, including the skill-type and output-channel contracts.
 BASELINE = json.loads((Path(__file__).parent / "inline_prompt_baseline.json").read_text(encoding="utf-8"))
 
@@ -264,7 +263,6 @@ def test_the_script_section_set_is_the_golden_fixture() -> None:
         ]),
         ("13_script_save.md", ["`script_flags_off`", "they save again", "Do not suggest converting the skill to inline"]),
         (SKILL_FORM_FLAGS_OFF_NOTE, ["Do not bring up the script form", "only if they ask"]),
-        (SKILL_FORM_LOOKUP_FAILED_NOTE, ["EAA did not say no", "read again when PREPARE ends", "Do not promise either form"]),
     ],
 )
 def test_each_script_prompt_carries_its_instructions(filename, phrases) -> None:

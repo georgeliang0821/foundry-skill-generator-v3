@@ -1806,19 +1806,6 @@ _MATERIAL_PATCH_LIMIT_GUIDANCE_MODIFY = (
 )
 
 
-class FormLockDeferred(ValueError):
-    """PREPARE -> DRAFT held back once: the EAA flags were only just read and allow a script."""
-
-
-FORM_LOCK_DEFERRED_MESSAGE = (
-    "PREPARE did not end yet. The EAA flags could not be read earlier in this session; they were "
-    "read just now and EAA runs script skills, so this code material may still ship as the "
-    "bundled script. `## Skill Form` now lists what that needs. Tell the user, go through it with "
-    "them (coverage in `variables_ok`, adapting the code if they want), and request the "
-    "transition again once they have decided. Leaving PREPARE locks the form."
-)
-
-
 class MaterialPatchRefused(ValueError):
     """A patch the gate refused; counts toward MAX_MATERIAL_PATCH_REJECTIONS."""
 
@@ -2315,8 +2302,6 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         stage = Stage(str(target).lower())
         if stage is Stage.DRAFT and needs_flag_lookup_before_lock(session):
             load_aca_env_for_session(session, reason="form_lock")
-            if _form_prompt_key(session) == "script_candidate":
-                raise FormLockDeferred(FORM_LOCK_DEFERRED_MESSAGE)
         transition(session, stage, args.get("reason") or args.get("summary", ""))
         return
 
@@ -2686,8 +2671,6 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
     the agent a clear description of what it may do next so it can either
     self-correct (pick a valid transition) or ask the user how to proceed.
     """
-    if isinstance(exc, FormLockDeferred):
-        return str(exc)
     if tool == "set_orchestration_owner":
         return (
             f"Owner change was not applied: {exc}. Keep the current owner. "

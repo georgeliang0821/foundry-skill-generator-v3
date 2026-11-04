@@ -65,9 +65,9 @@ Unset values can still come from `.env`, so two fixtures in
   plain unit test calling `transition()` would otherwise start real MCP calls.
 - `backend_main` re-enables the hook for API tests but replaces
   `load_aca_env_for_session` with a no-op that keeps whatever
-  `aca_env_result` the session already has. A test that needs the EAA script
-  flags on sets `session.aca_env_result` itself (see
-  `tests/api/test_script_skill_api.py`).
+  `aca_env_result` the session already has. Missing script settings allow script
+  form; tests needing it disabled must explicitly set `SKILL_SCRIPTS_ENABLED`
+  to false (see `tests/api/test_script_skill_api.py`).
 
 ## Run Playwright
 
@@ -90,9 +90,9 @@ npx playwright test
 
 In E2E mode the ACA lookup never leaves the machine either:
 `load_aca_env_for_session` returns `backend.e2e.fake_aca_env_result()`, which
-turns the EAA script flags on only in the `script_flags_on` scenario
-(`/api/e2e/scenario`). Every other scenario sees no ACA result, i.e. the flags
-are off.
+returns `SKILL_SCRIPTS_ENABLED=true` in the `script_flags_on` and `material_patch`
+scenarios (`/api/e2e/scenario`). Every other scenario explicitly returns false;
+missing settings no longer mean disabled.
 
 Run headed:
 

@@ -58,7 +58,7 @@ test("an inline skill has no script tab or badge", async ({ page, request }) => 
   await expect(page.getByTestId("file-switch")).toBeHidden();
 });
 
-test("saving while the EAA script flags are off explains why and saves once they are on", async ({ page, request }) => {
+test("saving while the EAA script flag is explicitly false explains why and saves once it is true", async ({ page, request }) => {
   await openScriptSkill(page, request);
   await openTab(page, "files");
   const editor = page.getByTestId("file-editor");
@@ -67,6 +67,7 @@ test("saving while the EAA script flags are off explains why and saves once they
   await page.getByTestId("accept-draft-button").click();
   const refusal = page.locator(".failed-status", { hasText: "Skill was not saved" });
   await expect(refusal).toContainText("SKILL_SCRIPTS_ENABLED");
+  await expect(refusal).not.toContainText("DYNAMIC_SKILLS_ENABLED");
   await expect(refusal).not.toContainText("inline");
   await expect(page.locator(".conversation-status", { hasText: `Saved ${NAME}` })).toHaveCount(0);
 
@@ -111,7 +112,7 @@ test("a code material shows its form and the conditions it still misses", async 
   await page.getByTestId("material-input").fill(SCRIPT);
   await page.getByTestId("attach-material-button").click();
 
-  // Default fake ACA lookup: the flags are off, which is the only reason worth showing.
+  // Default fake ACA lookup explicitly returns false; missing settings would allow script form.
   await openTab(page, "materials");
   await expect(page.getByTestId("material-form-badge")).toHaveText("inline");
   const unmet = page.getByTestId("skill-form-unmet");

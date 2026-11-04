@@ -15,7 +15,8 @@ REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "skills" / "ms-graph-room-finder"
 MD = (FIXTURE / "SKILL.md").read_text(encoding="utf-8")
 PY = (FIXTURE / "scripts" / "ms-graph-room-finder.py").read_text(encoding="utf-8")
-FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
+FLAGS_ON = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "true"}}
+FLAGS_OFF = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "false"}}
 
 
 def _session(**overrides) -> Session:
@@ -44,16 +45,8 @@ def test_fixture_is_script_form_when_the_flags_are_on() -> None:
     assert verdict.script == PY
 
 
-def _flag_missing(s: Session) -> None:
-    s.aca_env_result = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "true"}}
-
-
 def _flag_false(s: Session) -> None:
-    s.aca_env_result = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "false"}}
-
-
-def _no_aca_lookup(s: Session) -> None:
-    s.aca_env_result = None
+    s.aca_env_result = FLAGS_OFF
 
 
 def _two_code_materials(s: Session) -> None:
@@ -106,9 +99,7 @@ def _library_only(s: Session) -> None:
 @pytest.mark.parametrize(
     ("breaker", "check"),
     [
-        (_flag_missing, "eaa_flags"),
         (_flag_false, "eaa_flags"),
-        (_no_aca_lookup, "eaa_flags"),
         (_two_code_materials, "code_material"),
         (_no_code_material, "code_material"),
         (_does_not_parse, "parses"),
@@ -175,28 +166,52 @@ def test_scenario_and_import_sessions_are_inline() -> None:
 
 
 def test_failures_state_what_failed_and_are_listed_together() -> None:
-    session = _session(aca_env_result=None, materials=[])
+    session = _session(aca_env_result=FLAGS_OFF, materials=[])
     session.prepare_brief.script_covers_operations = False
 
     payload = evaluate_skill_form(session).to_dict()
 
     assert payload["form"] == "inline" and payload["locked"] is False
     assert [f["check"] for f in payload["failures"]] == ["eaa_flags", "code_material", "covers_operations"]
-    assert "DYNAMIC_SKILLS_ENABLED, SKILL_SCRIPTS_ENABLED" in payload["failures"][0]["message"]
+    assert "SKILL_SCRIPTS_ENABLED" in payload["failures"][0]["message"]
+    assert "DYNAMIC_SKILLS_ENABLED" not in payload["failures"][0]["message"]
 
 
 @pytest.mark.parametrize(
     ("result", "off"),
     [
         (FLAGS_ON, []),
-        ({"architectural_config": {"DYNAMIC_SKILLS_ENABLED": True, "SKILL_SCRIPTS_ENABLED": "TRUE"}}, []),
-        ({"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "1", "SKILL_SCRIPTS_ENABLED": "true"}}, ["DYNAMIC_SKILLS_ENABLED"]),
-        ({"architectural_config": None}, ["DYNAMIC_SKILLS_ENABLED", "SKILL_SCRIPTS_ENABLED"]),
-        (None, ["DYNAMIC_SKILLS_ENABLED", "SKILL_SCRIPTS_ENABLED"]),
+        ({"architectural_config": {"SKILL_SCRIPTS_ENABLED": True}}, []),
+        ({"architectural_config": {"SKILL_SCRIPTS_ENABLED": "TRUE"}}, []),
+        (FLAGS_OFF, ["SKILL_SCRIPTS_ENABLED"]),
+        ({"architectural_config": {"SKILL_SCRIPTS_ENABLED": False}}, ["SKILL_SCRIPTS_ENABLED"]),
+        ({"architectural_config": {"SKILL_SCRIPTS_ENABLED": "FALSE"}}, ["SKILL_SCRIPTS_ENABLED"]),
+        ({"architectural_config": {}}, []),
+        ({"architectural_config": None}, []),
+        ({"architectural_config": []}, []),
+        ({}, []),
+        (None, []),
+        ({"architectural_config": {"SKILL_SCRIPTS_ENABLED": "1"}}, ["SKILL_SCRIPTS_ENABLED"]),
     ],
 )
 def test_script_flags_are_read_like_eaa(result, off) -> None:
     assert script_flags_off(result) == off
+
+
+@pytest.mark.parametrize("dynamic", [None, True, False, "true", "false"])
+@pytest.mark.parametrize("enabled", [None, True, False])
+def test_only_the_script_flag_controls_form(dynamic, enabled) -> None:
+    config = {}
+    if dynamic is not None:
+        config["DYNAMIC_SKILLS_ENABLED"] = dynamic
+    if enabled is not None:
+        config["SKILL_SCRIPTS_ENABLED"] = enabled
+    session = _session(aca_env_result={"architectural_config": config})
+
+    verdict = evaluate_skill_form(session)
+
+    assert verdict.form == ("inline" if enabled is False else "script")
+    assert _checks(session) == (["eaa_flags"] if enabled is False else [])
 
 
 def test_script_only_errors_needs_no_skill_md() -> None:
@@ -252,7 +267,7 @@ def test_a_library_without_request_inputs_is_not_a_script() -> None:
 
 
 def test_prepare_to_draft_locks_inline_without_a_script(monkeypatch) -> None:
-    session = _session(aca_env_result=None)
+    session = _session(aca_env_result=FLAGS_OFF)
 
     _to_draft(session, monkeypatch)
 
@@ -277,7 +292,7 @@ def test_a_script_candidate_locked_inline_tells_the_agent_why(monkeypatch) -> No
 
 @pytest.mark.parametrize(
     "overrides",
-    [{}, {"aca_env_result": None}, {"mode": "import"}],
+    [{}, {"aca_env_result": FLAGS_OFF}, {"mode": "import"}],
     ids=["script", "flags-off", "import"],
 )
 def test_no_inline_lock_notice_when_script_form_was_never_possible_or_was_reached(overrides, monkeypatch) -> None:
@@ -289,7 +304,7 @@ def test_no_inline_lock_notice_when_script_form_was_never_possible_or_was_reache
 
 
 def test_locked_form_survives_a_return_to_prepare(monkeypatch) -> None:
-    session = _session(aca_env_result=None)
+    session = _session(aca_env_result=FLAGS_OFF)
     _to_draft(session, monkeypatch)
     transition(session, Stage.PREPARE)
     session.aca_env_result = FLAGS_ON
@@ -324,7 +339,8 @@ def test_modify_inherits_the_form_of_the_stored_skill() -> None:
 def test_skill_form_prompt_block_only_appears_with_code() -> None:
     session = _session(aca_env_result=None)
     assert "## Skill Form" in build_system_prompt(session)
-    assert "- eaa_flags:" in build_system_prompt(session)
+    assert "- eaa_flags:" not in build_system_prompt(session)
+    assert "form: script" in build_system_prompt(session)
 
     session.materials = [Material(kind=MaterialKind.TEXT, content="notes")]
     assert "## Skill Form" not in build_system_prompt(session)
@@ -336,7 +352,7 @@ def _every_condition_unmet_but_flags(s: Session) -> None:
 
 
 def test_skill_form_block_with_the_flags_off_shows_only_the_flag() -> None:
-    session = _session(aca_env_result=None)
+    session = _session(aca_env_result=FLAGS_OFF)
     _every_condition_unmet_but_flags(session)
     flag = evaluate_skill_form(session).failures[0]
 
@@ -362,24 +378,25 @@ LOOKUP_ERROR = "HTTP 404 Not Found | <!DOCTYPE html><html><title>Azure Container
 
 def test_a_failed_flag_lookup_is_not_reported_as_flags_off() -> None:
     session = _session(aca_env_result=None, aca_env_error=LOOKUP_ERROR)
-    flag = evaluate_skill_form(session).failures[0]
 
-    assert flag.check == "eaa_flags"
-    assert flag.message.startswith("Could not read the EAA script flags: the ACA lookup failed (HTTP 404 Not Found).")
-    assert state_machine._format_skill_form(session).endswith(
-        state_machine.load_prompt(state_machine.SKILL_FORM_LOOKUP_FAILED_NOTE)
-    )
-    assert state_machine.load_prompt(state_machine.SKILL_FORM_FLAGS_OFF_NOTE) not in build_system_prompt(session)
+    assert evaluate_skill_form(session).form == "script"
+    assert _checks(session) == []
+    prompt = build_system_prompt(session)
+    assert "eaa_flags" not in prompt
+    assert f"Lookup status: failed\n\nError: {LOOKUP_ERROR}" in prompt
+    assert "script form cannot be decided" not in prompt
 
 
-def test_locking_inline_after_a_failed_lookup_tells_the_agent_why(monkeypatch) -> None:
-    session = _session(aca_env_result=None, aca_env_error=LOOKUP_ERROR)
+@pytest.mark.parametrize("error", ["", LOOKUP_ERROR])
+def test_locking_after_an_unavailable_lookup_allows_script(monkeypatch, error) -> None:
+    session = _session(aca_env_result=None, aca_env_error=error)
 
     _to_draft(session, monkeypatch)
 
-    assert session.skill_form == "inline"
-    notices = _lock_notices(session)
-    assert len(notices) == 1 and "Could not read the EAA script flags" in notices[0]
+    assert session.skill_form == "script"
+    assert session.current_skill.script == PY
+    assert session.aca_env_error == error
+    assert _lock_notices(session) == []
 
 
 def test_the_flag_lookup_is_retried_only_while_a_new_code_skill_awaits_its_form() -> None:

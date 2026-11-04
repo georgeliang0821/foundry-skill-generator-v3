@@ -74,7 +74,7 @@
 | 輸出給 AI 看，進度訊息、表格、log 可以混在 stdout | exit 非 0 即失敗；exit 0 時掃描 stdout 的錯誤樣式（部分樣式只在 stdout 不是單一 JSON 時才掃），命中就改判失敗 | stdout 不是單一 JSON 時，印一行「0 failed」，成功也被判成失敗；錯誤只印到 stderr 再 exit 0，失敗反被當成成功（stderr 不會被掃描） | 宿主契約：成敗由程式判定 |
 | exit code 與「缺資料」怎麼回報沒有約定，由 AI 臨場理解 | exit 0 = 成功；exit 0 且 stdout 有 `[NEEDS_INFO]` 行 = 需補資料；非 0 = 失敗（平台不區分非 0 的值）。只回報需補資料的執行不算成功執行，Gatekeeper 不會因此 refine 該 skill | argparse 參數錯誤只會得到籠統的失敗；`--help` 印到 stdout 並 exit 0，會被當成成功回給使用者 | 宿主契約：EAA 不能自己問使用者 |
 | 路由對不對，實際跑一次就知道 | 路由測試（`route_only`）不執行 script，只記錄 AI 本來要傳的參數 | script 沒有宣告 `--flag`，人工或外部測試就無法比對 AI 傳的參數對不對（平台本身不驗證參數） | 宿主契約：宿主驗證路由時不能產生副作用 |
-| skill 的檔案怎麼放沒有規定，放上去跑跑看就知道 | EAA 本身不強制 lint，`lint_skill_package` 可在發佈前檢查 script 佈局、frontmatter、secret 讀取與 `mi_scopes`；執行時須開啟 `DYNAMIC_SKILLS_ENABLED`（預設開）與 `SKILL_SCRIPTS_ENABLED` | 佈局不符時，`load_skill` 回 Error，script 不會執行。本 Generator 存檔時強制執行這個 lint，未通過就不能存進知識庫 | EAA 的發佈與執行設定 |
+| skill 的檔案怎麼放沒有規定，放上去跑跑看就知道 | EAA 本身不強制 lint，`lint_skill_package` 可在發佈前檢查 script 佈局、frontmatter、secret 讀取與 `mi_scopes`；Generator 只檢查 `SKILL_SCRIPTS_ENABLED`，明確 `false` 時停用，缺值或查不到時預設允許 | 佈局不符時，`load_skill` 回 Error，script 不會執行。本 Generator 存檔時強制執行這個 lint，未通過就不能存進知識庫 | EAA 的發佈與執行設定 |
 
 下表是 Generator 在素材變成 script **之前**檢查的具體規則，讓這些問題在 Generator 裡就被擋下，而不是部署後才發現。這些規則中，錯誤樣式掃描、`[NEEDS_INFO]` 契約、執行環境，inline skill 同樣要遵守，只是 inline 的程式由 AI 現寫，違反時可以在執行時修正：
 
@@ -157,4 +157,4 @@ flowchart TD
 | **Patch（V4A）** | AI 對 `SKILL.md` 的差異修改格式，可預覽、接受、還原。 |
 | **Skill 類型（metadata.skill_type）** | 本 Generator 產出三種值：`scenario-orchestration` 由 Host 編排已宣告的 children；`inline` 由 EAA 依內文指令生成程式碼；`script` 執行附帶的固定腳本。這是 Generator 的產出集合，不是整個平台的類型全集；類型不代表使用或修改權限。 |
 | **Skill 形式（inline / script）** | capability 的 inline 形式可包含指令、sample code 與資源，但沒有附帶腳本；script 形式為 `SKILL.md` 加上原樣出貨的 `scripts/<name>.py`。形式進 DRAFT 後固定；NEW session 不能互轉，MODIFY session 可用 Convert form 搬移程式碼並同步類型宣告，正文其餘調整交給後續標準 modify 流程。 |
-| **EAA script 旗標** | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED`；兩者皆為 `true` 才能產出與儲存 script 型 skill。見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。 |
+| **EAA script 旗標** | 只檢查 ACA `architectural_config` 的 `SKILL_SCRIPTS_ENABLED`；`true`、缺值或查不到時允許，明確 `false` 時停用。不再檢查 `DYNAMIC_SKILLS_ENABLED`；其他產出與儲存檢核不變。見 [04-agent-mechanism.md](04-agent-mechanism.md#eaa-script-旗標)。 |

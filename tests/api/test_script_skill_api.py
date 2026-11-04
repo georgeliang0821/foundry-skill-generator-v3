@@ -7,7 +7,7 @@ from backend.models import Material, MaterialKind, PendingToolCall, SkillFiles
 from backend.state_machine import CODE_MATERIAL_EDITED_MESSAGE, SCRIPT_REPLACED_MESSAGE, build_system_prompt
 
 SCRIPT = 'import json\nprint(json.dumps({"status": "ok"}))\n'
-FLAGS_ON = {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"}}
+FLAGS_ON = {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "true"}}
 
 
 def _aca_lookup(backend_main, monkeypatch, result: dict | None) -> list[str]:
@@ -334,12 +334,13 @@ def test_convert_form_moves_a_stored_script_into_skill_md_and_the_save_removes_i
     assert SCRIPT.strip() in backend_main.store.load_skill("room-finder").skill_md
 
 
-def test_convert_form_moves_the_sample_block_into_the_script(client, backend_main, grant_skill) -> None:
+@pytest.mark.parametrize("aca_result", [FLAGS_ON, {"architectural_config": {}}, None])
+def test_convert_form_moves_the_sample_block_into_the_script(client, backend_main, grant_skill, aca_result) -> None:
     md = _skill_md("room-finder") + f"\n## API Reference / Sample Code\n\n```python\n{SCRIPT}```\n"
     backend_main.store.save_skill(SkillFiles(name="room-finder", skill_md=md))
     grant_skill("room-finder")
     session_id = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": "room-finder"}).json()["id"]
-    backend_main.sessions[session_id].aca_env_result = FLAGS_ON
+    backend_main.sessions[session_id].aca_env_result = aca_result
 
     response = client.post(f"/api/sessions/{session_id}/convert-form", json={"target": "script"})
 
@@ -400,7 +401,7 @@ def test_skill_list_marks_script_skills(client, backend_main, grant_skill) -> No
 
 def test_save_is_refused_when_the_flags_were_turned_off(client, backend_main, fake_sql, monkeypatch) -> None:
     calls = _aca_lookup(
-        backend_main, monkeypatch, {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "false"}}
+        backend_main, monkeypatch, {"architectural_config": {"SKILL_SCRIPTS_ENABLED": "false"}}
     )
     session = _script_session(backend_main, "room-finder")
     session.aca_env_result = FLAGS_ON
@@ -634,14 +635,30 @@ def test_the_default_aca_lookup_keeps_the_session_result(client, backend_main) -
     assert client.post(f"/api/sessions/{without.id}/aca-env").json()["aca_env_result"] is None
 
 
-def test_the_default_aca_lookup_never_turns_the_flags_on(client, backend_main, fake_sql) -> None:
+@pytest.mark.parametrize("aca_result", [
+    None,
+    {},
+    {"architectural_config": {}},
+    {"architectural_config": {"DYNAMIC_SKILLS_ENABLED": "false"}},
+    FLAGS_ON,
+])
+@pytest.mark.parametrize("lookup_error", ["", "Inspector unavailable"])
+def test_script_save_allows_missing_settings_and_ignores_the_removed_flag(
+    client, backend_main, fake_sql, monkeypatch, aca_result, lookup_error,
+) -> None:
+    calls = _aca_lookup(backend_main, monkeypatch, aca_result)
+    lint_calls = _lint_recorder(backend_main, monkeypatch)
     session = _script_session(backend_main, "room-finder")
-    session.aca_env_result = None
+    session.aca_env_error = lookup_error
 
     response = client.post(f"/api/sessions/{session.id}/save", json={})
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["kind"] == "script_flags_off"
+    assert response.status_code == 200
+    assert calls == ["script_save"]
+    assert backend_main.store.load_skill("room-finder").script == SCRIPT
+    assert "room-finder" in fake_sql.skills
+    assert lint_calls[0]["files"]["scripts/room-finder.py"] == SCRIPT
+    assert session.aca_env_error == lookup_error
 
 
 # --- code material changes ----------------------------------------------------
@@ -816,6 +833,9 @@ def _awaiting_session(backend_main, monkeypatch):
         materials=[Material(kind=MaterialKind.CODE, content=SCRIPT)],
         aca_env_error="HTTP 404 Not Found | <html>Azure Container App - Unavailable</html>",
     )
+    session.prepare_brief.script_covers_operations = True
+    session.prepare_brief.verify_checklist["variables_ok"] = True
+    monkeypatch.setattr(state_machine, "PostTransitionHook", None)
     monkeypatch.setattr(state_machine, "check_quality_gates", lambda _session: [])
     return session
 
@@ -824,34 +844,29 @@ def _to_draft(backend_main, session) -> None:
     backend_main.apply_tool_effect(session, "request_stage_transition", {"target_stage": "draft"})
 
 
-def test_a_lookup_that_now_allows_scripts_holds_prepare_open_once(backend_main, monkeypatch) -> None:
-    calls = _aca_lookup(backend_main, monkeypatch, FLAGS_ON)
+@pytest.mark.parametrize("aca_result", [FLAGS_ON, {"architectural_config": {}}, None])
+def test_an_allowing_or_unavailable_lookup_does_not_defer_draft(backend_main, monkeypatch, aca_result) -> None:
+    calls = _aca_lookup(backend_main, monkeypatch, aca_result)
     session = _awaiting_session(backend_main, monkeypatch)
-
-    with pytest.raises(backend_main.FormLockDeferred) as exc:
-        _to_draft(backend_main, session)
-
-    assert calls == ["form_lock"]
-    assert session.current_stage == "prepare" and session.skill_form is None
-    assert backend_main._tool_effect_recovery_guidance(session, "request_stage_transition", {}, exc.value) == (
-        backend_main.FORM_LOCK_DEFERRED_MESSAGE
-    )
 
     _to_draft(backend_main, session)
 
     assert calls == ["form_lock"]
-    assert session.current_stage == "draft" and session.skill_form == "inline"
+    assert session.current_stage == "draft" and session.skill_form == "script"
+    assert session.current_skill.script == SCRIPT
+    state_machine.transition(session, backend_main.Stage.PREPARE)
+    _to_draft(backend_main, session)
+    assert calls == ["form_lock"]
+    assert session.current_stage == "draft" and session.skill_form == "script"
 
 
-def test_a_lookup_that_fails_again_locks_inline_and_says_why(backend_main, monkeypatch) -> None:
-    calls = _aca_lookup(backend_main, monkeypatch, None)
+def test_a_lookup_that_now_disables_scripts_locks_inline(backend_main, monkeypatch) -> None:
+    calls = _aca_lookup(backend_main, monkeypatch, {"architectural_config": {"SKILL_SCRIPTS_ENABLED": False}})
     session = _awaiting_session(backend_main, monkeypatch)
 
     _to_draft(backend_main, session)
 
     assert calls == ["form_lock"]
     assert session.skill_form == "inline"
-    assert any(
-        "now locked as inline" in m.content and "Could not read the EAA script flags" in m.content
-        for m in session.conversation
-    )
+    assert session.current_skill.script is None
+    assert session.current_stage == "draft"

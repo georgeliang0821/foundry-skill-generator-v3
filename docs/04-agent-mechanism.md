@@ -540,7 +540,7 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 
 `13_script_save.md` 規定儲存收到 409 `script_flags_off` 時：等平台開啟旗標後再存一次，**絕不建議改成 inline**。
 
-**旗標關閉的提示不是 addendum**。`01_prepare_script_flags_off.md` 只有一行，由 `SKILL_FORM_FLAGS_OFF_NOTE` 接在 `## Skill Form` 區塊的 `eaa_flags` 那一行後面（「除非使用者問起，否則不要提 script 形式」）。因此旗標關閉又有 `code` 素材時，prompt 只多出區塊標題、`form: inline` 與這一行旗標說明，不載入任何 addendum。ACA 查詢**失敗**（`aca_env_error` 有值、沒有結果）時改接 `01_prepare_script_lookup_failed.md`（`SKILL_FORM_LOOKUP_FAILED_NOTE`）：告知使用者形式暫時無法判定、離開 PREPARE 前會重查。
+**旗標關閉的提示不是 addendum**。`01_prepare_script_flags_off.md` 只有一行，由 `SKILL_FORM_FLAGS_OFF_NOTE` 接在 `## Skill Form` 區塊的 `eaa_flags` 那一行後面（「除非使用者問起，否則不要提 script 形式」）。因此旗標明確關閉又有 `code` 素材時，prompt 只多出區塊標題、`form: inline` 與這一行旗標說明，不載入任何 addendum。ACA 查詢**失敗**時預設允許 script，不產生 `eaa_flags` failure；錯誤仍保留在 `aca_env_error` 與 prompt 的查詢狀態中。
 
 `## Skill Form` 區塊（`_format_skill_form()`）：
 
@@ -631,7 +631,7 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 | `skill_kind` | capability（scenario 沒有自己的 script） |
 | `mode` | NEW（MODIFY 沿用 Blob 上的形式；IMPORT 不適用） |
 | `assets` | session 沒有附加任何 skill 資產（script 型 skill 只出貨 `SKILL.md` 與 script） |
-| `eaa_flags` | ACA `architectural_config` 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`（缺值視為 `false`；查詢失敗另有訊息，離開 PREPARE 前會重查，見 [EAA script 旗標](#eaa-script-旗標)） |
+| `eaa_flags` | 只檢查 ACA `architectural_config` 的 `SKILL_SCRIPTS_ENABLED`；`true`、缺值或查不到時允許，明確 `false` 時停用。見 [EAA script 旗標](#eaa-script-旗標) |
 | `code_material` | 恰好一份 `code` 素材 |
 | `parses` | 該素材可被 `ast` 解析 |
 | `entry_point` | 模組頂層除了 import、函式／類別定義、賦值與 docstring 之外，至少還有一個會執行的語句（例如 `main()` 或 `if __name__ == "__main__":`）；只有定義的函式庫直接執行時什麼都不做 |
@@ -734,18 +734,17 @@ Agent 端的寫法由 [prompts/15_script_edge_rules.md](../prompts/15_script_edg
 
 #### EAA script 旗標
 
-Script 型 skill 只有在 EAA 會執行 script 時才有意義。判斷依據是 ACA 查詢結果 `architectural_config` 裡的兩個旗標，**兩個都要是 `true`**（字串比對不分大小寫；缺值視為 `false`）。ACA 查詢的設定見 [02-setup.md](02-setup.md#52-aca-環境變數查詢與-script-型-skill)；未啟用查詢時旗標一律視為關閉。
+Generator 只檢查 ACA 查詢結果 `architectural_config` 裡的 `SKILL_SCRIPTS_ENABLED`（接受布林值與不分大小寫的字串）：`true` 時允許 script，明確 `false` 時停用；欄位缺席、設定不可用或查詢失敗時預設允許。`DYNAMIC_SKILLS_ENABLED` 已不再參與判斷，不論它缺席或回報何值都不阻擋操作。其他 script 形式與儲存檢核不變，查詢失敗也不會略過 EAA lint。ACA 查詢的設定見 [02-setup.md](02-setup.md#52-aca-環境變數查詢與-script-型-skill)。
 
 | 旗標 | 意義 |
 | --- | --- |
-| `DYNAMIC_SKILLS_ENABLED` | EAA 從 Blob 動態載入 skill |
-| `SKILL_SCRIPTS_ENABLED` | EAA 執行 skill 附帶的 script |
+| `SKILL_SCRIPTS_ENABLED` | 控制 script 可用性；缺值或查不到時 Generator 預設允許 |
 
 - **PREPARE**：旗標關閉時，新 skill 只能是 inline；Materials 與 Checklist 只顯示這一個原因（其他條件此時都無意義）。
-- **查詢失敗 ≠ 旗標關閉**：ACA 查詢失敗（例如 Container App 冷啟動時回 404「Unavailable」）時，`eaa_flags` 顯示「Could not read the EAA script flags」，Agent 會告知使用者形式暫時無法判定。離開 PREPARE 前（`request_stage_transition` 到 DRAFT）若是有 `code` 素材的新 capability skill 且尚未讀到旗標，會以 `reason="form_lock"` 重查一次：重查後旗標開啟 → 這一次轉移被擋下（`FormLockDeferred`），讓 Agent 先與使用者處理 script 形式；仍失敗 → 以 inline 鎖定，並寫入 system 訊息說明原因。
-- **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），旗標若已關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags` 列出關閉的旗標，**什麼都不寫入**。處理方式是請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。script 與 `SKILL.md` 一起送 EAA `lint_skill_package`（見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)）。
+- **查詢失敗 ≠ 旗標關閉**：ACA 查詢失敗（例如 Container App 冷啟動時回 404「Unavailable」）時保留錯誤，但預設允許 script。離開 PREPARE 前（`request_stage_transition` 到 DRAFT）若是有 `code` 素材的新 capability skill 且尚未讀到設定，仍以 `reason="form_lock"` 重查一次；取得明確 `false` 才停用，仍查不到時依其他條件決定形式，不再因查詢結果延後進 DRAFT。
+- **儲存時重新查一次**：script 型 session 每次儲存都會重新呼叫 ACA 查詢（`reason="script_save"`），`SKILL_SCRIPTS_ENABLED` 若明確關閉就回 **HTTP 409**，`detail.kind = "script_flags_off"`、`recoverable: true`、`flags = ["SKILL_SCRIPTS_ENABLED"]`，**不寫入 Blob／SQL**。缺值或查詢失敗時繼續其餘儲存檢核。停用時請平台把旗標打開後再按一次儲存；不能改存成 inline（形式在 DRAFT 就鎖定）。前端把 `detail.message` 顯示成「Skill was not saved: …」。inline 型儲存不會重新查旗標。script 與 `SKILL.md` 一起送 EAA `lint_skill_package`（見 [03-architecture.md](03-architecture.md#23-eaa-skill-lint)）。
 - 其他 script 相關的 409：`script_form_mismatch`（inline session 想覆寫 Blob 上已有 script 的 skill，不可恢復）、`version_conflict`（Blob 上的 `SKILL.md` 在載入後被改過，例如 Gatekeeper Addendum）。
-- Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，只有 scenario `script_flags_on` 會把旗標打開。
+- Playwright 不會查真的 ACA：E2E 模式下查詢改由 `backend/e2e.py` 的 `fake_aca_env_result()` 回答，scenario `script_flags_on` 與 `material_patch` 回報 `true`，其他情境明確回報 `false`，不以缺值模擬停用。
 
 ### 7.6 Skill 資產（assets/、references/）
 

@@ -99,7 +99,6 @@ FORM_STAGE_ADDENDA: dict[str, dict[Stage, tuple[str, ...]]] = {
 
 # One line appended to the eaa_flags reason in `## Skill Form`; flags-off sessions get no addendum.
 SKILL_FORM_FLAGS_OFF_NOTE = "01_prepare_script_flags_off.md"
-SKILL_FORM_LOOKUP_FAILED_NOTE = "01_prepare_script_lookup_failed.md"
 
 # Appended only while the session carries user-supplied assets.
 ASSET_STAGE_ADDENDA: dict[Stage, str] = {
@@ -387,18 +386,11 @@ def evaluate_skill_form(session: Session) -> SkillFormVerdict:
             f"{len(session.assets)} skill asset(s) are attached; a script skill ships only SKILL.md and its script.",
         ))
     flags_off = script_flags_off(session.aca_env_result)
-    if flags_off and flag_lookup_failed(session):
-        failures.append(FormCheck(
-            "eaa_flags",
-            "Could not read the EAA script flags: the ACA lookup failed "
-            f"({_short_error(session.aca_env_error)}). Until a lookup succeeds it is unknown whether "
-            "EAA runs script skills.",
-        ))
-    elif flags_off:
+    if flags_off:
         failures.append(FormCheck(
             "eaa_flags",
             f"EAA does not run script skills: {', '.join(flags_off)} is not true in the ACA "
-            "architectural_config (missing counts as false).",
+            "architectural_config (missing settings default to true).",
         ))
     codes = [m for m in session.materials if MaterialKind(m.kind) is MaterialKind.CODE]
     script: str | None = None
@@ -418,16 +410,6 @@ def evaluate_skill_form(session: Session) -> SkillFormVerdict:
     return SkillFormVerdict(form="script", locked=False, script=script)
 
 
-def flag_lookup_failed(session: Session) -> bool:
-    return session.aca_env_result is None and bool(session.aca_env_error)
-
-
-def _short_error(error: str) -> str:
-    # ACA returns a whole HTML page after the status line.
-    head = error.split(" | ", 1)[0].strip()
-    return head if len(head) <= 120 else head[:117] + "..."
-
-
 def _awaits_flags(session: Session) -> bool:
     """A NEW capability skill with a code material whose form still depends on the EAA flags."""
     return (
@@ -440,7 +422,7 @@ def _awaits_flags(session: Session) -> bool:
 
 
 def needs_flag_lookup_before_lock(session: Session) -> bool:
-    """Leaving PREPARE would lock the form without ever having read the EAA flags."""
+    """Refresh unavailable EAA settings before locking; lookup failure still allows script form."""
     return Stage(session.current_stage) is Stage.PREPARE and _awaits_flags(session) and session.aca_env_result is None
 
 
@@ -463,9 +445,7 @@ def lock_skill_form(session: Session) -> None:
     """Fix the form for the rest of the session; a NEW script skill takes its code material verbatim."""
     if session.skill_form is not None:
         return
-    candidate = _form_prompt_key(session) == "script_candidate" or (
-        _awaits_flags(session) and flag_lookup_failed(session)
-    )
+    candidate = _form_prompt_key(session) == "script_candidate"
     verdict = evaluate_skill_form(session)
     session.skill_form = verdict.form
     if not verdict.locked and verdict.form == "script":
@@ -916,10 +896,9 @@ def _format_skill_form(session: Session) -> str | None:
     flag_failures = [failure for failure in verdict.failures if failure.check == "eaa_flags"]
     if flag_failures:
         # With the flags off nothing else can make it a script; the other failures are noise.
-        note = SKILL_FORM_LOOKUP_FAILED_NOTE if flag_lookup_failed(session) else SKILL_FORM_FLAGS_OFF_NOTE
         return (
             f"## Skill Form\n\nform: inline\n{_form_check_line(flag_failures[0])} "
-            f"{load_prompt(note)}"
+            f"{load_prompt(SKILL_FORM_FLAGS_OFF_NOTE)}"
         )
     lines = ["## Skill Form", "", f"form: {verdict.form}", f"locked: {str(verdict.locked).lower()}"]
     choice = [failure for failure in verdict.failures if failure.check == "user_choice"]

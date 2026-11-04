@@ -161,14 +161,12 @@ def _tool_reply(inner: dict) -> bytes:
 
 
 @pytest.mark.parametrize("with_data", [False, True])
-def test_aca_failed_status_preserves_error_and_reports_unknown_settings(monkeypatch, with_data) -> None:
+def test_aca_failed_status_preserves_error_without_disabling_scripts(monkeypatch, with_data) -> None:
     from backend.models import Material, MaterialKind, Session
     from backend.state_machine import (
         SKILL_FORM_FLAGS_OFF_NOTE,
-        SKILL_FORM_LOOKUP_FAILED_NOTE,
         build_system_prompt,
         evaluate_skill_form,
-        flag_lookup_failed,
         load_prompt,
     )
 
@@ -176,7 +174,7 @@ def test_aca_failed_status_preserves_error_and_reports_unknown_settings(monkeypa
     payload = {"status": "failed", "error": error}
     if with_data:
         payload["data"] = {
-            "architectural_config": {"DYNAMIC_SKILLS_ENABLED": "true", "SKILL_SCRIPTS_ENABLED": "true"},
+            "architectural_config": {"SKILL_SCRIPTS_ENABLED": "false"},
         }
     monkeypatch.setattr(mcp_jsonrpc, "urlopen", lambda request, timeout=0: _FakeResponse(_tool_reply(payload)))
     events = []
@@ -198,14 +196,10 @@ def test_aca_failed_status_preserves_error_and_reports_unknown_settings(monkeypa
     )
     session = Session.model_validate_json(session.model_dump_json())
     assert session.aca_env_result is None and session.aca_env_error == error
-    assert flag_lookup_failed(session)
-    flag = next(check for check in evaluate_skill_form(session).failures if check.check == "eaa_flags")
-    assert "Could not read the EAA script flags" in flag.message
-    assert error in flag.message
-    assert "unknown whether EAA runs script skills" in flag.message
+    assert all(check.check != "eaa_flags" for check in evaluate_skill_form(session).failures)
     prompt = build_system_prompt(session)
     assert f"Lookup status: failed\n\nError: {error}" in prompt
-    assert load_prompt(SKILL_FORM_LOOKUP_FAILED_NOTE) in prompt
+    assert "script form cannot be decided" not in prompt
     assert load_prompt(SKILL_FORM_FLAGS_OFF_NOTE) not in prompt
 
 
@@ -221,12 +215,12 @@ def test_aca_failed_status_without_error_is_still_a_failure(monkeypatch, error_f
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_aca_success_preserves_environment_configuration(monkeypatch, wrapped) -> None:
+@pytest.mark.parametrize("variables", [[], ["A"]])
+def test_aca_success_preserves_environment_configuration(monkeypatch, wrapped, variables) -> None:
     data = {
         "revision": "r1",
-        "variables": ["A"],
+        "variables": variables,
         "architectural_config": {
-            "DYNAMIC_SKILLS_ENABLED": "true",
             "SKILL_SCRIPTS_ENABLED": "true",
             "OBO_SCOPE_REGISTRY": {"TOKEN": "api://example/read"},
         },

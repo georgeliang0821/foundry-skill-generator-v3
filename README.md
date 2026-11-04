@@ -50,7 +50,7 @@
 
 使用者附上**唯一一份** Python `code` 素材、確認它涵蓋所有操作，且目標 EAA 已開啟 script 執行時，產出物改為 `SKILL.md` 加上**原樣**出貨的 `scripts/<name>.py`；其他情況維持原本的 inline 形式。
 
-> ⚠️ **使用前提**：目標 EAA 的 `DYNAMIC_SKILLS_ENABLED` 與 `SKILL_SCRIPTS_ENABLED` 皆為 `true`，且 `lint_skill_package` 的 ruleset ≥ 1.1；否則只會產出 inline 型。
+> ⚠️ **使用前提**：Generator 只檢查 `SKILL_SCRIPTS_ENABLED`；`true`、欄位缺席或查不到時均允許 script，明確 `false` 時停用。不再檢查 `DYNAMIC_SKILLS_ENABLED`。其他 script 條件與儲存 lint 檢核不變。
 
 | 項目 | 變更 | 詳細說明 |
 | --- | --- | --- |
