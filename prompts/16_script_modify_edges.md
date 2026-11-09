@@ -29,6 +29,9 @@ material only.
   Download), and ask what it printed and its exit code, not only whether it
   worked.
 - **Afterwards sync SKILL.md.** Patch `## Required Inputs` so its first column
-  matches the script's `add_argument` flags exactly (S3), and
+  matches the script's accepted flags exactly (S3), and
   `## Reading the Result` / `## Prerequisites` wherever exit codes, output keys
   or variables changed.
+- **Unknown is not unsupported.** An S3 warning that the argument contract
+  cannot be statically verified is not a reason to rewrite manual parsing as
+  argparse. Read the actual parser and keep its documented flags accurate.

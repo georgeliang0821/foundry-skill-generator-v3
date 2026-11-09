@@ -19,7 +19,8 @@
     rejected request) must not just move to stderr: EAA does not read stderr on
     an exit-0 run, so the failure would look like success. Collect it into the
     result JSON and exit 3.
-  - Values from the user's request arrive only as argparse `--flag` arguments;
+  - Values from the user's request arrive only as `--flag` arguments, parsed
+    with argparse or the script's existing manual parser;
     `globals()` never holds them and environment variables carry only
     deployment settings and credentials. If retaining a `request_inputs`
     dictionary, bind each value directly to an attribute of the parsed

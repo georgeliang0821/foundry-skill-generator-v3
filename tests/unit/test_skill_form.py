@@ -45,6 +45,23 @@ def test_fixture_is_script_form_when_the_flags_are_on() -> None:
     assert verdict.script == PY
 
 
+MANUAL_ARGS = '''import json
+import sys
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+print(json.dumps({"chat": args.get("--chat"), "message": args.get("--message")}))
+'''
+
+
+def test_manual_arguments_do_not_fail_script_readiness() -> None:
+    session = _session(materials=[Material(kind=MaterialKind.CODE, content=MANUAL_ARGS)])
+    session.prepare_brief.variables = [
+        SkillVariable(name=name, kind="runtime", source="request") for name in ("CHAT", "MESSAGE")
+    ]
+
+    assert evaluate_skill_form(session).form == "script"
+
+
 def _flag_false(s: Session) -> None:
     s.aca_env_result = FLAGS_OFF
 
@@ -141,7 +158,7 @@ def test_request_inputs_need_a_flag_but_env_backed_variables_do_not() -> None:
     assert evaluate_skill_form(session).failures == ()
 
 
-def test_storage_cleanup_material_is_refused_for_globals_and_unbound_inputs() -> None:
+def test_storage_cleanup_material_is_still_refused_when_arguments_are_unknown() -> None:
     fixtures = Path(__file__).parent / "fixtures"
     session = _session(materials=[Material(
         kind=MaterialKind.CODE, content=(fixtures / "storage_cleanup_material.py").read_text(encoding="utf-8"),
@@ -152,7 +169,7 @@ def test_storage_cleanup_material_is_refused_for_globals_and_unbound_inputs() ->
     ]
     failures = evaluate_skill_form(session).failures
 
-    assert sorted({(f.check, f.rule) for f in failures}) == [("inputs", ""), ("script_lint", "S13"), ("script_lint", "S4")]
+    assert sorted({(f.check, f.rule) for f in failures}) == [("script_lint", "S13"), ("script_lint", "S4")]
 
     session.materials = [Material(
         kind=MaterialKind.CODE, content=(fixtures / "storage_cleanup_script.py").read_text(encoding="utf-8"),
@@ -458,3 +475,22 @@ def test_run_selection_tests_attaches_checked_requested_scripts(monkeypatch) -> 
     run = run_selection_tests(MD, ["find a room"], [], script=PY)
 
     assert run.positive_results[0].requested_scripts[0]["problems"] == ["`--nope` is not declared by the script"]
+
+
+def test_manual_arguments_are_not_reported_as_undeclared_in_routing_tests(monkeypatch) -> None:
+    raw = {"requested_scripts": [
+        {"skill": "ms-graph-room-finder", "script": "s.py", "args": ["--chat", "room"]}
+    ]}
+
+    def fake_runner(positive, negative, skill_name, token, run_mode="route_only"):
+        return [RunResult(query=positive[0], apim_raw_response=raw)], []
+
+    monkeypatch.setattr("backend.testing._run_apim_tests_sequential_sync", fake_runner)
+
+    run = run_selection_tests(MD, ["send a message"], [], script=MANUAL_ARGS)
+
+    assert run.positive_results[0].requested_scripts[0]["problems"] == []
+    assert any("not statically verified" in note for note in run.notes)
+    session = _session(skill_form="script", current_stage=Stage.TEST)
+    session.test_runs.append(run)
+    assert "not statically verified" in build_system_prompt(session)

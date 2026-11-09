@@ -30,7 +30,7 @@ from .skill_lint import (
     is_needs_info_response,
     lint_skill,
     parse_resource_labels,
-    script_argument_flags,
+    script_argument_contract,
 )
 from .topology import has_errors, validate_topology
 from .orchestration import is_eaa_metadata, is_eaa_scenario
@@ -270,13 +270,29 @@ def _check_resource_reads(
     return [issue.to_dict() for issue in issues]
 
 
+def _script_flag_validation(script: str | None) -> tuple[list[str] | None, list[str]]:
+    if script is None:
+        return None, []
+    try:
+        contract = script_argument_contract(script)
+    except SyntaxError as exc:
+        return None, [f"Script arguments were not checked because Python parsing failed: {exc.msg}."]
+    if contract.complete:
+        return list(contract.flags), []
+    return None, [
+        "Script argument support is not statically verified; requested_scripts valid "
+        "checks the list-of-strings shape only, not whether the script accepts its flags."
+    ]
+
+
 def _check_requested_scripts(
     raw_response: Any, skill_name: str, script_flags: list[str] | None
 ) -> list[dict[str, Any]]:
     """Scripts the router asked to run; present only when the runtime has SKILL_SCRIPTS_ENABLED.
 
     ``args`` must be a list of strings. For this skill every ``--flag`` in it must be
-    one the bundled script declares (the S3 accepted set).
+    one the bundled script declares, but only when its contract is fully known.
+    ``None`` means only the argument list's shape can be checked.
     """
     entries = raw_response.get("requested_scripts") if isinstance(raw_response, dict) else None
     if not isinstance(entries, list):
@@ -942,10 +958,7 @@ def run_selection_tests(
     pos_passed = [r for r in positive_results if r.passed is True]
     neg_passed = [r for r in negative_results if r.passed is True]
     _lint_prepared_code(skill_content, positive_results + negative_results, script_form=script is not None)
-    try:
-        script_flags = script_argument_flags(script) if script is not None else None
-    except SyntaxError:
-        script_flags = None
+    script_flags, argument_notes = _script_flag_validation(script)
     for result in positive_results + negative_results:
         result.requested_scripts = _check_requested_scripts(result.apim_raw_response, skill_name, script_flags)
     run = TestRun(
@@ -954,7 +967,7 @@ def run_selection_tests(
         negative_results=negative_results,
         positive_hit_rate=(len(pos_passed) / len(positive_results)) if positive_results else 0.0,
         negative_correct_reject_rate=(len(neg_passed) / len(negative_results)) if negative_results else 0.0,
-        notes=[_SIGNAL_LOSS_NOTE] if signal_lost else [],
+        notes=([_SIGNAL_LOSS_NOTE] if signal_lost else []) + argument_notes,
         resource_findings=_check_resource_reads(skill_content, positive_results, skill_name),
     )
     log_event(

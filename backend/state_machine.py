@@ -35,7 +35,7 @@ from .models import (
 from .skill_lint import (
     is_needs_info_response,
     needs_info_line,
-    script_argument_names,
+    script_argument_contract,
     script_only_errors,
     stdout_to_stderr,
 )
@@ -331,10 +331,11 @@ def script_readiness_problems(session: Session, script: str) -> list[FormCheck]:
             "The code material only imports and defines functions, classes and constants, so running "
             "it as a script performs none of its operations.",
         ))
-    accepted = script_argument_names(script)
+    contract = script_argument_contract(script)
     unbound = [
         v.name for v in session.prepare_brief.variables
-        if v.kind == "runtime" and v.source == "request" and v.name and v.name.upper() not in accepted
+        if contract.complete and v.kind == "runtime" and v.source == "request"
+        and v.name and v.name.upper() not in contract.names
     ]
     if unbound:
         problems.append(FormCheck(
@@ -908,6 +909,15 @@ def _format_skill_form(session: Session) -> str | None:
     if verdict.failures:
         lines += ["", "Unmet script-form conditions:"]
         lines += [_form_check_line(failure) for failure in verdict.failures]
+    script = session.current_skill.script if session.skill_form == "script" else verdict.script
+    if script is not None:
+        try:
+            contract = script_argument_contract(script)
+        except SyntaxError:
+            lines += ["", "Argument contract: unavailable because the bundled script is not valid Python."]
+        else:
+            if not contract.complete:
+                lines += ["", "Argument contract: not statically verified (S3 warning); check the actual parser."]
     stdout_fix = _stdout_fix_line(session)
     if stdout_fix:
         lines += ["", stdout_fix]
@@ -1118,6 +1128,7 @@ def _format_latest_test_run(session: Session) -> str | None:
         f"positive_hit_rate: {run.positive_hit_rate:.0%}",
         f"negative_correct_reject_rate: {run.negative_correct_reject_rate:.0%}",
     ]
+    lines.extend(f"Note: {note}" for note in run.notes)
     routed_here: list[TestResult] = []
     for label, results, positive in (
         ("Positive samples", run.positive_results, True),

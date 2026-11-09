@@ -9,7 +9,7 @@ import pytest
 from backend.material_fidelity import scan_material_fidelity
 from backend.models import Material, MaterialKind, Mode, SkillKind
 from backend.models import TestResult as RunResult
-from backend.skill_lint import DEPLOYMENT_SECTION, has_lint_errors, lint_skill, script_only_errors
+from backend.skill_lint import DEPLOYMENT_SECTION, has_lint_errors, lint_skill, script_argument_contract, script_only_errors
 from backend.testing import _lint_prepared_code
 from backend.topology import validate_topology
 
@@ -180,6 +180,82 @@ def test_s3_table_and_add_argument_agree() -> None:
 
     extra = _swap(PY, '    p.add_argument("--start")\n', '    p.add_argument("--start")\n    p.add_argument("--debug")\n')
     assert _hits(_lint(py=extra), "S3") == [("warning", "--debug")]
+
+
+@pytest.mark.parametrize("py", [
+    'import sys\nargs = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'flag = "--building"\np.add_argument(flag)\np.parse_args()\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument("--building")\np.parse_known_args()\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument("--building")\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument(*["--building"])\np.parse_args()\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument("--building", action=argparse.BooleanOptionalAction)\np.parse_args()\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'configure(p)\np.parse_args()\n',
+    'import argparse, sys\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument("--building")\np.parse_args()\n'
+    'external_parser(sys.argv[1:])\n',
+    'import argparse\np = argparse.ArgumentParser(add_help=False)\n'
+    'p.add_argument("--building")\np.parse_args()\n'
+    'import sys\nchat = sys.argv[sys.argv.index("--chat") + 1]\n',
+    'example = "parser.add_argument(\\"--building\\")"\n',
+])
+def test_s3_unknown_argument_contract_warns_instead_of_rejecting(py: str) -> None:
+    issues = [issue for issue in _lint(py=py) if issue.rule == "S3"]
+
+    assert issues
+    assert all(issue.severity == "warning" for issue in issues)
+    assert any("cannot statically verify" in issue.message for issue in issues)
+    assert not any("Every call" in issue.message or "call fails" in issue.message for issue in issues)
+
+
+def test_s3_unknown_contract_still_requires_flags_in_the_input_table() -> None:
+    md = _swap(MD, "| `--capacity` |", "| `capacity` |")
+    issues = _lint(md=md, py="import sys\nargs = sys.argv[1:]\n")
+
+    assert ("error", "`capacity`") in _hits(issues, "S3")
+    assert ("warning", "argument contract") in _hits(issues, "S3")
+
+
+def test_s3_no_unknown_contract_warning_when_there_are_no_arguments_to_check() -> None:
+    issues = _lint(md="## Overview\n\nNo inputs.\n", py='print("{}")\n')
+
+    assert _hits(issues, "S3") == []
+
+
+def test_s3_complete_empty_parser_rejects_documented_flags() -> None:
+    py = "import argparse\np = argparse.ArgumentParser(add_help=False)\np.parse_args()\n"
+
+    assert ("error", "--capacity") in _hits(_lint(py=py), "S3")
+
+
+@pytest.mark.parametrize("constructor,imports", [
+    ("ap.ArgumentParser", "import argparse as ap"),
+    ("Parser", "from argparse import ArgumentParser as Parser"),
+])
+def test_argument_contract_recognizes_aliases_and_dest(constructor: str, imports: str) -> None:
+    contract = script_argument_contract(
+        f'{imports}\np = {constructor}(add_help=False)\n'
+        'p.add_argument("-r", "--room-id", dest="target")\np.parse_args()\n'
+    )
+
+    assert contract.complete
+    assert contract.flags == ("--room-id",)
+    assert contract.names == frozenset({"TARGET"})
+
+
+def test_argument_literals_outside_a_parser_are_not_proof_of_support() -> None:
+    contract = script_argument_contract(
+        'example = "parser.add_argument(\\"--chat\\")"\n'
+        'other.add_argument("--message")\n'
+    )
+
+    assert contract.flags == ()
+    assert not contract.complete
 
 
 def test_s4_stdout_carries_json_only() -> None:

@@ -623,6 +623,51 @@ def test_session_lint_and_save_use_the_script_form_rules(client, backend_main, f
     assert calls == [] and fake_sql.skills == {}
 
 
+@pytest.mark.parametrize("eaa_accepts", [True, False])
+def test_manual_arguments_warn_locally_and_still_require_eaa_verdict(
+    client, backend_main, fake_sql, monkeypatch, eaa_accepts,
+) -> None:
+    calls: list[dict] = []
+
+    def lint_package(skill_name, files, **kwargs):
+        calls.append(dict(files))
+        return backend_main.EaaLintResult(
+            valid=eaa_accepts, errors=[] if eaa_accepts else ["External argument contract rejected"],
+            warnings=[], ruleset_version="1.2",
+        )
+
+    monkeypatch.setattr(backend_main, "lint_skill_package", lint_package)
+    script = (
+        "import json\nimport sys\n"
+        "args = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n"
+        'print(json.dumps({"chat": args.get("--chat"), "message": args.get("--message")}))\n'
+    )
+    session = _script_session(backend_main, "manual-chat", script=script)
+    session.current_skill.skill_md += (
+        "\n## Required Inputs\n\n| Argument | Meaning |\n| --- | --- |\n"
+        "| `--chat` | Chat ID |\n| `--message` | Message text |\n"
+    )
+
+    topology = client.get(f"/api/sessions/{session.id}/topology").json()
+    s3 = [issue for issue in topology["lint"] if issue["rule"] == "S3"]
+    assert len(s3) == 1 and s3[0]["severity"] == "warning"
+
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+
+    assert len(calls) == 1
+    assert calls[0]["scripts/manual-chat.py"] == script
+    if eaa_accepts:
+        assert response.status_code == 200, response.text
+        assert backend_main.store.load_skill("manual-chat").script == script
+        assert "manual-chat" in fake_sql.skills
+    else:
+        assert response.status_code == 400
+        assert "External argument contract rejected" in str(response.json())
+        assert "manual-chat" not in fake_sql.skills
+        with pytest.raises(FileNotFoundError):
+            backend_main.store.load_skill("manual-chat")
+
+
 # --- conftest ACA lookup fake -------------------------------------------------
 
 

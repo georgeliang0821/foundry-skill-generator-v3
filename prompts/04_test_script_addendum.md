@@ -6,7 +6,10 @@ scripts the host asked `run_skill_script` to run, and with which arguments.
 Nothing ran; read them as the host's plan.
 
 - `valid` means the arguments are a list of strings and every `--flag` passed
-  to THIS skill's script is one the script declares. It says nothing about the
+  to THIS skill's script is one the script declares, if its argument contract
+  is fully recognized. When the run notes say argument support is not statically
+  verified, `valid` checks only the list-of-strings shape: review the actual
+  parser and do not claim those flags were verified or rejected. It says nothing about the
   values: check those against `## Required Inputs` and the sample query yourself.
 - `INVALID` lists its `problems`:
   - `args is not a list of strings` -- the host did not follow `## How to Run`.

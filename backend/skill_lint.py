@@ -2331,6 +2331,134 @@ def _argument_flags(tree: ast.AST) -> list[str]:
     )
 
 
+@dataclass(frozen=True)
+class ScriptArgumentContract:
+    flags: tuple[str, ...]
+    names: frozenset[str]
+    complete: bool
+
+
+def _script_argument_contract(tree: ast.AST) -> ScriptArgumentContract:
+    """Recognize a literal argparse contract; unsupported parsing stays unknown."""
+    nodes = list(ast.walk(tree))
+    parents = _parents(tree)
+    modules = {
+        alias.asname or alias.name
+        for node in nodes if isinstance(node, ast.Import)
+        for alias in node.names if alias.name == "argparse"
+    }
+    constructors = {
+        alias.asname or alias.name
+        for node in nodes if isinstance(node, ast.ImportFrom) and node.module == "argparse"
+        for alias in node.names if alias.name == "ArgumentParser"
+    }
+    parsers = [
+        node for node in nodes if isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name) and node.func.id in constructors
+            or isinstance(node.func, ast.Attribute) and node.func.attr == "ArgumentParser"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id in modules
+        )
+    ]
+    parser_names = {_call_result_name(tree, call) for call in parsers} - {None}
+    complete = len(parsers) == 1 and len(parser_names) == 1
+    flags: list[str] = []
+    names: set[str] = set()
+    parsed = False
+    argv_names = {"argv"} | {
+        alias.asname or alias.name
+        for node in nodes if isinstance(node, ast.ImportFrom) and node.module == "sys"
+        for alias in node.names if alias.name == "argv"
+    }
+    forwarders = {
+        node.name for node in nodes if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and (args := node.args.posonlyargs + node.args.args) and args[0].arg == "argv"
+    }
+
+    def forwards_argv(call: ast.AST | None, value: ast.AST) -> bool:
+        return isinstance(call, ast.Call) and bool(call.args) and call.args[0] is value and (
+            isinstance(call.func, ast.Name) and call.func.id in forwarders
+            or isinstance(call.func, ast.Attribute) and call.func.attr == "parse_args"
+            and isinstance(call.func.value, ast.Name) and call.func.value.id in parser_names
+        )
+
+    for call in parsers:
+        if call.args or any(
+            kw.arg in {None, "parents", "prefix_chars", "fromfile_prefix_chars", "argument_default"}
+            for kw in call.keywords
+        ):
+            complete = False
+    for node in nodes:
+        if not (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id in parser_names
+        ):
+            continue
+        if node.func.attr == "parse_args":
+            parsed = True
+            if node.args:
+                if len(node.args) == 1 and isinstance(node.args[0], ast.Name):
+                    argv_names.add(node.args[0].id)
+                else:
+                    complete = False
+            if node.keywords:
+                complete = False
+            continue
+        if node.func.attr != "add_argument":
+            complete = False
+            continue
+        literals = [
+            arg.value for arg in node.args
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+        ]
+        if not literals or len(literals) != len(node.args) or any(kw.arg is None for kw in node.keywords):
+            complete = False
+        if any(_has_ancestor(node, parents, kind) for kind in (ast.If, ast.For, ast.While, ast.comprehension)):
+            complete = False
+        long_flags = [flag for flag in literals if flag.startswith("--")]
+        flags.extend(long_flags)
+        dest = next((kw.value for kw in node.keywords if kw.arg == "dest"), None)
+        if dest is not None and not (isinstance(dest, ast.Constant) and isinstance(dest.value, str)):
+            complete = False
+        elif isinstance(dest, ast.Constant) and isinstance(dest.value, str):
+            names.add(dest.value.upper())
+        elif literals:
+            names.add((long_flags or literals)[0].lstrip("-").replace("-", "_").upper())
+        action = next((kw.value for kw in node.keywords if kw.arg == "action"), None)
+        if action is not None and not (
+            isinstance(action, ast.Constant) and action.value in {
+                "store", "store_const", "store_true", "store_false", "append", "append_const", "count", "extend",
+            }
+        ):
+            complete = False
+    for node in nodes:
+        if isinstance(node, ast.arg) and node.arg in parser_names:
+            complete = False
+        if isinstance(node, ast.Name) and node.id in parser_names:
+            parent = parents.get(node)
+            if isinstance(node.ctx, ast.Store):
+                if not (isinstance(parent, (ast.Assign, ast.AnnAssign)) and parent.value in parsers):
+                    complete = False
+            elif not (
+                isinstance(parent, ast.Attribute) and parent.value is node
+                and isinstance(parents.get(parent), ast.Call)
+            ):
+                complete = False
+        if isinstance(node, ast.Name) and node.id in argv_names and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            if not forwards_argv(parent, node):
+                complete = False
+        if isinstance(node, ast.Attribute) and node.attr == "argv":
+            parent = parents.get(node)
+            if not (
+                isinstance(parent, ast.Subscript) and isinstance(parent.slice, ast.Slice)
+                and isinstance(parent.slice.lower, ast.Constant) and parent.slice.lower.value == 1
+                and parent.slice.upper is None and parent.slice.step is None
+                and forwards_argv(parents.get(parent), parent)
+            ):
+                complete = False
+    return ScriptArgumentContract(tuple(_unique(flags)), frozenset(names), complete and parsed)
+
+
 def _documented_flags(skill_md: str) -> list[str]:
     """``--flag`` names in the first column of the ``## Required Inputs`` table."""
     flags: list[str] = []
@@ -2364,11 +2492,16 @@ def _flagless_input_rows(skill_md: str) -> list[str]:
 
 
 def _check_script_args(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
-    """S3 -- the argument table, every flag the prose names, and ``add_argument`` agree."""
-    accepted = _argument_flags(s.tree)
+    """S3 -- reconcile documentation with the script's statically known contract."""
+    contract = _script_argument_contract(s.tree)
+    accepted = contract.flags
     documented = _documented_flags(skill_md)
+    mentioned = _unique(
+        flag for span in _BACKTICK_TOKEN_RE.findall(skill_md or "") for flag in _FLAG_RE.findall(span)
+    )
+    flagless_rows = _flagless_input_rows(skill_md)
     issues: list[LintIssue] = []
-    for cell in _flagless_input_rows(skill_md):
+    for cell in flagless_rows:
         issues.append(LintIssue(
             rule="S3",
             severity="error",
@@ -2379,14 +2512,26 @@ def _check_script_args(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
             ),
             detail=cell,
         ))
+    if not contract.complete and (accepted or documented or mentioned or flagless_rows):
+        issues.append(LintIssue(
+            rule="S3",
+            message=(
+                "The argument contract is not fully recognized; S3 cannot statically verify "
+                "the documented flags against this script. Manual or dynamic parsing may accept "
+                "them. Check the Required Inputs and invocation example against the actual parser; "
+                "this warning is not evidence that a flag is unsupported. Do not remove flags "
+                "from the documentation or modify a read-only script just to silence it."
+            ),
+            detail="argument contract",
+        ))
     for flag in documented:
-        if flag not in accepted:
+        if flag not in accepted and contract.complete:
             issues.append(LintIssue(
                 rule="S3",
                 severity="error",
                 message=(
-                    f"`## {INPUTS_SECTION}` lists `{flag}`, but the script never declares it with "
-                    "`add_argument`. Every call that passes it fails."
+                    f"`## {INPUTS_SECTION}` lists `{flag}`, but it is absent from the script's "
+                    "statically recognized argument contract."
                 ),
                 detail=flag,
             ))
@@ -2395,23 +2540,20 @@ def _check_script_args(skill_md: str, s: _ScriptModel) -> list[LintIssue]:
             issues.append(LintIssue(
                 rule="S3",
                 message=(
-                    f"The script accepts `{flag}`, but the first column of the "
+                    f"The script declares `{flag}`, but the first column of the "
                     f"`## {INPUTS_SECTION}` table does not list it. The host cannot pass an "
                     "argument it was never told exists."
                 ),
                 detail=flag,
             ))
-    mentioned = _unique(
-        flag for span in _BACKTICK_TOKEN_RE.findall(skill_md or "") for flag in _FLAG_RE.findall(span)
-    )
     for flag in mentioned:
-        if flag not in accepted and flag not in documented:
+        if flag not in accepted and flag not in documented and contract.complete:
             issues.append(LintIssue(
                 rule="S3",
                 severity="error",
                 message=(
-                    f"SKILL.md names the argument `{flag}`, which the script does not declare. "
-                    "The host follows the prose, so the call fails."
+                    f"SKILL.md names the argument `{flag}`, which is absent from the script's "
+                    "statically recognized argument contract."
                 ),
                 detail=flag,
             ))
@@ -3172,27 +3314,19 @@ def script_only_errors(script: str) -> list[LintIssue]:
     return [issue for issue in issues if issue.severity == "error"]
 
 
+def script_argument_contract(script: str) -> ScriptArgumentContract:
+    """Known flags and input names, plus whether absence is meaningful."""
+    return _script_argument_contract(ast.parse(script))
+
+
 def script_argument_flags(script: str) -> list[str]:
-    """The ``--flag`` names the script declares with ``add_argument`` (the S3 accepted set)."""
-    return _argument_flags(ast.parse(script))
+    """Known ``--flag`` names; use the contract's completeness before rejecting others."""
+    return list(script_argument_contract(script).flags)
 
 
 def script_argument_names(script: str) -> set[str]:
-    """Upper-cased ``dest`` of every ``add_argument`` (``--target-tables`` -> ``TARGET_TABLES``)."""
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(script)):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"):
-            continue
-        dest = next((kw.value for kw in node.keywords if kw.arg == "dest"), None)
-        if isinstance(dest, ast.Constant) and isinstance(dest.value, str):
-            names.add(dest.value.upper())
-            continue
-        flags = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
-        long_flag = next((f for f in flags if f.startswith("--")), None)
-        chosen = long_flag or (flags[0] if flags else None)
-        if chosen:
-            names.add(chosen.lstrip("-").replace("-", "_").upper())
-    return names
+    """Known upper-cased input names; absence is meaningful only for a complete contract."""
+    return set(script_argument_contract(script).names)
 
 
 # ---------------------------------------------------------------------------

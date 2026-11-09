@@ -19,9 +19,8 @@ from .models import (
     TestResult,
     TestRun,
 )
-from .skill_lint import script_argument_flags
 from .orchestration import is_eaa_scenario
-from .testing import EAA_SCENARIO_EXECUTION_NOTE, ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, _check_requested_scripts, verify_mode_echo
+from .testing import EAA_SCENARIO_EXECUTION_NOTE, ROUTE_ONLY, SCENARIO_DISCOVERABILITY_NOTE, _check_requested_scripts, _script_flag_validation, verify_mode_echo
 
 _scenario = "new_skill_happy_path"
 
@@ -303,28 +302,27 @@ def fake_run_selection_tests(
     ]
     pos_passed = [result for result in positive_results if result.passed is True]
     neg_passed = [result for result in negative_results if result.passed is True]
+    script_flags, argument_notes = _script_flag_validation(script)
     if script is not None:
-        _fake_requested_scripts(positive_results, skill_name, script)
+        _fake_requested_scripts(positive_results, skill_name, script_flags)
     return TestRun(
         skill_version_hash=version_hash,
         positive_results=positive_results,
         negative_results=negative_results,
         positive_hit_rate=(len(pos_passed) / len(positive_results)) if positive_results else 0.0,
         negative_correct_reject_rate=(len(neg_passed) / len(negative_results)) if negative_results else 0.0,
+        notes=argument_notes,
     )
 
 
-def _fake_requested_scripts(results: list[TestResult], skill_name: str, script: str) -> None:
+def _fake_requested_scripts(results: list[TestResult], skill_name: str, flags: list[str] | None) -> None:
     """First positive requests the script with a declared flag, the rest with an undeclared one."""
-    try:
-        declared = sorted(script_argument_flags(script))
-    except SyntaxError:
-        declared = []
+    declared = sorted(flags or [])
     for index, result in enumerate(results):
         flag = declared[0] if index == 0 and declared else "--e2e-undeclared"
         entry = {"skill": skill_name, "script": script_relpath_of(skill_name), "args": [flag, "e2e"]}
         result.apim_raw_response = {**result.apim_raw_response, "requested_scripts": [entry]}
-        result.requested_scripts = _check_requested_scripts(result.apim_raw_response, skill_name, declared)
+        result.requested_scripts = _check_requested_scripts(result.apim_raw_response, skill_name, flags)
 
 
 class FakeE2EAgent:

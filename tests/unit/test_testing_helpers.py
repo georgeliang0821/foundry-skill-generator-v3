@@ -1092,6 +1092,7 @@ def test_fake_runner_checks_requested_scripts_only_for_a_script_skill() -> None:
         "import argparse\n"
         "parser = argparse.ArgumentParser(add_help=False)\n"
         "parser.add_argument('--room')\n"
+        "parser.parse_args()\n"
     )
     skill_md = "---\nname: demo-skill\ndescription: Demo\n---\n"
 
@@ -1103,6 +1104,19 @@ def test_fake_runner_checks_requested_scripts_only_for_a_script_skill() -> None:
     assert (first["script"], first["args"], first["valid"]) == ("scripts/demo-skill.py", ["--room", "e2e"], True)
     assert (second["valid"], second["problems"]) == (False, ["`--e2e-undeclared` is not declared by the script"])
     assert run.negative_results[0].requested_scripts == []
+
+
+def test_fake_runner_reports_unknown_argument_support() -> None:
+    from backend.e2e import fake_run_selection_tests, set_scenario
+
+    set_scenario("new_skill_happy_path")
+    run = fake_run_selection_tests(
+        "---\nname: demo-skill\ndescription: Demo\n---\n", ["use demo"], [],
+        script="import sys\nargs = sys.argv[1:]\n",
+    )
+
+    assert run.positive_results[0].requested_scripts[0]["problems"] == []
+    assert any("not statically verified" in note for note in run.notes)
 
 
 @pytest.mark.parametrize(

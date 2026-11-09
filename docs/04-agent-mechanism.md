@@ -636,7 +636,7 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 | `parses` | 該素材可被 `ast` 解析 |
 | `entry_point` | 模組頂層除了 import、函式／類別定義、賦值與 docstring 之外，至少還有一個會執行的語句（例如 `main()` 或 `if __name__ == "__main__":`）；只有定義的函式庫直接執行時什麼都不做 |
 | `script_lint` | `script_only_errors()` 沒有 error（S4/S5/S6/S7/S10/S10b/S11/S12/S13；S12 擋固定或來源不明的 `request_inputs` dict，含字面值與 `dict(...)`；每個值直接來自同一作用域的 argparse namespace 時允許，預設值在 parser 宣告；S13 擋讀 `globals()`：bundled script 是獨立行程，沒有 host 注入的變數）。S4 訊息附上該行原始碼；`[NEEDS_INFO]` 之後的純文字另有專屬訊息（說明要放進其後的 JSON，EAA 會先去掉標記行再 `json.loads` 其餘 stdout） |
-| `inputs` | `variables` 中每個 `kind=runtime`、`source=request` 的變數都有對應的 `add_argument`（`dest`，或 `--target-tables` → `TARGET_TABLES`）。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
+| `inputs` | 靜態參數契約可完整辨識時，`variables` 中每個 `kind=runtime`、`source=request` 的變數須有對應的 argparse 輸入（`dest`，或 `--target-tables` → `TARGET_TABLES`）。手動或動態解析無法完整辨識時，不以找不到宣告判定不支援；prompt 明示尚未靜態驗證，須核對實際 parser。`source=credentials`、`aca_env`、`obo_token` 可用環境變數 |
 | `covers_operations` | 使用者在 `variables_ok` 確認「code 素材涵蓋本 skill 的所有操作」（`script_covers_operations`），**且** `variables_ok` 已確認 |
 
 **鎖定**：PREPARE → DRAFT 通過品質關卡後，`lock_skill_form()` 把判定寫入 `session.skill_form`；NEW 且為 script 時，`current_skill.script` 取該素材全文，並寫入一則 system 訊息要 Agent 告訴使用者這是 bundled script、更正先前任何「會是 inline」的說法。之後 NEW session 不支援 inline ↔ script 互轉——回到 PREPARE 也保留鎖定，`record_variables` 想改 `script_covers_operations` 或 `prefer_inline` 會被拒（`/variables` 回 409）。MODIFY session 在建立時就依 Blob 是否有 script 決定形式，因此 `record_variables` 的這兩個旗標在 MODIFY 會被忽略而不是被拒；MODIFY 改用 `POST /api/sessions/{id}/convert-form` 轉換形式（見下方〈MODIFY 的形式轉換〉）。
@@ -730,7 +730,9 @@ Agent 端的寫法由 [prompts/15_script_edge_rules.md](../prompts/15_script_edg
 
 提出時被拒走一般的 `tool_effect_rejected`；接受時被拒回 409 `material_patch_rejected`，素材不變。接受成功後素材 `origin="agent_patch"`，`user_content` 保留第一次被改前的使用者原文；覆蓋確認照上表重置，並寫入 system 訊息要求使用者先實際執行一次，並告訴使用者改過的程式在 Materials 分頁標示列、可複製或下載。`## Materials` 的素材標頭會加上 `origin=agent_patch, not run by the user`。使用者之後自行編輯素材（`PUT`），或 `script_covers_operations` 被記為 true，即回到 `origin="user"`。沒有 undo；是否已執行只靠 prompt 與 UI 標記，後端不擋 `script_covers_operations`。
 
-**路由測試**：旗標開啟的 runtime 會在回應帶 `requested_scripts`。Generator 檢查每筆 `args` 必須是字串陣列，且本 skill 的每個 `--flag` 都是 script 宣告過的（S3 accepted set），結果以 `valid` / `problems` 存在 `TestResult.requested_scripts`，並列在 `## Latest Test Run` 與 Tests 分頁。
+**S3 參數契約檢查**：共用分析器回傳已辨識的旗標、輸入名稱及契約是否完整。能辨識單一 argparse parser、字面值參數宣告與 `parse_args` 時，文件列出契約中不存在的旗標仍為 error；已知旗標漏寫於文件仍為 warning。手動解析、動態宣告、混用 parser 等無法完整判定的情況，只回報「無法靜態驗證」warning，不宣稱呼叫必定失敗，也不要求為此改動唯讀腳本。Required Inputs 第一欄缺少反引號包住的 `--flag` 仍為 error。這不是執行驗證；外部 EAA `lint_skill_package` 的規則與拒絕儲存行為不變。
+
+**路由測試**：旗標開啟的 runtime 會在回應帶 `requested_scripts`。Generator 檢查每筆 `args` 必須是字串陣列；只有本 skill 的參數契約可完整辨識時，才拒絕不在已知集合中的 `--flag`。結果以 `valid` / `problems` 存在 `TestResult.requested_scripts`，並列在 `## Latest Test Run` 與 Tests 分頁。契約不完整時，測試 notes 明示參數支援尚未靜態驗證，此時 `valid` 只代表字串陣列形狀正確，不代表旗標已確認可用。
 
 #### EAA script 旗標
 

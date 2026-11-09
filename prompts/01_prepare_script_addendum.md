@@ -5,6 +5,10 @@ that code, unchanged, as its bundled script instead of inline sample code.
 `## Skill Form` in the runtime state shows the current verdict and every unmet
 condition; it states what failed, never how to fix it.
 
+- **An unknown argument contract is not a failed input check.** Manual or
+  dynamic parsing can produce an S3 warning that the contract is not statically
+  verified. Check the actual parser and explain the uncertainty; do not ask to
+  rewrite working code as argparse merely to silence this warning.
 - **Settle the coverage inside `variables_ok`.** After the variables are
   reconciled, walk the user through each operation the skill performs and check
   together that the code material implements it. Record the joint answer with

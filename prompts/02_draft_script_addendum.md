@@ -21,11 +21,16 @@ Write the body with these sections, in this order:
    Arguments are passed as a list of strings built from Required Inputs, with
    one example such as `["--building", "CLS", "--capacity", "8"]`.
 3. `## Required Inputs` -- a table whose first column is every argument the
-   script declares with `add_argument`, backticked as `` `--flag` ``: no more,
+   script accepts, backticked as `` `--flag` ``: no more,
    no fewer, spelled exactly as in the script (S3). Then give the value, its
    meaning and its default. Guidance on building the arguments from the user's
    words (resolving relative dates, when to ask) goes below the table. Every
-   backticked `--flag` anywhere in SKILL.md must be one the script declares.
+   backticked `--flag` anywhere in SKILL.md must be one the script accepts.
+   The parser may use `add_argument` or manual argument parsing. S3 rejects
+   absent flags only when the static argument contract is fully recognized;
+   otherwise it warns that it cannot statically verify the contract. Read the
+   actual parser to document its flags; do not remove real flags, invent
+   declarations, or modify the read-only script just to silence that warning.
 4. `## Reading the Result` -- what stdout carries, then an exit-code table that
    lists exactly the exit codes the script can end with (0 = success, needs-info
    or business rejection; 1 = configuration; 3 = downstream failure) and what
