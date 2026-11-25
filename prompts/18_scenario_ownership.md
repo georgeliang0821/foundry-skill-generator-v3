@@ -67,14 +67,40 @@ the EAA addendum below replaces those instructions, not the common quality rules
 
 ### Child reference context
 
-The Child Skills block contains complete current capability SKILL.md files;
-the Dependency Skills index lists their published `##` headings. Read the real
-input contracts, `[NEEDS_INFO] missing=` codes and business error keys. Do not
-copy child field tables or payload examples into the parent.
+The Child Skills block provides every available child's current version_hash,
+description and original Required Inputs sections. The Dependency Skills index
+lists all published `##` headings. Other sections and full bodies are NOT
+automatically included. A missing Required Inputs section is not proof that a
+legacy child has no input contract: read its actual contract location.
 
-For `propose_child_edit`, copy unchanged V4A CONTEXT lines verbatim from between
-the `<<<BEGIN ...>>>` / `<<<END ...>>>` markers. The text is literal file content,
-not fenced, because the files contain their own code blocks.
+Use the Generator-only `read_child_context` tool to obtain original sections:
+`{"reads":[{"skill_name":"child-name","sections":["Execution","Error Handling"]}]}`.
+Batch the needed children and sections into ONE call. Make it the ONLY tool call
+in that response. The backend resumes you with the results without another user
+message; other tools emitted after this read are discarded because they were
+generated before its results. Do not emit a question or a patch before the read.
+This tool is for authoring, not a tool name to put in the published scenario.
+Do not confuse it with Host fetch_skill or invent EAA internal tool signatures.
+
+The batch REPLACES the optional read window; include earlier sections again only
+if they are still needed. All Required Inputs and the heading index remain
+available. Context is limited by total rendered characters, not child count;
+oversized reads fail explicitly rather than truncate a contract or a file.
+Prefer relevant sections, and do not repeat an unchanged read. At most four read
+continuations run per chat request. Do not guess missing operations, failure
+branches, `[NEEDS_INFO] missing=` codes or business error keys; read the relevant
+execution/error sections before drafting them. If mandatory contracts alone
+exceed the budget, explain the limit and discuss reducing scope.
+
+Before `propose_child_edit`, read that child with `full=true` and no sections.
+Copy `base_hash` from that full read's version_hash and unchanged V4A CONTEXT
+lines verbatim from its `<<<BEGIN SKILL.md: ...>>>` / `<<<END ...>>>` markers.
+Full files and sections are literal original text, not fenced or summarized.
+The backend checks this base at proposal and acceptance; changed content or a
+stale_version read requires a fresh full read and a new proposal. Never reuse
+an older version just because its patch anchors match. Acceptance still creates
+an edit-card version only; saving is a separate author action. Do not copy child
+field tables or payload examples into the parent.
 
 ### Host owner
 

@@ -10,6 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
+from .blob_store import compute_hash
 from .eaa_platform import PLATFORM_SECRET_DENYLIST, obo_registry_mapping, script_flags_off
 from .input_contract import input_contract_errors
 
@@ -40,8 +41,10 @@ from .skill_lint import (
     stdout_to_stderr,
 )
 from .topology import declared_children, parse_frontmatter_block
+from .sections import h2_sections, match_section
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
+CHILD_CONTEXT_MAX_CHARS = 60_000
 
 STAGE_PROMPT_MAP: dict[Stage, str] = {
     Stage.PREPARE: "01_prepare.md",
@@ -1369,6 +1372,8 @@ def _format_selected_neighbor_skills(session: Session) -> str | None:
     agent can edit them with a V4A patch without asking the user for the text.
     Populated best-effort onto session.neighbor_full_md before the turn."""
     full = getattr(session, "neighbor_full_md", None) or {}
+    if SkillKind(session.skill_kind) is SkillKind.SCENARIO:
+        full = {name: md for name, md in full.items() if name not in session.children}
     if not full:
         return None
     lines = [
@@ -1391,33 +1396,66 @@ def _format_selected_neighbor_skills(session: Session) -> str | None:
     return "\n".join(lines)
 
 
-def _format_child_skills(session: Session) -> str | None:
-    """Render the FULL current SKILL.md of each declared child capability skill.
-
-    The scenario body's payload contract, its failure branches and its child
-    edits are all derived from these files, so the agent must never have to ask
-    the user for them. Populated best-effort onto session.child_full_md before
-    the turn."""
-    full = getattr(session, "child_full_md", None) or {}
-    if not full:
+def child_context_for_prompt(session: Session) -> str | None:
+    """Render original input contracts and a version-bound optional read window."""
+    full = session.child_full_md
+    names = list(dict.fromkeys(list(full) + session.children))
+    if not names:
         return None
-    lines = [
-        "## Child Skills (full SKILL.md)",
-    ]
-    for name, md in full.items():
-        lines.append("")
-        lines.append(f"### {name}")
-        lines.append(f"<<<BEGIN SKILL.md: {name}>>>")
-        lines.append(md)
-        lines.append(f"<<<END SKILL.md: {name}>>>")
-    return "\n".join(lines)
+    reads = {read.skill_name: read for read in session.child_context_reads}
+    lines = ["## Child Skills (contracts and requested context)"]
+    for name in names:
+        lines.extend(["", f"### {name}"])
+        md = full.get(name)
+        if not md:
+            lines.append("status: unresolved")
+            continue
+        version = compute_hash(md)
+        _, frontmatter = parse_frontmatter_block(md)
+        lines.append(f"version_hash: {version}")
+        if frontmatter is None:
+            lines.append("status: unparseable_frontmatter")
+        else:
+            lines.append("description: " + json.dumps(str(frontmatter.get("description", "")), ensure_ascii=False))
+        read = reads.get(name)
+        current_read = read is not None and read.version_hash == version
+        if read is not None and not current_read:
+            lines.append("read_status: stale_version")
+        if read is not None and current_read and read.full:
+            lines.extend([f"<<<BEGIN SKILL.md: {name}>>>", md, f"<<<END SKILL.md: {name}>>>"])
+            continue
+        sections = h2_sections(md)
+        titles = [title for title, _ in sections]
+        wanted = set(match_section("Required Inputs", titles))
+        if not wanted:
+            lines.append("required_inputs_status: no_published_section")
+        if read is not None and current_read:
+            for requested in read.sections:
+                wanted.update(match_section(requested, titles))
+        for title, body in sections:
+            if title in wanted:
+                lines.extend([
+                    f"<<<BEGIN CHILD SECTION: {name} / {title}>>>",
+                    f"## {title}\n{body}",
+                    f"<<<END CHILD SECTION: {name} / {title}>>>",
+                ])
+    index = _format_child_sections(session)
+    if index:
+        lines.extend(["", index])
+    rendered = "\n".join(lines)
+    if len(rendered) > CHILD_CONTEXT_MAX_CHARS:
+        raise ValueError(
+            f"Child context requires {len(rendered)} characters; the limit is "
+            f"{CHILD_CONTEXT_MAX_CHARS}. Request fewer or smaller sections; "
+            "if Required Inputs and the index alone exceed the limit, reduce the scenario scope."
+        )
+    return rendered
 
 
 def _format_child_sections(session: Session) -> str | None:
     """Render the ``##`` heading index of every declared child.
 
-    A pointer can name a section of any whitelisted skill, but only a few of
-    them have their full body injected above. Without this index the agent has
+    A pointer can name a section of any whitelisted skill. Without this index the agent has
     to guess heading names, and a guessed name is a hard error at save time.
     """
     index = getattr(session, "child_sections", None) or {}
@@ -1601,12 +1639,9 @@ def build_system_prompt(session: Session) -> str:
         if neighbor_full_section:
             parts.append(neighbor_full_section)
     if kind is SkillKind.SCENARIO and stage in {Stage.PREPARE, Stage.DRAFT, Stage.REFINE, Stage.TEST}:
-        child_section = _format_child_skills(session)
+        child_section = child_context_for_prompt(session)
         if child_section:
             parts.append(child_section)
-        sections_index = _format_child_sections(session)
-        if sections_index:
-            parts.append(sections_index)
     iteration_section = _format_iteration_log(session)
     if iteration_section:
         parts.append(iteration_section)

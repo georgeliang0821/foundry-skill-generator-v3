@@ -82,6 +82,7 @@ from .models import (
     ChatMessage,
     ChatRequest,
     ChildrenUpdateRequest,
+    ChildContextSelection,
     ConvertFormRequest,
     CreateSessionRequest,
     Material,
@@ -98,6 +99,7 @@ from .models import (
     NeighborsUpdateRequest,
     NeighborVersion,
     RunSessionTestRequest,
+    ReadChildContextRequest,
     SamplesUpdateRequest,
     SCENARIO_SKILL_TYPE,
     SaveSessionSkillRequest,
@@ -137,6 +139,7 @@ from .state_machine import (
     _form_prompt_key,
     apply_code_material_change,
     code_material_contents,
+    child_context_for_prompt,
     evaluate_skill_form,
     needs_flag_lookup_before_lock,
     open_fix_items,
@@ -372,17 +375,15 @@ def _load_child_full_md(session) -> None:
     in this session is served from its selected edit version, so the agent
     patches against the exact text the next apply will target.
 
-    ``children`` is a whitelist of every skill the scenario may use, which is
-    far wider than the set it delegates to, so the cap below is applied to a
-    delegation-first ordering. Otherwise the one child whose payload contract
-    actually matters could be cut by an alphabetically unlucky dependency.
+    Load every child for validation. Keep delegation-first ordering so the
+    separate prompt budget prioritizes the contracts the scenario delegates to.
     """
     delegated = delegation_children(session)
     ordered = [safe_skill_name(c) for c in delegated + list(session.children or [])]
     names = [n for n in dict.fromkeys(ordered) if n]
     edits_by_name = {ne.skill_name: ne for ne in (session.neighbor_edits or [])}
     loaded: dict[str, str] = {}
-    for name in names[:5]:
+    for name in names:
         ne = edits_by_name.get(name)
         if ne and ne.versions:
             sel = next((v for v in ne.versions if v.version_id == ne.selected_version_id), None)
@@ -411,10 +412,9 @@ def _load_child_full_md(session) -> None:
 def _load_child_sections(session) -> None:
     """Best-effort: index the ``##`` headings of EVERY declared child.
 
-    Full bodies are capped and loaded only for the children this scenario
-    delegates to, but a pointer can name a section of any whitelisted skill, so
-    the heading index has to cover all of them. Headings only, because the index
-    is republished into the prompt on every turn.
+    Validation loads every full body, but the prompt includes only a bounded
+    subset. A pointer can name a section of any whitelisted skill, so the
+    heading index still covers all of them.
     """
     from .sections import h2_titles
 
@@ -446,6 +446,72 @@ def _load_child_sections(session) -> None:
         requested=len(names),
         loaded=len(index),
     )
+
+
+def _refresh_child_context(session: Session) -> None:
+    for name in dict.fromkeys(delegation_children(session) + session.children):
+        acl_mod.assert_can_access(session.owner_upn, name)
+    _load_child_full_md(session)
+
+
+def _read_child_context(session: Session, args: dict[str, Any]) -> None:
+    if session.current_stage not in {"prepare", "draft", "refine", "test"}:
+        raise ValueError("Child context is only available in authoring stages.")
+    request = ReadChildContextRequest.model_validate(args)
+    names = [read.skill_name for read in request.reads]
+    if len(names) != len(set(names)):
+        raise ValueError("Batch each child's sections into one read entry.")
+    for name in names:
+        if safe_skill_name(name) != name or name not in session.children:
+            raise ValueError(f"`{name}` is not an exact declared child name.")
+    try:
+        _refresh_child_context(session)
+    except HTTPException as exc:
+        raise ValueError("A declared child is not accessible.") from exc
+    from .sections import h2_titles, match_section
+
+    reads = []
+    for read in request.reads:
+        md = session.child_full_md.get(read.skill_name)
+        if not md:
+            raise ValueError(f"Child `{read.skill_name}` could not be loaded.")
+        titles = h2_titles(md)
+        for requested in read.sections:
+            if not match_section(requested, titles):
+                raise ValueError(
+                    f"Child `{read.skill_name}` has no section matching `{requested}`. "
+                    f"Available sections: {', '.join(titles) or '(none)'}."
+                )
+        reads.append(ChildContextSelection(
+            **read.model_dump(), version_hash=compute_hash(md),
+        ))
+    candidate = session.model_copy(update={"child_context_reads": reads})
+    child_context_for_prompt(candidate)
+    session.child_context_reads = reads
+    session.touch()
+    log_event("child_context.read", session_id=session.id, children=names)
+
+
+def _assert_child_edit_base(
+    session: Session, args: dict[str, Any], *, require_read: bool = True,
+) -> None:
+    name = str(args.get("skill_name") or "")
+    if name not in session.children:
+        raise ValueError(f"`{name}` is not a declared child.")
+    try:
+        acl_mod.assert_can_modify(session.owner_upn, name)
+    except HTTPException as exc:
+        raise ValueError(f"You cannot modify child `{name}`.") from exc
+    _load_child_full_md(session)
+    md = session.child_full_md.get(name)
+    base = str(args.get("base_hash") or "")
+    if not md or not base or base != compute_hash(md):
+        raise ValueError(f"Child `{name}` changed or has no matching base_hash from a full read.")
+    if require_read and not any(
+        read.skill_name == name and read.full and read.version_hash == base
+        for read in session.child_context_reads
+    ):
+        raise ValueError(f"Child `{name}` needs a current full read before proposing an edit.")
 
 
 def _drop_declared_children_from_peers(session) -> list[str]:
@@ -707,6 +773,7 @@ PASSIVE_TOOL_CALLS = {
     "request_materials",
     "show_test_results",
 }
+MAX_CHILD_READ_ROUNDS = 4
 
 
 def _normalize_named_items(items: list[Any], *, default_field: str = "name") -> list[dict[str, Any]]:
@@ -1147,6 +1214,8 @@ def _save_skill_dual_write(
     if existing is None and not is_rename and _skill_name_taken(skill_name):
         raise HTTPException(status_code=409, detail="Skill content already exists without matching SQL metadata.")
     kind = SkillKind(session.skill_kind)
+    if kind is SkillKind.SCENARIO:
+        _load_child_full_md(session)
     issues = validate_topology(
         session.current_skill.skill_md,
         kind,
@@ -1160,8 +1229,6 @@ def _save_skill_dual_write(
         detail = "\n".join(f"{issue.rule}: {issue.message}" for issue in errors)
         raise HTTPException(status_code=400, detail=f"Topology validation failed:\n{detail}")
 
-    if kind is SkillKind.SCENARIO:
-        _load_child_full_md(session)
     # Before the content lint, whose F2/F3 rules read the merged asset set.
     if old_name and not session.assets_synced:
         merged = {asset.path: asset for asset in _load_stored_assets(session, old_name)}
@@ -1728,6 +1795,7 @@ KIND_ONLY_TOOLS: dict[str, SkillKind] = {
     "propose_material_patch": SkillKind.CAPABILITY,
     "record_delegation": SkillKind.SCENARIO,
     "propose_child_edit": SkillKind.SCENARIO,
+    "read_child_context": SkillKind.SCENARIO,
 }
 
 _MATERIAL_PATCH_REWRITE_GUIDANCE = (
@@ -2288,6 +2356,10 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
             f"session authors a {session.skill_kind} skill."
         )
 
+    if tool == "read_child_context":
+        _read_child_context(session, args)
+        return
+
     if tool == "set_orchestration_owner":
         req = OrchestrationOwnerUpdateRequest.model_validate(args)
         with _skill_mutation_lock:
@@ -2641,6 +2713,7 @@ def apply_tool_effect(session: Session, tool: str, args: dict[str, Any]) -> None
         # INTERACTIVE: do NOT apply here. The proposal stays a pending tool call
         # so the user accepts/rejects it on a chat card (like propose_patch). The
         # apply happens in tool_result on accept via _apply_neighbor_edit_proposal.
+        _assert_child_edit_base(session, args)
         return
 
     if tool == "record_reflection":
@@ -2923,6 +2996,9 @@ def refresh_session_children(
             session.prepare_brief.verify_evidence.pop("delegation_ok", None)
         session.prepare_brief.delegation = delegation
         session.children = children
+        session.child_context_reads = [
+            read for read in session.child_context_reads if read.skill_name in children
+        ]
     _load_child_full_md(session)
     if req is not None:
         try:
@@ -3681,8 +3757,14 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
     assistant_chars = 0
     event_counts: dict[str, int] = {}
     try:
+        if SkillKind(session.skill_kind) is SkillKind.SCENARIO:
+            _refresh_child_context(session)
+            child_context_for_prompt(session)
         agent_events = iter(agent.stream(session, req.message))
         end_of_events = object()
+        read_rounds = 0
+        seen_reads: set[str] = set()
+        tools_this_round = 0
         while True:
             with log_timing("chat.phase", phase="agent_next_event"):
                 event = next(agent_events, end_of_events)
@@ -3718,6 +3800,33 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                     call_id=data.get("call_id"),
                     stage=session.current_stage,
                 )
+                if data.get("tool") == "read_child_context":
+                    call = PendingToolCall(**data)
+                    session.pending_tool_calls = [
+                        pending for pending in session.pending_tool_calls if pending.call_id != call.call_id
+                    ]
+                    record_tool(session, call)
+                    try:
+                        if tools_this_round:
+                            raise ValueError("read_child_context must be the only tool in its model response.")
+                        if read_rounds >= MAX_CHILD_READ_ROUNDS:
+                            raise ValueError(f"Child read continuation limit reached ({MAX_CHILD_READ_ROUNDS} rounds).")
+                        signature = json.dumps(call.args, sort_keys=True, ensure_ascii=False)
+                        if signature in seen_reads:
+                            raise ValueError("Repeated child read without progress; the chat was stopped.")
+                        apply_tool_effect(session, call.tool, call.args)
+                    except (ValueError, HTTPException) as exc:
+                        record_result(session, call, {}, failed=True, detail=str(exc))
+                        raise
+                    seen_reads.add(signature)
+                    read_rounds += 1
+                    record_result(session, call, {"action": "read"})
+                    persist_session(session)
+                    events.append({"event": event_name, "data": data})
+                    agent_events = iter(agent.stream(session, req.message))
+                    tools_this_round = 0
+                    continue
+                tools_this_round += 1
                 try:
                     if data.get("tool") == "propose_material_patch" and (data.get("args") or {}).get("stdout_fix"):
                         _fill_stdout_fix_patch(session, data)
@@ -3970,6 +4079,12 @@ def tool_result(session_id: str, req: ToolResultRequest, request: Request, upn: 
                         status_code=400,
                         detail=f"`{child}` is not one of this skill's declared children.",
                     )
+                try:
+                    _assert_child_edit_base(session, call.args, require_read=False)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail={
+                        "kind": "child_version_changed", "recoverable": True, "message": str(exc),
+                    }) from exc
             try:
                 applied = _apply_neighbor_edit_proposal(session, call.args)
                 label = "Child edit" if call.tool == "propose_child_edit" else "Neighbor edit"
@@ -4629,9 +4744,14 @@ def _apply_neighbor_edit_proposal(session: Session, args: dict[str, Any]) -> dic
     candidates: list[NeighborVersion] = []
     if selected is not None:
         candidates.append(selected)
-    for v in reversed(ne.versions):
-        if v is not selected:
-            candidates.append(v)
+    base_hash = str(args.get("base_hash") or "")
+    if base_hash:
+        if selected is None or compute_hash(selected.skill_md) != base_hash:
+            raise PatchError("The selected child version no longer matches the patch base_hash.")
+    else:
+        for v in reversed(ne.versions):
+            if v is not selected:
+                candidates.append(v)
     if not candidates:
         raise PatchError("the snippet/anchor was not found in the current SKILL.md.")
 

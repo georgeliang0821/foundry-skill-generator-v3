@@ -17,7 +17,7 @@ from backend.agent import (
     _parse_llm_payload,
     _session_context,
 )
-from backend.models import ChatMessage, Material, MaterialKind, Session, UIHistoryEvent
+from backend.models import ChatMessage, Material, MaterialKind, NeighborEdit, NeighborVersion, Session, UIHistoryEvent
 
 
 @pytest.mark.parametrize("name,required", [
@@ -154,6 +154,21 @@ def test_session_context_does_not_duplicate_previous_scenario() -> None:
     assert context["owner_regeneration_pending"] is True
     assert "owner_source_skill_md" not in context
     assert session.owner_source_skill_md == "Previous scenario carried in the system prompt"
+
+
+def test_session_context_redacts_all_edit_version_bodies_without_changing_saved_history() -> None:
+    versions = [NeighborVersion(skill_md=f"HISTORICAL_BODY_{index}") for index in range(8)]
+    session = Session(neighbor_edits=[NeighborEdit(
+        skill_name="child", versions=versions, selected_version_id=versions[-1].version_id,
+    )])
+
+    context = json.loads(_session_context(session))
+
+    for index, version in enumerate(context["neighbor_edits"][0]["versions"]):
+        assert "skill_md" not in version
+        assert version["skill_md_chars"] == len(versions[index].skill_md)
+    assert "HISTORICAL_BODY_" not in _session_context(session)
+    assert "HISTORICAL_BODY_0" in session.model_dump_json()
 
 
 def test_normalize_openai_style_function_call() -> None:

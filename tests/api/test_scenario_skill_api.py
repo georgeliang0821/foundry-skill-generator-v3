@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.models import Delegation, SkillFiles
+from backend.models import Delegation, InputBinding, Session, SkillFiles
 
 
 CHILD_MD = "---\nname: child-skill\ndescription: Child capability\n---\n\n# Child\n"
@@ -300,6 +300,151 @@ def test_load_session_children_populates_transient_content(client, backend_main)
     assert backend_main.sessions[session_id].child_full_md["child-skill"] == CHILD_MD
 
 
+def _scenario_with_many_children(client, backend_main, grant_skill, count: int, owner: str = "host") -> Session:
+    session_id = _scenario_session(client, backend_main)
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[session_id]
+    session.orchestration_owner = owner
+    session.children = [f"child-{index:02d}" for index in range(count)]
+    for name in session.children:
+        md = CHILD_MD.replace("child-skill", name) + (
+            "\n## Required Inputs\n```input-bindings\n"
+            "- name: description\n  source: request\n```\n"
+            f"\n## Error Handling\nContract details for {name}.\n"
+        )
+        _seed_skill(backend_main, name, md)
+        grant_skill(name)
+    session.child_full_md = {}
+    session.prepare_brief.delegation = [
+        Delegation(
+            child_skill=name,
+            input_bindings=[InputBinding(name="description", source="request")],
+            host_capabilities=["Collect the user's request"] if owner == "host" else [],
+        )
+        for name in session.children
+    ]
+    session.current_skill.skill_md = PARENT_MD.replace(
+        "children: [child-skill]", f"children: [{', '.join(session.children)}]"
+    )
+    if owner == "eaa":
+        session.current_skill.skill_md = session.current_skill.skill_md.replace(
+            "metadata:\n", "metadata:\n  orchestration_owner: eaa\n"
+        )
+    brief = session.prepare_brief
+    brief.understanding.skill_goal = "Coordinate the declared capabilities."
+    brief.understanding.key_capabilities = ["Coordinate work"]
+    brief.understanding.differentiation = "Handle the combined workflow."
+    brief.research.summary = "No competing scenario."
+    brief.research.web_status = "ok"
+    for key in brief.verify_checklist:
+        brief.verify_checklist[key] = True
+    return session
+
+
+@pytest.mark.parametrize("count", [1, 5, 6, 8, 11])
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+def test_all_children_are_loaded_before_prepare_to_draft(
+    client, backend_main, grant_skill, count, owner
+) -> None:
+    from backend.state_machine import build_system_prompt, check_quality_gates
+
+    session = _scenario_with_many_children(client, backend_main, grant_skill, count, owner)
+    session.prepare_brief.delegation.reverse()
+    response = client.post(f"/api/sessions/{session.id}/children")
+
+    assert response.status_code == 200
+    assert list(session.child_full_md) == list(reversed(session.children))
+    assert set(session.child_sections) == set(session.children)
+    assert "child_full_md" not in response.json()
+    assert check_quality_gates(session) == []
+    backend_main.apply_tool_effect(session, "update_prepare_checklist", {
+        "item": "delegation_ok", "confirmed": True,
+    })
+    backend_main.apply_tool_effect(session, "stage_transition", {"target": "draft"})
+    assert session.current_stage == "draft"
+
+    prompt = build_system_prompt(session)
+    assert "\n<<<BEGIN SKILL.md: " not in prompt
+    for name in session.children:
+        assert f"<<<BEGIN CHILD SECTION: {name} / Required Inputs>>>" in prompt
+        assert f"- **{name}**:" in prompt
+
+
+@pytest.mark.parametrize("count", [6, 8, 11])
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+def test_save_validates_input_contracts_for_every_child(
+    client, backend_main, grant_skill, count, owner
+) -> None:
+    session = _scenario_with_many_children(client, backend_main, grant_skill, count, owner)
+
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+
+    assert response.status_code == 200, response.json()
+    assert set(session.child_full_md) == set(session.children)
+
+
+@pytest.mark.parametrize(("problem", "expected"), [
+    ("missing", "children.unresolved:child-07"),
+    ("name", "children.name_mismatch:child-07"),
+    ("nested", "children.nested:child-07"),
+    ("bindings", "child-07: delegation input sources must match the child's Required Inputs."),
+])
+def test_invalid_child_beyond_prompt_limit_still_blocks_prepare(
+    client, backend_main, grant_skill, problem, expected
+) -> None:
+    from backend.state_machine import QualityGateError, check_quality_gates
+
+    session = _scenario_with_many_children(client, backend_main, grant_skill, 8)
+    child = session.children[-1]
+    if problem == "missing":
+        backend_main.store.delete_skill(child)
+    elif problem == "bindings":
+        session.prepare_brief.delegation[-1].input_bindings = [
+            InputBinding(name="other", source="request")
+        ]
+    else:
+        md = backend_main.store.load_skill(child).skill_md
+        if problem == "name":
+            md = md.replace(f"name: {child}", "name: wrong-child")
+        else:
+            md = md.replace("description:", "metadata:\n  children: [grandchild]\ndescription:")
+        _seed_skill(backend_main, child, md)
+
+    assert client.post(f"/api/sessions/{session.id}/children").status_code == 200
+    assert expected in check_quality_gates(session)
+    with pytest.raises(QualityGateError) as exc:
+        backend_main.apply_tool_effect(session, "stage_transition", {"target": "draft"})
+    assert expected in exc.value.missing
+    assert session.current_stage == "prepare"
+    if problem in {"missing", "nested", "bindings"}:
+        response = client.post(f"/api/sessions/{session.id}/save", json={})
+        assert response.status_code == 400
+        assert not any(skill.name == "parent-skill" for skill in backend_main.store.list_skills())
+
+
+def test_save_refreshes_selected_child_before_topology_validation(
+    client, backend_main, grant_skill
+) -> None:
+    session = _scenario_with_many_children(client, backend_main, grant_skill, 8)
+    assert client.post(f"/api/sessions/{session.id}/children").status_code == 200
+    child = session.children[-1]
+    selected_md = backend_main.store.load_skill(child).skill_md.replace(
+        "description:", "metadata:\n  children: [grandchild]\ndescription:"
+    ).replace("## Error Handling", "## Selected Version Errors")
+    proposed = client.post(
+        f"/api/sessions/{session.id}/neighbor-edits/{child}/propose",
+        json={"skill_md": selected_md, "label": "Selected child version"},
+    )
+    assert proposed.status_code == 200
+
+    response = client.post(f"/api/sessions/{session.id}/save", json={})
+
+    assert response.status_code == 400
+    assert "T7" in response.json()["detail"]
+    assert session.child_full_md[child] == selected_md
+    assert "Selected Version Errors" in session.child_sections[child]
+
+
 def test_update_session_children_deduplicates_and_loads(client, backend_main, grant_skill) -> None:
     _seed_skill(backend_main, "child-skill", CHILD_MD)
     grant_skill("child-skill")
@@ -350,7 +495,7 @@ def test_record_delegation_preserves_whitelist_and_other_child_contracts(
         assert session.child_full_md == skills
         prompt = build_system_prompt(session)
         for child, md in skills.items():
-            assert f"<<<BEGIN SKILL.md: {child}>>>\n{md}" in prompt
+            assert f"### {child}\nversion_hash:" in prompt
         assert "Never request their SKILL.md through `request_materials`." in prompt
 
     session.prepare_brief.verify_checklist["delegation_ok"] = True

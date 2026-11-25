@@ -539,6 +539,32 @@ class IterationReflection(BaseModel):
     raw: str = ""  # full text, never truncated in storage
 
 
+class ChildReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = Field(min_length=1)
+    sections: list[str] = Field(default_factory=list)
+    full: bool = False
+
+    @model_validator(mode="after")
+    def _check_read_mode(self) -> "ChildReadRequest":
+        if self.full == bool(self.sections):
+            raise ValueError("Choose either full=true or a non-empty sections list, not both.")
+        if any(not section.strip() for section in self.sections):
+            raise ValueError("Section names must not be blank.")
+        return self
+
+
+class ReadChildContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reads: list[ChildReadRequest] = Field(min_length=1)
+
+
+class ChildContextSelection(ChildReadRequest):
+    version_hash: str
+
+
 class NeighborVersion(BaseModel):
     """One snapshot in a neighbor skill's edit history (session-scoped)."""
 
@@ -724,11 +750,13 @@ class Session(BaseModel):
     # this as a whitelist, so a skill omitted here simply never materializes.
     # It is wider than the set of children actually delegated to.
     children: list[str] = Field(default_factory=list)
-    # Transient full SKILL.md of each child, same contract as neighbor_full_md.
+    # Transient full SKILL.md of every child for validation; only prompt rendering is capped.
     child_full_md: dict[str, str] = Field(default_factory=dict, exclude=True)
     # Transient `##` heading index of every declared child, so the agent can
     # write section pointers instead of guessing names.
     child_sections: dict[str, list[str]] = Field(default_factory=dict, exclude=True)
+    # Persist only read references; content is re-derived from the current child versions.
+    child_context_reads: list[ChildContextSelection] = Field(default_factory=list)
     test_runs: list[TestRun] = Field(default_factory=list)
     conversation: list[ChatMessage] = Field(default_factory=list)
     ui_history: list[UIHistoryEvent] = Field(default_factory=list)

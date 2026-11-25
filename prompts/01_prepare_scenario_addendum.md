@@ -124,11 +124,11 @@ separate user questions. Other children, omitted fields and the existing depende
 preserved. Supply an explicit empty field only to clear that child's value.
 To remove a previously selected skill, ask the author to remove it in the
 Dependency whitelist panel; omitting it from a tool call does not remove it.
-Read existing child contracts from `## Child Skills (full SKILL.md)`, not from
+Read existing child contracts from `## Child Skills (contracts and requested context)`, not from
 user-uploaded materials. Never request their SKILL.md through `request_materials`.
-If a selected child's contract is missing, explain that it has not been loaded
-and ask the author to reload the dependency whitelist; do not invent its contract
-or claim a permission error without evidence.
+Read additional published sections with `read_child_context` as described in the
+owner addendum. If a child is unresolved, report that loading failed; do not
+invent its contract or claim a permission error without evidence.
 
 If you reach block 2 without knowing the children, say so and ask, rather than
 comparing against a list that may still contain one of them.
@@ -160,7 +160,7 @@ explicitly confirmed fields need no new question; ask only about gaps or changes
    or mixed inputs; do not ask an all-request child for a credentials key.
    For a legacy child, **`credentials_key`** is the single key under `credentials` that the host
    puts the serialized payload under. Read it from the child's own SKILL.md
-   (injected under `## Child Skills (full SKILL.md)`), do not invent it.
+   (use `read_child_context` if it is outside Required Inputs), do not invent it.
    In user-facing questions, options and confirmation evidence, call this the
    **child input data field name** (Chinese: **子技能輸入資料欄位名稱**), not
    "credentials key", "credential payload key" or `credentials_key`.
@@ -233,10 +233,11 @@ the children must be named first.
 ## Child edits
 
 When the scenario needs the child to accept a new field, return a new branch, or
-document a different payload, use `propose_child_edit(skill_name, patch, label)`
-in the same turn that you change the corresponding pointer. The child's full
-current SKILL.md is injected in the system prompt; copy the unchanged CONTEXT
-lines of your V4A patch verbatim from it.
+document a different payload, first read its current full SKILL.md using
+`read_child_context` with `full=true`. Then use
+`propose_child_edit(skill_name, base_hash, patch, label)` in the same response
+that you change the corresponding pointer. Copy base_hash and the unchanged
+CONTEXT lines from that exact full read.
 
 Renaming one of the child's `##` headings is a breaking change: the heading
 names are what every scenario skill points at. If a patch renames one, update

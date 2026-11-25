@@ -145,6 +145,105 @@ test("continues automatically after selecting a neighbor", async ({ page, reques
   await expect(page.getByTestId("send-button")).toBeEnabled();
 });
 
+for (const [kind, timeoutMs] of [["capability", 180000], ["scenario", 900000]] as const) {
+  test(`chat timeout covers the model-call budget (${kind})`, async ({ page, request }) => {
+    await page.addInitScript(() => {
+      const original = window.setTimeout.bind(window);
+      window.setTimeout = (handler, timeout, ...args) => {
+        if (timeout === 180000 || timeout === 900000) {
+          document.documentElement.dataset.chatTimeoutMs = String(timeout);
+        }
+        return original(handler, timeout, ...args);
+      };
+    });
+    await openApp(page);
+    await expect(page.getByTestId("session-id")).not.toHaveText("No session");
+    await page.getByTestId("skill-kind-select").selectOption(kind);
+    const created = page.waitForResponse((response) =>
+      response.url().endsWith("/api/sessions") && response.request().method() === "POST");
+    await page.getByTestId("new-session-button").click();
+    const sessionId = (await (await created).json()).id;
+    await expect(page.getByTestId("session-id")).toHaveText(sessionId);
+    const session = await readSession(request, sessionId);
+    expect(session.skill_kind).toBe(kind);
+    await page.route("**/api/sessions/*/chat", (route) => route.fulfill({
+      json: { events: [
+        { event: "text_delta", data: { delta: "Review complete." } },
+        { event: "state_update", data: session },
+        { event: "done", data: {} },
+      ] },
+    }));
+
+    await sendChat(page, "Review.");
+
+    await expect(page.locator("html")).toHaveAttribute("data-chat-timeout-ms", String(timeoutMs));
+  });
+}
+
+for (const stale of [false, true]) {
+  test(`child edit uses the existing confirmation card (${stale ? "stale version" : "accepted"})`, async ({ page, request }) => {
+    await openApp(page);
+    await startNewSession(page);
+    const sessionId = await currentSessionId(page);
+    const session = await readSession(request, sessionId);
+    const call = {
+      call_id: "child-edit", tool: "propose_child_edit",
+      args: {
+        skill_name: "child-selected", base_hash: "read-version",
+        change_summary: "Clarify the child's execution.",
+        patch: "*** Begin Patch\n*** Update File: SKILL.md\n@@\n-before\n+after\n*** End Patch",
+      },
+    };
+    const messages: string[] = [];
+    let results = 0;
+    await page.route("**/api/sessions/*/chat", async (route) => {
+      messages.push(route.request().postDataJSON().message);
+      session.pending_tool_calls = messages.length === 1 ? [call] : [];
+      await route.fulfill({ json: { events: [
+        ...(messages.length === 1 ? [
+          { event: "tool_call", data: { call_id: "read-child", tool: "read_child_context", args: { reads: [{ skill_name: "child-selected", full: true }] } } },
+          { event: "tool_call", data: call },
+        ] : [{ event: "text_delta", data: { delta: "The changed child needs a fresh review." } }]),
+        { event: "state_update", data: session },
+        { event: "done", data: {} },
+      ] } });
+    });
+    await page.route("**/api/sessions/*/tool-result", async (route) => {
+      results += 1;
+      expect(route.request().postDataJSON()).toEqual({
+        tool_call_id: "child-edit", result: { action: "accept" },
+      });
+      if (stale) {
+        await route.fulfill({ status: 409, json: { detail: {
+          kind: "child_version_changed", recoverable: true, message: "Selected child changed.",
+        } } });
+      } else {
+        session.pending_tool_calls = [];
+        await route.fulfill({ json: session });
+      }
+    });
+
+    await sendChat(page, "Review the child.");
+    const card = page.getByTestId("neighbor-edit-card");
+    await expect(card).toContainText("Child skill edit proposed");
+    await expect(card.getByRole("button", { name: "Accept edit" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Reject" })).toBeVisible();
+    expect(results).toBe(0);
+    expect(messages).toHaveLength(1);
+    await card.getByRole("button", { name: "Accept edit" }).click();
+    await expect.poll(() => results).toBe(1);
+    if (stale) {
+      await expect.poll(() => messages.length).toBe(2);
+      expect(messages[1]).toContain("Selected child changed.");
+      expect(messages[1]).not.toContain("undefined");
+      expect(messages[1]).not.toContain("send the full skill_md");
+    } else {
+      await expect(card).toContainText("Accepted");
+      expect(messages).toHaveLength(1);
+    }
+  });
+}
+
 test("notification confirmation continues and enables saving an unchanged source", async ({ page, request }) => {
   await openApp(page);
   await startNewSession(page);

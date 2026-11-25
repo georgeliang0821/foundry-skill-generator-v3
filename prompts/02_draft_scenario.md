@@ -65,9 +65,10 @@ apply only to `host`; for `eaa` follow the registered EAA owner addendum instead
   `delegation` entries (child skill, credentials key, sections, host
   capabilities, handshakes) from the Prepare Brief. Every recorded handshake
   must appear as a row in the return-branch table.
-- The child's full SKILL.md is injected under `## Child Skills (full SKILL.md)`,
-  and the `##` heading index of every declared child under `## Dependency Skills
-  (## section index)`. Read them to write CORRECT POINTERS and correct return
+- Every child's Required Inputs is provided under `## Child Skills (contracts
+  and requested context)`, and its `##` headings under `## Dependency Skills
+  (## section index)`. Use `read_child_context` to obtain the actual execution
+  and error sections before drafting. Read them to write CORRECT POINTERS and correct return
   branches -- exact heading names, every `[NEEDS_INFO] missing=` code, every
   business error key. Reading them is not a licence to copy their field tables.
 - Every branch in the return-branch table must say whether the flow continues to

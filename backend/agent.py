@@ -12,7 +12,7 @@ from contextvars import copy_context
 from typing import Any
 
 from .diagnostics import DIAGNOSTICS_REVISION, elapsed_ms, env_flag, log_event, log_exception, log_timing, now_ms
-from .models import InputBinding, PendingToolCall, Session
+from .models import InputBinding, PendingToolCall, ReadChildContextRequest, Session
 from .state_machine import build_system_prompt, load_prompt, session_materials_prompt_chars
 
 
@@ -456,17 +456,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "read_child_context",
+        "description": "SCENARIO AUTHORING ONLY. Read original ## sections or a full current SKILL.md for declared children. Batch all needed children and sections in reads. This replaces the previous optional read window, not the always-present Required Inputs. Use full=true before proposing a child edit and copy the returned version_hash as base_hash. Make this the ONLY tool call in the response: the backend resumes the model with the read results and discards remaining tools generated without them. Never use this Generator tool in the published scenario.",
+        "parameters": ReadChildContextRequest.model_json_schema(),
+    },
+    {
         "name": "propose_child_edit",
-        "description": "SCENARIO SKILLS ONLY (rejected in a capability session). Propose an edit to a DECLARED CHILD capability skill so the scenario's payload contract and the child's '## Required Inputs' stay consistent. Use it in the SAME turn as any patch that adds, renames or removes a delegated payload field, or changes the credentials key. The child's CURRENT SKILL.md (the exact version the edit is applied to) is provided in the system prompt under '## Child Skills (full SKILL.md)', between the <<<BEGIN ...>>> / <<<END ...>>> markers -- read it there, do NOT ask the user. Send a V4A `patch` against that current text: a single small hunk with a few unchanged CONTEXT lines copied verbatim plus your `-`/`+` edits (indentation is matched leniently). Full rewrites are NOT allowed. Each accepted edit is appended as a NEW uniquely-versioned entry (the original is always kept); NOTHING is written to Blob until the user Saves. If the patch does not apply, re-copy the surrounding CONTEXT lines more exactly and retry.",
+        "description": "SCENARIO SKILLS ONLY. Propose a V4A edit to a declared child, together with any corresponding parent patch. First use read_child_context with full=true; copy base_hash from that exact full read and unchanged CONTEXT lines from its literal SKILL.md. The backend checks the base again on acceptance; a changed version requires a fresh read and proposal, never a fallback to an older version. Author acceptance creates a new edit-card version; nothing is written to Blob until Save. Full rewrites are not allowed.",
         "parameters": {
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "The child skill to edit. It must be one of the declared metadata.children."},
+                "base_hash": {"type": "string", "description": "The version_hash from the current full read_child_context result."},
                 "change_summary": {"type": "string"},
                 "patch": {"type": "string", "description": "A V4A patch against the child's current SKILL.md: one hunk with a few unchanged CONTEXT lines plus your `-`/`+` edits. Full rewrites are not allowed."},
                 "label": {"type": "string", "description": "A short label for this version, e.g. 'accept new calendar_events field'."},
             },
-            "required": ["skill_name", "patch"],
+            "required": ["skill_name", "base_hash", "patch"],
             "additionalProperties": False,
         },
     },
@@ -803,6 +809,10 @@ def _session_context(session: Session) -> str:
     if snapshot.get("conversation"):
         snapshot["conversation"] = snapshot["conversation"][-12:]
     _redact_materials(snapshot)
+    for edit in snapshot.get("neighbor_edits") or []:
+        for version in edit.get("versions") or []:
+            content = version.pop("skill_md", "")
+            version["skill_md_chars"] = len(content)
     return json.dumps(snapshot, ensure_ascii=False, indent=2)
 
 

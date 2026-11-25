@@ -137,7 +137,16 @@ sequenceDiagram
 | `llm.response.received` | `foundry_response_id` 與 SDK 提供的 `foundry_request_id`（若有），用於對照遠端回應 |
 | `llm.client.config` | SDK timeout 為 120 秒，SDK 自動重試為 0 次；模型輸出 JSON 格式修復的單次重試是另一層機制 |
 
-完成或失敗紀錄帶 `duration_ms`。卡住時依同一個 `request_id` 找最後一筆尚無 `.done`／`.failed` 的 `.start`；父子階段互相包含，不應將所有耗時相加。SDK timeout 是 HTTP I/O 等待設定，不是整個回合的硬性期限，初始化與驗證可能另花時間。前端 180 秒 timeout 不代表後端已取消，亦不能證明模型正在運算。Session 訊息時間差不是 Agent 執行時間。上述 chat 計時不涵蓋相依登入驗證、HTTP 回應編碼／傳輸及瀏覽器渲染。
+完成或失敗紀錄帶 `duration_ms`。卡住時依同一個 `request_id` 找最後一筆尚無 `.done`／`.failed` 的 `.start`；父子階段互相包含，不應將所有耗時相加。SDK timeout 是 HTTP I/O 等待設定，不是整個回合的硬性期限，初始化與驗證可能另花時間。前端 capability chat 等待 180 秒，scenario 為支援後端有限讀取接續而等待最多 15 分鐘；瀏覽器逾時不代表後端已取消，亦不能證明模型正在運算。Session 訊息時間差不是 Agent 執行時間。上述 chat 計時不涵蓋相依登入驗證、HTTP 回應編碼／傳輸及瀏覽器渲染。
+
+Scenario 的 `read_child_context` 是上述單次模型呼叫流程的限定例外：
+後端在同一個 chat HTTP 請求完成批次 child 讀取、重建 system prompt 並再次呼叫模型，
+最多 4 輪讀取，不透過前端另送 chat。每次 chat 先檢查 child 權限並刷新內容；
+所有 `Required Inputs` 與章節索引常駐，其他原文按需取得。
+child 區塊以總字元預算控制，歷史編輯全文不再重複放入模型快照；
+持久化與 UI 歷史仍完整保留。問題卡、child patch 等互動工具仍需作者確認，
+不因自動讀取而執行寫入。詳細限制與版本守衛見
+[Agent 運作機制](04-agent-mechanism.md#0-狀態機總覽)。
 
 ### 2.2 儲存（接受 patch / 按下儲存）
 

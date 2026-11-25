@@ -701,6 +701,24 @@ def test_scenario_prompt_uses_scenario_draft_and_format_spec() -> None:
     assert "  skill_type: scenario-orchestration" not in capability_prompt
 
 
+@pytest.mark.parametrize("count", [0, 1, 5, 6, 8, 11])
+@pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT, Stage.REFINE, Stage.TEST])
+def test_child_full_text_is_not_automatically_injected(count, stage) -> None:
+    session = Session(current_stage=stage, skill_kind=SkillKind.SCENARIO)
+    session.child_full_md = {
+        f"child-{index:02d}": f"UNIQUE_CHILD_FULL_BODY_{index:02d}"
+        for index in range(count)
+    }
+    original = dict(session.child_full_md)
+
+    prompt = build_system_prompt(session)
+
+    assert "\n<<<BEGIN SKILL.md: " not in prompt
+    for index in range(count):
+        assert f"UNIQUE_CHILD_FULL_BODY_{index:02d}" not in prompt
+    assert session.child_full_md == original
+
+
 def test_scenario_prepare_uses_plain_language_for_child_input_fields() -> None:
     prompt = build_system_prompt(Session(current_stage=Stage.PREPARE, skill_kind=SkillKind.SCENARIO))
 

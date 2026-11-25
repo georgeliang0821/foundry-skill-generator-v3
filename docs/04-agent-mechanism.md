@@ -47,7 +47,53 @@ PREPARE，不需手動 Apply 或再傳「繼續」。已有草稿或尚未進入
   `dependency_skills` 只增加依賴，空清單不會刪除既有項目。移除技能須在
   Dependency whitelist 面板明確操作，並同步移除該契約、撤銷委派確認，
   避免後續逐項確認時將它加回。新增依賴或修改契約也會撤銷委派確認。
-  子技能全文由後端載入並注入 prompt，不應要求作者將既有契約當成素材上傳。
+  子技能契約由後端載入，其他內容透過編寫期讀取工具取得，不應要求作者將既有契約當成素材上傳。
+- **Child 驗證與 prompt 份量分開**：後端載入所有已宣告及已委派 child 的全文，
+  優先採用 session 目前選定的編輯版本，否則讀取 Skill store。PREPARE 品質關卡、
+  輸入契約與存檔檢核不受 5 支限制；存檔在 topology 檢查之前刷新 child 內容，
+  讓 topology 與輸入契約檢查使用同一批已載入的資料。缺失、名稱不符、禁止巢狀
+  scenario 或輸入契約不符等原有檢查不放寬。
+  `child_full_md` 與章節索引仍是 transient，不寫入 session 持久化資料或 API 回應。
+  Prompt 不再自動注入前 5 支全文，而是提供所有 child 的內容 hash、description、
+  原文 `Required Inputs` 及全部 `##` 章節索引。其他原文章節／全文使用
+  `read_child_context` 批次取得，不以 child 支數截斷。找不到 `Required Inputs`
+  只表示沒有該公開章節，不代表舊技能完全沒有輸入契約；Agent 須另讀實際契約所在章節。
+- **編寫期按需讀取**：`read_child_context` 的 `reads` 可一次指定多支已宣告 child，
+  每支使用 `sections: ["Execution", "Error Handling"]` 或 `full: true`，不可混用。
+  使用既有 `sections.py` 的 `##` 分段及名稱子字串比對規則，回傳原文，不摘要或截斷。
+  每批取代先前的選讀視窗，必要的 `Required Inputs` 與索引仍保留。
+  整個 child 區塊（含契約、索引、選讀原文及標記）最多 **60,000 字元**；
+  超限明確失敗且保留原選讀設定，不裁切檔案。必要契約本身超限時也拒絕模型呼叫，
+  需要縮小 scenario 範圍。這不是整份 prompt 的 token 保證，也不限制後端完整驗證。
+  未宣告、無權讀取、不存在或沒有符合章節的 child 均明確回報錯誤。
+  Scenario 每次 chat 及每次按需讀取都重新檢查 child 存取權並刷新選定版本；
+  不新增發布產物、EAA runtime 工具或 SQL schema。
+- **讀取後的後端接續**：此工具必須單獨送出；後端在同一個 chat HTTP 請求重建 prompt
+  並繼續呼叫模型，不依賴前端自動接續。該讀取之後、尚未看過結果就生成的其餘工具
+  會捨棄；若同一模型回應已先送出問題或其他工具，不再跨越它自動讀取。
+  每次 chat 最多接續 **4 輪讀取**，重複相同讀取、超出輪數或讀取失敗會明確中止，
+  不產生等待使用者確認的讀取卡片。真正的問題／patch 仍停在既有確認流程，
+  不會因讀取而自動接受、改 stage 或寫入 Blob。
+  因同一請求可能包含 5 次模型呼叫，scenario 的瀏覽器等待上限為 **15 分鐘**，
+  capability 維持 180 秒；這不是後端整體執行期限或取消保證，也不額外增加讀取輪數。
+- **版本與持久化邊界**：`child_context_reads` 只保存 child、選讀章節／全文模式及
+  內容 hash，不保存讀取結果全文；重載時從目前選定版本重新建立上下文。
+  hash 不符時標為 `stale_version`，不注入舊版或冒充已讀的新全文。
+  模型用 session snapshot 不再含 `neighbor_edits.versions` 的歷史全文，僅保留版本資訊
+  與字元數；UI 與持久化的完整版本不變。已宣告 child 不會再從鄰近 Skill 全文區塊
+  重複注入，避免繞過 child 預算。
+- **Child patch 的版本守衛**：`propose_child_edit` 先要求目前版本的全文讀取，
+  並帶入該次 `version_hash` 作為 `base_hash`。提案與接受時均檢查；
+  選定內容改變回 409 `child_version_changed`，patch 也只能套用到該選定版本，
+  不因歷史版本的 anchor 匹配而回頭套用。接受後只新增 edit-card 版本，
+  作者另行 Save 才寫入 Blob；前端沿用鄰近編輯的 Accept／Reject 卡片。
+  舊的、不帶 base hash 的 child 待接受提案需重新讀取及提出。
+  既有 `propose_neighbor_edit` 的跨版本 fallback 不變。這是內容版本檢查，
+  不是跨程序交易或 exactly-once 保證。
+
+  本機回歸測試見 [test_child_context_api.py](../tests/api/test_child_context_api.py)：
+  涵蓋同一請求的多次模型呼叫、批次原文、精確字元邊界、失敗／輪數限制、
+  session 重載與過期 child patch；不連 Foundry 或 Azure。
 - 正文保留補問、`needs_input`、明確同意後繼續、拒絕即停、模糊再問與不明結果先查核；
   這些是 Agent 行為要求，不是固定流程引擎、程式強制閘門或 exactly-once 保證。
 - 不產生 `metadata.orchestration`、`orchestration_ref` 或專用流程檔案。
@@ -200,6 +246,8 @@ E5（產出檔必須是 work_dir 第一層的一般檔案）無法靜態判斷�
 | `select_neighbor_skill` | PREPARE / DRAFT / REFINE | 登記使用者選定的可讀鄰近 Skill，檢查建立者政策並載入目前選定版本的全文；工具單獨送出後，前端自動續跑取得更新上下文。 |
 | `confirm_neighbor_notification` | PREPARE / DRAFT / REFINE | 記錄使用者通知其他建立者的決定：`notify=true` 排入待送關係，`notify=false` 明確略過。來源儲存成功才寫入通知 SQL；只排隊不代表已送出。 |
 | `propose_neighbor_edit` | PREPARE / REFINE | 對鄰近 Peer Skill 提交 V4A 補丁，修剪 description 或補 When NOT to Use。 |
+| `read_child_context` | Scenario 的 PREPARE / DRAFT / REFINE / TEST | 批次取得已宣告 child 的原文章節或全文；後端在同一請求有限接續模型，受 child 上下文字元預算控制。 |
+| `propose_child_edit` | Scenario | 先讀目前全文，帶 `base_hash` 提出 V4A patch；接受時再檢查版本，只新增編輯版本，不自動寫入 Blob。 |
 | `propose_material_patch` | PREPARE（`script_candidate`） | 對唯一一份 `code` 素材提交 V4A patch，只調整邊界（argparse 輸入、stdout JSON / `[NEEDS_INFO]`、stderr、exit code），讓它能原樣成為 script；`stdout_fix=true` 時由後端計算機械式 stdout 修正。見 7.5 節。 |
 | `propose_skill_draft` | DRAFT | 生成首版完整的 `SKILL.md`（含 YAML frontmatter）。儲存前被 lint 擋下時可再送一次完整修正版；儲存後不可再用。 |
 | `propose_patch` | REFINE / TEST | 提交極小區間 of V4A git-like Patch（依 Anchor 替換代碼或內文）。 |

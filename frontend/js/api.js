@@ -330,7 +330,7 @@ export async function runSkillTest(name, payload) {
   return res.json();
 }
 
-export async function postSSE(url, payload, onEvent) {
+export async function postSSE(url, payload, onEvent, timeoutMs = 180000) {
   // Backend now returns {"events": [...]} as one JSON document (no SSE).
   // The Function App ASGI runtime cannot reliably stream SSE, so we batch.
   console.info(`[Skill Generator v2 API] POST ${url}`, payload);
@@ -338,7 +338,7 @@ export async function postSSE(url, payload, onEvent) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  }, 180000);
+  }, timeoutMs);
   if (!res.ok) throw new Error(await formatFetchError(res));
   const body = await res.json();
   const events = Array.isArray(body?.events) ? body.events : [];

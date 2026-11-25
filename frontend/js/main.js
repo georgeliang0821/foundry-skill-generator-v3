@@ -4723,7 +4723,7 @@ function renderToolCall(call) {
 
   // Lightweight, informational tool calls fold into a single inline "Agent
   // actions" card so they read in chronological order under the assistant reply.
-  if (!["propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(call.tool)) {
+  if (!["propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit", "propose_child_edit"].includes(call.tool)) {
     dbgLog("render", `-> folded into activity card: ${call.tool}`);
     appendActivityRow(call);
     return;
@@ -4812,7 +4812,8 @@ function renderToolCall(call) {
   } else if (call.tool === "request_test_run") {
     card.innerHTML = `<strong>${svgIcon("i-beaker")} Run skill-selection test</strong><p>Run the proposed positive and negative samples against the current skill.</p>`;
     card.appendChild(actionButton("Run", async () => acceptTool(call, { action: "run" })));
-  } else if (call.tool === "propose_neighbor_edit") {
+  } else if (["propose_neighbor_edit", "propose_child_edit"].includes(call.tool)) {
+    const isChild = call.tool === "propose_child_edit";
     card.classList.add("patch-card");
     card.dataset.testid = "neighbor-edit-card";
     const skill = escapeHtml(String(args.skill_name || "neighbor skill"));
@@ -4822,10 +4823,10 @@ function renderToolCall(call) {
     } else {
       body = `<details class="patch-diff"><summary>Review change</summary><pre>${escapeHtml(String(args.skill_md || "").slice(0, 2000))}</pre></details>`;
     }
-    card.innerHTML = `<div class="patch-summary"><strong>${svgIcon("i-adjustments")} Neighbor skill edit proposed</strong><span>${skill}</span></div>
-      <p>${escapeHtml(args.label || "Update this neighbor's description / When NOT to Use to stay mutually exclusive.")}</p>
+    card.innerHTML = `<div class="patch-summary"><strong>${svgIcon("i-adjustments")} ${isChild ? "Child" : "Neighbor"} skill edit proposed</strong><span>${skill}</span></div>
+      <p>${escapeHtml(args.label || (isChild ? "Update this child's published contract." : "Update this neighbor's description / When NOT to Use to stay mutually exclusive."))}</p>
       ${body}
-      <p class="patch-note">Accepting adds this as a new version on the neighbor's edit card (right panel). Nothing is written to Blob until you press Save to Blob there.</p>
+      <p class="patch-note">Accepting adds this as a new version on the skill's edit card (right panel). Nothing is written to Blob until you press Save to Blob there.</p>
       <div class="tool-actions"></div>`;
     const actions = card.querySelector(".tool-actions");
     actions.appendChild(actionButton("Accept edit", async () => acceptTool(call, { action: "accept" })));
@@ -5259,10 +5260,14 @@ async function acceptTool(call, result) {
       );
       return;
     }
-    if (call.tool === "propose_neighbor_edit" && detail?.recoverable) {
-      appendConversationStatus(`Neighbor edit was not applied: ${detail.guidance || detail.error}`, { failed: true });
+    if (["propose_neighbor_edit", "propose_child_edit"].includes(call.tool) && detail?.recoverable) {
+      const isChild = call.tool === "propose_child_edit";
+      const why = detail.message || detail.guidance || detail.error;
+      appendConversationStatus(`${isChild ? "Child" : "Neighbor"} edit was not applied: ${why}`, { failed: true });
       await sendChatPayload(
-        `The neighbor edit patch failed: ${detail.error}. ${detail.guidance || "Regenerate a wider V4A patch (unique anchor) or send the full skill_md."}`,
+        isChild
+          ? `The child edit was not applied: ${why}`
+          : `The neighbor edit patch failed: ${detail.error}. ${detail.guidance || "Regenerate a wider V4A patch (unique anchor) or send the full skill_md."}`,
         [],
       );
       return;
@@ -5999,7 +6004,7 @@ async function sendChatPayload(message, materials, options = {}) {
         if (!responseStarted) {
           responseStarted = true;
         }
-        if (["ask_user_input", "request_positive_samples", "propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit"].includes(data.tool)) {
+        if (["ask_user_input", "request_positive_samples", "propose_skill_draft", "propose_patch", "propose_material_patch", "rename_skill", "request_test_run", "propose_neighbor_edit", "propose_child_edit"].includes(data.tool)) {
           responseHasInteractiveTool = true;
         }
         if (data.tool === "stage_transition" || data.tool === "request_stage_transition") {
@@ -6053,7 +6058,7 @@ async function sendChatPayload(message, materials, options = {}) {
         flushAssistantMessage();
         appendMessage("assistant", `Error: ${data.message}`);
       }
-    });
+    }, session.skill_kind === "scenario" ? 900000 : undefined);
   } catch (err) {
     failure = err.message || String(err);
     appLog(`Chat failed: ${failure}`);
