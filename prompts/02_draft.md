@@ -5,6 +5,10 @@ user's accept/reject.
 
 ## Rules
 
+- First check Runtime State: when `saved_skill_edit: true`, this is an older
+  MODIFY session with saved content, not a new draft. Request `refine` and use
+  patch review there; the draft-generation and acceptance rules below do not
+  apply. Never claim a draft card exists when `pending_draft_proposals` is 0.
 - You may call `propose_skill_draft` **only while the current draft is empty**,
   or again when the backend refused to save it (the message lists the lint
   findings): then send the COMPLETE corrected SKILL.md, changing only what the

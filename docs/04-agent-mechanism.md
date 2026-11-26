@@ -500,6 +500,7 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 1. **PREPARE ➔ DRAFT 是嚴格單向通道**，必須通過 `check_quality_gates` 計算。凡不符指標均拋出 `QualityGateError` (非致命) 攔截。後端保留原階段，將缺項寫入並持久化為 session 的 system 對話，同時維持前端的 `quality_gate_failed` 提示。下一回合 Agent 依目前狀態補齊尚缺的紀錄後才可重試，不重問已確認答案；不在同一回合自動補研究或重試轉移。
 2. **任何時候返回 PREPARE 階段時**，系統為了保證複檢嚴謹性，會**無條件清磁碟機**上的暫存草稿代碼 (`current_skill.skill_md = ""`)。但會完整留下已做好的 Prepare Brief（definition、變數等），並為 session 拍上 `prepare_brief.revisit = True` 標記避免重複確認。
 3. **非法階段躍遷保護：** 倘若 Agent 發出不合規的轉移事件，主執行緒不會 Crash，會拋出 ValueError 並啟動後端補救。系統會推送一條非致命事件 `tool_effect_rejected` 附帶合法出口 guidance 引導 Agent，Agent 有且僅能在下一回合自動下修判斷。
+4. **既有 Skill 的 re-plan：** 一般 MODIFY 載入已儲存內容且沒有待接受草稿時，PREPARE 通過同一套品質關卡後直接進 REFINE，以 `propose_patch` 卡審閱修改，不進入新建草稿的 DRAFT。`allowed_stage_transitions(session)` 同時供後端驗證、模型出口提示與拒絕修正指引使用；新建／匯入仍只能 PREPARE ➔ DRAFT。已知情確認的 scenario owner 重新生成仍走完整新草稿流程，不套用此分流。
 
 ---
 
@@ -517,6 +518,11 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 - ✅ **（重中之重）相似防撞防護**：若本地分析得出你的 Skill 與你具存權限的既有 Skill 相似度分數 **> 0.8**，大腦在 `differentiation` (辨異文字) 中**必須直接寫出那個 Skill 的全名**並表明功能區隔，否則直接拒絕移行。
 
 三項 checklist 全部確認不等於品質關卡通過；理解、研究及其他守衛仍須滿足。
+
+Runtime State 另提供 `saved_skill_edit` 與 `pending_draft_proposals`，避免 Agent 把
+載入的既有全文誤認為已提出草稿。沒有 `propose_skill_draft` 待接受工具就沒有草稿卡；
+舊版一般 MODIFY 已卡在 DRAFT 時，Agent 應先要求進 REFINE，再提出需要的 patch，
+不要求作者接受不存在的卡片，也不繞過已儲存 Skill 的整份覆寫保護。
 
 ---
 

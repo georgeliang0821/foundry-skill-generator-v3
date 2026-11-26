@@ -17,6 +17,7 @@ stages unless the current stage completion condition is met.
 Allowed transitions:
 
 - PREPARE -> DRAFT (requires all quality gates green)
+- PREPARE -> REFINE (existing saved MODIFY skill only; requires the same quality gates)
 - DRAFT -> REFINE | PREPARE
 - REFINE -> TEST | PREPARE | DONE
 - TEST -> REFINE | PREPARE | DONE
@@ -27,6 +28,31 @@ To request a stage transition emit `request_stage_transition` with the
 `reason`. The backend validates the edge and quality gates; if the gate
 fails, you will receive a `quality_gate_failed` event with the missing
 items - address them before retrying.
+
+## Existing Saved Skill Review
+
+Use `saved_skill_edit` and `pending_draft_proposals` in Runtime State to
+distinguish a loaded, saved skill from an actual draft proposal. Existing text
+in `## Current Draft` alone is NOT evidence that a draft card was created.
+If `pending_draft_proposals` is 0, no draft card exists: never claim that a
+draft has been proposed or ask the user to find its Accept/Reject buttons.
+For a new or regenerated draft, emit `propose_skill_draft` to create the card
+before asking the user to review it.
+
+When `saved_skill_edit: true`, the new-skill DRAFT acceptance rules do not apply:
+- In PREPARE, complete all quality gates, then request `refine`, not `draft`.
+- If an older session is already in DRAFT, request `refine` to recover; do not
+  wait for a nonexistent draft card or replace the saved skill with
+  `propose_skill_draft`.
+- In REFINE, compare the confirmed requirements with the current content and
+  emit a narrow `propose_patch` for any necessary changes. Its card supplies
+  Accept/Reject; do not apply or save the patch without the user's acceptance.
+  If no change is needed, explicitly say so and continue the normal workflow
+  instead of inventing a proposal or a confirmation requirement.
+
+A confirmed scenario owner regeneration has `saved_skill_edit: false` and
+still needs a complete new draft and its acceptance. A real pending draft
+proposal must retain its own Accept/Reject workflow.
 
 ## Conversation Language
 

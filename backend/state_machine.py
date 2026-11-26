@@ -124,6 +124,7 @@ def stage_prompt_for(kind: SkillKind, stage: Stage) -> str:
 TRANSITION_TABLE: dict[Stage, dict[Stage, str]] = {
     Stage.PREPARE: {
         Stage.DRAFT: "Prepare quality gate is satisfied; generate the first complete SKILL.md.",
+        Stage.REFINE: "MODIFY of an existing saved skill: Prepare quality gate is satisfied; review focused patches.",
     },
     Stage.DRAFT: {
         Stage.REFINE: "User accepted the initial SKILL.md; continue with focused V4A patches.",
@@ -555,6 +556,26 @@ def can_transition(current: Stage, target: Stage) -> bool:
     return target in ALLOWED_TRANSITIONS.get(current, set())
 
 
+def is_saved_skill_edit(session: Session) -> bool:
+    return (
+        Mode(session.mode) is Mode.MODIFY
+        and bool(session.remote_skill_id and session.current_skill.skill_md.strip())
+        and not session.owner_regeneration_pending
+        and not any(call.tool == "propose_skill_draft" for call in session.pending_tool_calls)
+    )
+
+
+def allowed_stage_transitions(session: Session) -> dict[Stage, str]:
+    stage = Stage(session.current_stage)
+    exits = dict(TRANSITION_TABLE.get(stage, {}))
+    saved_edit = is_saved_skill_edit(session)
+    if stage is Stage.PREPARE:
+        exits.pop(Stage.DRAFT if saved_edit else Stage.REFINE, None)
+    elif stage is Stage.DRAFT and saved_edit:
+        exits[Stage.REFINE] = "Existing saved skill; continue with patch review, not a new draft acceptance."
+    return exits
+
+
 # Module-level post-transition hook (registered by main.py).
 PostTransitionHook = None  # type: ignore[var-annotated]
 
@@ -580,7 +601,7 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         )
         session.touch()
         return
-    if not can_transition(current, target):
+    if not can_transition(current, target) or target not in allowed_stage_transitions(session):
         raise ValueError(f"Invalid stage transition: {current.value} -> {target.value}")
     if target == Stage.DONE:
         outcomes = {outcome.skill_name: outcome for outcome in session.neighbor_notice_outcomes}
@@ -594,7 +615,7 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
         )
         if unresolved:
             raise ValueError("Cannot finalize with unresolved neighbor notifications: " + ", ".join(sorted(unresolved)))
-    if current == Stage.PREPARE and target == Stage.DRAFT:
+    if current == Stage.PREPARE and target in {Stage.DRAFT, Stage.REFINE}:
         missing = check_quality_gates(session)
         if missing:
             raise QualityGateError(missing)
@@ -629,8 +650,9 @@ def transition(session: Session, target: Stage, summary: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-def _format_allowed_exits(stage: Stage) -> str:
-    exits = TRANSITION_TABLE.get(stage) or {}
+def _format_allowed_exits(session: Session) -> str:
+    stage = Stage(session.current_stage)
+    exits = allowed_stage_transitions(session)
     if not exits:
         return "## Allowed Stage Transitions\n\nNo further transitions; this is a terminal stage."
     lines = [
@@ -1578,6 +1600,8 @@ def build_system_prompt(session: Session) -> str:
     if session.assets and stage in ASSET_STAGE_ADDENDA:
         parts.append(load_prompt(ASSET_STAGE_ADDENDA[stage]))
     runtime_state = f"## Runtime State\n\nmode: {mode.value}\nstage: {stage.value}\nskill_kind: {kind.value}"
+    runtime_state += f"\nsaved_skill_edit: {str(is_saved_skill_edit(session)).lower()}"
+    runtime_state += f"\npending_draft_proposals: {sum(call.tool == 'propose_skill_draft' for call in session.pending_tool_calls)}"
     if kind is SkillKind.SCENARIO:
         runtime_state += f"\norchestration_owner: {session.orchestration_owner}\nowner_regeneration_pending: {str(session.owner_regeneration_pending).lower()}"
         declared = [str(c).strip() for c in (getattr(session, "children", None) or []) if str(c).strip()]
@@ -1674,5 +1698,5 @@ def build_system_prompt(session: Session) -> str:
     if kind is SkillKind.SCENARIO:
         for filename in SCENARIO_OWNER_ADDENDA[session.orchestration_owner]:
             parts.append(load_prompt(filename))
-    parts.append(_format_allowed_exits(stage))
+    parts.append(_format_allowed_exits(session))
     return "\n\n".join(p for p in parts if p.strip())

@@ -148,6 +148,11 @@ def test_all_declared_stage_transitions_are_valid() -> None:
         for target in targets:
             if source is Stage.PREPARE and target is Stage.DRAFT:
                 session = _fully_prepared_session()
+            elif source is Stage.PREPARE and target is Stage.REFINE:
+                session = _fully_prepared_session()
+                session.mode = Mode.MODIFY
+                session.remote_skill_id = "demo"
+                session.current_skill.skill_md = "---\nname: demo\n---\nbody"
             else:
                 session = Session(current_stage=source)
             transition(session, target, "covered by transition table")
@@ -207,6 +212,104 @@ def test_modify_session_keeps_the_stored_skill_when_it_returns_to_prepare() -> N
     assert session.prepare_brief.revisit is True
     assert session.current_skill.skill_md == "---\nname: demo\n---\nbody"
     assert session.current_skill.version_hash == "abc"
+
+
+@pytest.mark.parametrize("script", [None, "print('result')\n"])
+def test_saved_modify_replan_enters_refine_without_replacing_stored_files(script) -> None:
+    session = _fully_prepared_session()
+    session.mode = Mode.MODIFY
+    session.remote_skill_id = "demo"
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+    session.current_skill.version_hash = "abc"
+    session.current_skill.script = script
+    before = session.current_skill.model_dump()
+
+    transition(session, Stage.REFINE, "Re-plan confirmed.")
+
+    assert session.current_stage == "refine"
+    assert session.current_skill.model_dump() == before
+    assert session.pending_tool_calls == []
+
+
+def test_saved_modify_replan_refine_still_requires_quality_gate() -> None:
+    session = _fully_prepared_session()
+    session.mode = Mode.MODIFY
+    session.remote_skill_id = "demo"
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+    session.prepare_brief.research.web_status = "skipped"
+
+    with pytest.raises(QualityGateError) as exc:
+        transition(session, Stage.REFINE, "Not ready.")
+
+    assert exc.value.missing == ["research.web_status"]
+    assert session.current_stage == "prepare"
+
+
+def test_saved_modify_replan_cannot_enter_new_draft_workflow() -> None:
+    session = _fully_prepared_session()
+    session.mode = Mode.MODIFY
+    session.remote_skill_id = "demo"
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+
+    with pytest.raises(ValueError, match="Invalid stage transition"):
+        transition(session, Stage.DRAFT, "Re-plan confirmed.")
+
+    assert session.current_stage == "prepare"
+
+
+@pytest.mark.parametrize("kind", [SkillKind.CAPABILITY, SkillKind.SCENARIO])
+@pytest.mark.parametrize("stage", [Stage.PREPARE, Stage.DRAFT])
+def test_saved_modify_prompt_exposes_patch_workflow_and_actual_pending_drafts(kind, stage) -> None:
+    session = Session(mode=Mode.MODIFY, skill_kind=kind, current_stage=stage, remote_skill_id="demo")
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+
+    prompt = build_system_prompt(session)
+
+    assert "saved_skill_edit: true" in prompt
+    assert "pending_draft_proposals: 0" in prompt
+    assert "no draft card exists" in prompt
+    assert "new-skill DRAFT acceptance rules do not apply" in prompt
+    exits = prompt.split("## Allowed Stage Transitions")[-1]
+    assert "- `refine`" in exits
+    assert "- `draft`" not in exits
+
+
+def test_owner_regeneration_retains_new_draft_workflow() -> None:
+    session = _fully_prepared_scenario()
+    session.mode = Mode.MODIFY
+    session.remote_skill_id = "demo"
+    session.owner_regeneration_pending = True
+
+    prompt = build_system_prompt(session)
+    assert "saved_skill_edit: false" in prompt
+    assert "- `draft`" in prompt.split("## Allowed Stage Transitions")[-1]
+    transition(session, Stage.DRAFT, "Generate for confirmed owner change.")
+    assert session.current_stage == "draft"
+
+
+@pytest.mark.parametrize("mode", [Mode.NEW, Mode.IMPORT])
+def test_new_or_imported_skill_cannot_skip_draft_even_with_remote_binding(mode) -> None:
+    session = _fully_prepared_session()
+    session.mode = mode
+    session.remote_skill_id = "demo"
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+
+    with pytest.raises(ValueError, match="Invalid stage transition"):
+        transition(session, Stage.REFINE, "Cannot skip initial review.")
+    assert "saved_skill_edit: false" in build_system_prompt(session)
+    assert session.current_stage == "prepare"
+
+
+def test_real_pending_draft_keeps_acceptance_workflow() -> None:
+    session = Session(mode=Mode.MODIFY, current_stage=Stage.DRAFT, remote_skill_id="demo")
+    session.current_skill.skill_md = "---\nname: demo\n---\nbody"
+    session.pending_tool_calls = [PendingToolCall(tool="propose_skill_draft", args={})]
+
+    prompt = build_system_prompt(session)
+
+    assert "saved_skill_edit: false" in prompt
+    assert "pending_draft_proposals: 1" in prompt
+    assert session.pending_tool_calls[0].tool == "propose_skill_draft"
 
 
 def test_prompt_assembly_includes_stage_and_runtime_state() -> None:

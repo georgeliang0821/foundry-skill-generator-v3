@@ -252,6 +252,12 @@ modify 模式下的 Session 清單會依目前 Skill 篩選，沒看到對話時
 | **quick edit** | 調整少量描述、修正條件、處理既有 finding | 以已儲存內容為基準，從 REFINE 開始。 |
 | **re-plan** | 重新定義目標、資料來源、能力範圍或重要輸入 | 載入既有內容，從 PREPARE 重新確認。 |
 
+一般 **re-plan** 通過 PREPARE 品質關卡後直接進 REFINE，保留已儲存內容，
+以 Patch 卡的 **Accept／Reject** 審閱需要的修改，不會出現新建 Skill 的草稿卡。
+只有新建／匯入或已確認的 scenario owner 重新生成才需要完整草稿卡。
+若舊版一般 modify Session 卡在 DRAFT 且沒有草稿卡，更新並重啟後端後，
+在原 Session 輸入「繼續」，Agent 會改走 REFINE 的 Patch 審閱，不需重建 Session。
+
 ### 修復舊版 Skill 的類型
 
 舊 capability 缺少 `metadata.skill_type`、欄位為空或宣告值不符合套件形式時，

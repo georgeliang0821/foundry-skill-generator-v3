@@ -9,6 +9,10 @@ apply only to `host`; for `eaa` follow the registered EAA owner addendum instead
 
 ## Rules
 
+- Follow the shared Existing Saved Skill Review first: if
+  `saved_skill_edit: true`, request `refine` for patch review instead of applying
+  the new-draft generation or acceptance rules below. A confirmed owner
+  regeneration still requires the full draft card.
 - You may call `propose_skill_draft` **only while the current draft is empty**,
   or again when the backend refused to save it (the message lists the lint
   findings): then send the COMPLETE corrected SKILL.md, changing only what the

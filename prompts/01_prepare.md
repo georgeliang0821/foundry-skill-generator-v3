@@ -277,7 +277,9 @@ omit filler like "the user said" repeated for every line.
    platform_identity variables confirmed via `record_variables`, with the
    downstream actor interface established for every external call).
 9. When all gates are green, emit
-   `request_stage_transition(target_stage="draft", reason=...)`.
+   `request_stage_transition(target_stage="refine", reason=...)` when Runtime
+   State has `saved_skill_edit: true`; otherwise use `target_stage="draft"`.
+   Existing saved MODIFY skills continue with patch review, not a new draft card.
    The three confirmed checklist items alone do NOT establish that all gates
    are green: the understanding and research brief must also satisfy them.
    If the conversation reports "Quality gate failed", the transition was NOT

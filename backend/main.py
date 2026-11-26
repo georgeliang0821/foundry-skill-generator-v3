@@ -137,6 +137,7 @@ from .state_machine import (
     TRANSITION_TABLE,
     QualityGateError,
     _form_prompt_key,
+    allowed_stage_transitions,
     apply_code_material_change,
     code_material_contents,
     child_context_for_prompt,
@@ -2759,7 +2760,7 @@ def _tool_effect_recovery_guidance(session: Session, tool: str, args: dict[str, 
             current = Stage(session.current_stage)
         except ValueError:
             current = None
-        exits = TRANSITION_TABLE.get(current, {}) if current is not None else {}
+        exits = allowed_stage_transitions(session) if current is not None else {}
         cur_name = current.value if current is not None else str(session.current_stage)
         if exits:
             options = "; ".join(f"{t.value} ({reason})" for t, reason in exits.items())

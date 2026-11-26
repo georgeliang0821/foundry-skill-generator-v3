@@ -51,6 +51,129 @@ def _seed(backend_main, grant_skill, name: str, *, script: str | None = SCRIPT) 
     return saved
 
 
+@pytest.mark.parametrize("script", [None, SCRIPT])
+@pytest.mark.parametrize("starting_stage", ["prepare", "draft"])
+@pytest.mark.parametrize("action", ["accept", "reject"])
+def test_modify_replan_reviews_patch_instead_of_nonexistent_draft(
+    client, backend_main, grant_skill, monkeypatch, script, starting_stage, action,
+) -> None:
+    name = "meeting-summary"
+    form = "script" if script else "inline"
+    skill_md = _skill_md(name).replace(
+        "description: Does a thing.\n",
+        f"description: Does a thing.\nmetadata:\n  skill_type: {form}\n",
+    )
+    backend_main.store.save_skill(SkillFiles(name=name, skill_md=skill_md, script=script))
+    grant_skill(name)
+    response = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": name})
+    assert response.status_code == 200
+    sid = response.json()["id"]
+    backend_main.await_prepare_entry()
+    session = backend_main.sessions[sid]
+    session.current_stage = starting_stage
+    brief = session.prepare_brief
+    brief.understanding.skill_goal = "Summarize decisions in meeting notes."
+    brief.understanding.input_sources = ["User-provided meeting notes"]
+    brief.understanding.key_capabilities = ["Summarize decisions"]
+    brief.understanding.differentiation = "Meeting notes only, not general documents."
+    brief.research.web_status = "ok"
+    brief.research.summary = "Peer boundaries reviewed; no adjacent skill found."
+    for key in brief.verify_checklist:
+        brief.verify_checklist[key] = True
+    before = backend_main.store.load_skill(name)
+    queries = []
+
+    class PatchReviewAgent:
+        def stream(self, session, message):
+            queries.append(build_system_prompt(session))
+            if session.current_stage in {"prepare", "draft"}:
+                call = PendingToolCall(
+                    tool="request_stage_transition",
+                    args={"target_stage": "refine", "reason": "Existing skill re-plan confirmed."},
+                )
+            else:
+                call = PendingToolCall(tool="propose_patch", args={
+                    "target_file": "SKILL.md",
+                    "change_summary": "Clarify the overview using the confirmed scope.",
+                    "patch": (
+                        "*** Begin Patch\n*** Update File: SKILL.md\n"
+                        "@@ ## Overview\n"
+                        "-Body.\n+Summarize decisions in meeting notes.\n"
+                        "*** End Patch"
+                    ),
+                })
+            session.pending_tool_calls.append(call)
+            yield {"event": "tool_call", "data": call.model_dump()}
+
+    monkeypatch.setattr(backend_main, "agent", PatchReviewAgent())
+    response = client.post(f"/api/sessions/{sid}/chat", json={"message": "Continue"})
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert not any(event["event"] in {"error", "quality_gate_failed", "tool_effect_rejected"} for event in events)
+    assert backend_main.sessions[sid].current_stage == "refine"
+    assert not any(
+        call.tool in {"propose_skill_draft", "propose_patch"}
+        for call in backend_main.sessions[sid].pending_tool_calls
+    )
+    assert backend_main.store.load_skill(name) == before
+    assert "saved_skill_edit: true" in queries[0]
+    assert "pending_draft_proposals: 0" in queries[0]
+
+    backend_main.sessions.clear()
+    response = client.post(f"/api/sessions/{sid}/chat", json={"message": "Review the planned change"})
+    assert response.status_code == 200
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in response.json()["events"])
+    patch_event = next(event for event in response.json()["events"] if event["event"] == "tool_call")
+    assert patch_event["data"]["tool"] == "propose_patch"
+    restored = client.get(f"/api/sessions/{sid}").json()
+    assert [call["tool"] for call in restored["pending_tool_calls"] if call["tool"].startswith("propose_")] == ["propose_patch"]
+    assert restored["current_skill"]["skill_md"] == before.skill_md
+    assert backend_main.store.load_skill(name) == before
+
+    response = client.post(f"/api/sessions/{sid}/tool-result", json={
+        "tool_call_id": patch_event["data"]["call_id"], "result": {"action": action},
+    })
+    assert response.status_code == 200
+    assert not any(call["tool"].startswith("propose_") for call in response.json()["pending_tool_calls"])
+    saved = backend_main.store.load_skill(name)
+    assert saved.script == before.script
+    if action == "accept":
+        assert "Summarize decisions in meeting notes." in saved.skill_md
+        assert response.json()["current_skill"]["skill_md"] == saved.skill_md
+    else:
+        assert saved == before
+        assert response.json()["current_skill"]["skill_md"] == before.skill_md
+
+
+def test_saved_modify_rejects_draft_transition_with_refine_recovery_guidance(
+    client, backend_main, grant_skill, monkeypatch,
+) -> None:
+    saved = _seed(backend_main, grant_skill, "meeting-summary")
+    sid = client.post("/api/sessions", json={"mode": "modify", "target_skill_id": saved.name}).json()["id"]
+    backend_main.await_prepare_entry()
+
+    class WrongStageAgent:
+        def stream(self, session, message):
+            call = PendingToolCall(
+                tool="request_stage_transition",
+                args={"target_stage": "draft", "reason": "Re-plan complete."},
+            )
+            session.pending_tool_calls.append(call)
+            yield {"event": "tool_call", "data": call.model_dump()}
+
+    monkeypatch.setattr(backend_main, "agent", WrongStageAgent())
+    response = client.post(f"/api/sessions/{sid}/chat", json={"message": "Next stage"})
+    assert response.status_code == 200
+    rejection = next(event["data"] for event in response.json()["events"] if event["event"] == "tool_effect_rejected")
+    assert "allowed targets (refine)" in rejection["guidance"]
+    assert "allowed targets (draft)" not in rejection["guidance"]
+    restored = backend_main.session_store.load(sid)
+    assert restored.current_stage == "prepare"
+    assert restored.current_skill.skill_md == saved.skill_md
+    assert restored.pending_tool_calls == []
+    assert backend_main.store.load_skill(saved.name) == saved
+
+
 def test_save_writes_the_script_and_lints_it_under_its_skill_name(client, backend_main, fake_sql, monkeypatch) -> None:
     calls = _lint_recorder(backend_main, monkeypatch)
     session = _script_session(backend_main, "room-finder")
@@ -141,6 +264,7 @@ def test_modify_opens_type_conflict_for_repair_without_writes(
     assert body["remote_version_hash"] == saved.version_hash
     assert any("T11" in event["data"].get("text", "") for event in body["ui_history"])
     assert any(message["metadata"].get("stored_type_issues") for message in body["conversation"])
+    backend_main.await_prepare_entry()
     assert backend_main.session_store.load(body["id"]).current_skill.skill_md == saved.skill_md
     assert backend_main.store.load_skill("demo").skill_md == saved.skill_md
     rejected = client.post(f"/api/sessions/{body['id']}/save", json={})
