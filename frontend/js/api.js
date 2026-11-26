@@ -298,7 +298,7 @@ export async function saveNeighborEditApi(sessionId, skill) {
     headers: { "Content-Type": "application/json" },
     body: "{}",
   });
-  if (!res.ok) throw new Error(await formatFetchError(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 

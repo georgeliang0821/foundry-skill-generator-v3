@@ -437,6 +437,163 @@ def test_neighbor_edit_unknown_skill_returns_404(client) -> None:
     assert response.status_code == 404
 
 
+def test_neighbor_save_lint_failure_is_recorded_and_repaired_without_changing_source(
+    client, backend_main, grant_skill,
+) -> None:
+    _seed_neighbor_skill(backend_main, grant_skill)
+    _seed_neighbor_skill(backend_main, grant_skill, name="other-skill")
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    assert client.post(
+        f"/api/sessions/{sid}/neighbors",
+        json={"neighbor_skills": [{"skill": "ms-graph-todo"}]},
+    ).status_code == 200
+    edited = (
+        "---\nname: ms-graph-todo\ndescription: Neighbor\n---\n"
+        "## When NOT to Use This Skill\n- Task routing -> use `other-skill`\n"
+    )
+    proposed = client.post(
+        f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/propose",
+        json={"skill_md": edited},
+    ).json()
+    selected = proposed["neighbor_edits"][0]["selected_version_id"]
+    original = backend_main.store.load_skill("ms-graph-todo")
+    source = proposed["current_skill"]
+
+    failed = client.post(f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/save", json={})
+
+    assert failed.status_code == 400
+    assert failed.json()["detail"]["kind"] == "skill_lint_failed"
+    restored = backend_main.session_store.load_all()[sid]
+    failure = restored.conversation[-1]
+    assert failure.metadata["neighbor_save"]["skill_name"] == "ms-graph-todo"
+    assert failure.metadata["neighbor_save"]["version_id"] == selected
+    assert failure.metadata["neighbor_save"]["status"] == "failed"
+    assert failure.metadata["neighbor_save"]["detail"] == failed.json()["detail"]
+    assert "N1" in failure.content
+    assert restored.current_skill.model_dump() == source
+    assert restored.neighbor_edits[0].selected_version_id == selected
+    assert restored.neighbor_edits[0].status == "draft"
+    assert backend_main.store.load_skill("ms-graph-todo") == original
+    import json
+    from backend.agent import _build_foundry_user_prompt
+
+    prompt = _build_foundry_user_prompt(restored, "Repair the failed neighbor save.")
+    assert json.dumps(failure.content, ensure_ascii=False) in prompt
+    assert '"skill_name": "ms-graph-todo"' in prompt
+
+    from backend.models import PendingToolCall
+
+    session = backend_main.sessions[sid]
+    call = PendingToolCall(tool="propose_neighbor_edit", args={
+        "skill_name": "ms-graph-todo",
+        "change_summary": "Replace a named routing alternative with a stopping condition.",
+        "patch": (
+            "*** Begin Patch\n*** Update File: SKILL.md\n@@\n"
+            " ## When NOT to Use This Skill\n"
+            "-- Task routing -> use `other-skill`\n"
+            "+- Do not use for unrelated task routing.\n*** End Patch"
+        ),
+    })
+    session.pending_tool_calls.append(call)
+    accepted = client.post(
+        f"/api/sessions/{sid}/tool-result",
+        json={"tool_call_id": call.call_id, "result": {"action": "accept"}},
+    )
+    assert accepted.status_code == 200
+    assert backend_main.store.load_skill("ms-graph-todo") == original
+    saved = client.post(f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/save", json={})
+    assert saved.status_code == 200
+    assert saved.json()["neighbor_edits"][0]["status"] == "saved"
+    assert saved.json()["current_skill"] == source
+    assert "other-skill" not in backend_main.store.load_skill("ms-graph-todo").skill_md
+    restored = backend_main.session_store.load_all()[sid]
+    assert restored.conversation[-1].metadata["neighbor_save"]["status"] == "saved"
+    assert not restored.neighbor_notice_outcomes
+
+
+def test_neighbor_save_service_failure_preserves_draft_and_records_blocker(
+    client, backend_main, grant_skill, monkeypatch,
+) -> None:
+    from fastapi import HTTPException
+
+    _seed_neighbor_skill(backend_main, grant_skill)
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    original = backend_main.store.load_skill("ms-graph-todo")
+    client.post(
+        f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/propose",
+        json={"skill_md": original.skill_md + "\nUpdated boundary.\n"},
+    )
+
+    def unavailable(*args):
+        raise HTTPException(status_code=503, detail="EAA lint is unavailable; not saved.")
+
+    monkeypatch.setattr(backend_main, "_eaa_lint", unavailable)
+    failed = client.post(f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/save", json={})
+    assert failed.status_code == 503
+    restored = backend_main.session_store.load_all()[sid]
+    failure = restored.conversation[-1].metadata["neighbor_save"]
+    assert failure["status_code"] == 503
+    assert failure["detail"] == failed.json()["detail"]
+    assert restored.neighbor_edits[0].status == "draft"
+    assert backend_main.store.load_skill("ms-graph-todo") == original
+
+
+@pytest.mark.parametrize("blocker", ["concurrent_write", "sql_failure"])
+def test_neighbor_save_records_conflict_or_partial_sync(
+    client, backend_main, grant_skill, monkeypatch, blocker,
+) -> None:
+    _seed_neighbor_skill(backend_main, grant_skill)
+    sid = client.post("/api/sessions", json={"mode": "new", "materials": []}).json()["id"]
+    original = backend_main.store.load_skill("ms-graph-todo")
+    edited = original.skill_md + "\nUpdated boundary.\n"
+    proposed = client.post(
+        f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/propose",
+        json={"skill_md": edited},
+    ).json()
+    selected = proposed["neighbor_edits"][0]["selected_version_id"]
+    if blocker == "concurrent_write":
+        latest = backend_main.store.save_skill(
+            backend_main.SkillFiles(
+                name="ms-graph-todo", skill_md=original.skill_md + "\nConcurrent edit.\n",
+            ),
+        )
+    else:
+        def sql_failure(*args, **kwargs):
+            raise RuntimeError("SQL unavailable")
+
+        monkeypatch.setattr(backend_main.skills_repo, "upsert_skill", sql_failure)
+
+    failed = client.post(f"/api/sessions/{sid}/neighbor-edits/ms-graph-todo/save", json={})
+    assert failed.status_code == (409 if blocker == "concurrent_write" else 500)
+    restored = backend_main.session_store.load_all()[sid]
+    failure = restored.conversation[-1].metadata["neighbor_save"]
+    assert failure["status_code"] == failed.status_code
+    assert failure["detail"] == failed.json()["detail"]
+    assert failure["version_id"] == selected
+    assert restored.neighbor_edits[0].status == "draft"
+    assert restored.neighbor_edits[0].saved_version_id != selected
+    assert restored.ui_history[-1].data["failed"] is True
+    if blocker == "concurrent_write":
+        assert backend_main.store.load_skill("ms-graph-todo") == latest
+    else:
+        assert "saved to Blob but SQL upsert failed" in failed.json()["detail"]
+        assert "Updated boundary." in backend_main.store.load_skill("ms-graph-todo").skill_md
+
+
+@pytest.mark.parametrize("stage", ["prepare", "draft", "refine", "test", "done"])
+def test_neighbor_owner_and_save_recovery_rules_apply_in_every_stage(stage) -> None:
+    from backend.agent import _build_foundry_user_prompt
+    from backend.models import Session
+    from backend.state_machine import build_system_prompt
+
+    session = Session(current_stage=stage, neighbor_edit_policy={"ms-graph-todo": "editable"})
+    assert '"ms-graph-todo": "editable"' in build_system_prompt(session)
+    prompt = _build_foundry_user_prompt(session, "Finish the current skill.")
+    assert "Never ask whether to notify an editable neighbor's creator" in prompt
+    assert "propose_neighbor_edit" in prompt
+    assert "Neighbor save failures" in prompt
+
+
 
 def test_propose_neighbor_edit_is_deferred_until_accept(client, backend_main, grant_skill) -> None:
     # Seed a neighbor skill the agent will propose an edit for.

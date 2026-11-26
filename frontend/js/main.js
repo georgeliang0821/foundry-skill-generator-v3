@@ -2133,6 +2133,11 @@ function neighborEditCardHtml(skill, ne) {
     return `<option value="${escapeHtml(v.version_id)}"${v.version_id === ne.selected_version_id ? " selected" : ""}>${escapeHtml(v.label || v.origin)}${escapeHtml(when)}${tag}</option>`;
   }).join("");
   const selectedMd = String(selected.skill_md || "");
+  const saveOutcome = [...(session?.conversation || [])].reverse()
+    .find((message) => message.metadata?.neighbor_save?.skill_name === skill)?.metadata.neighbor_save;
+  const saveError = saveOutcome?.status === "failed" && saveOutcome.version_id === ne.selected_version_id
+    ? `Save failed for neighbor skill '${skill}': ${typeof saveOutcome.detail === "string" ? saveOutcome.detail : saveOutcome.detail?.message || "Operation failed."}`
+    : "";
   return `<div class="nbedit-card" data-nbedit="${escapeHtml(skill)}">
       <div class="nbedit-head">
         <strong>${escapeHtml(skill)}</strong>
@@ -2141,7 +2146,7 @@ function neighborEditCardHtml(skill, ne) {
       <div class="nbedit-controls">
         <label>Version <select class="nbedit-select" data-nbedit-select="${escapeHtml(skill)}">${options}</select></label>
         <button type="button" class="icon-button primary" data-nbedit-save="${escapeHtml(skill)}"${dirty ? "" : " disabled"}>Save skill</button>
-        <span class="spl-save-status" data-nbedit-statustext="${escapeHtml(skill)}"></span>
+        <span class="spl-save-status" data-nbedit-statustext="${escapeHtml(skill)}">${escapeHtml(saveError)}</span>
       </div>
       <label class="nbedit-editor-label">Edit the SKILL.md on the left; a live preview (YAML front matter highlighted) renders on the right. Drag the middle divider to resize the panes, or drag the textarea corner to grow its height. Save as a new version when done.</label>
       <div class="nbedit-split" data-nbedit-split="${escapeHtml(skill)}">
@@ -2242,8 +2247,20 @@ async function saveNeighborEdit(skill) {
     persistSessionState();
     renderSession();
   } catch (err) {
-    if (status) status.textContent = "Save failed";
+    const message = `Save failed for neighbor skill '${skill}': ${err.message}`;
+    if (status) status.textContent = message;
+    appendConversationStatus(message, { failed: true });
     appLog("save neighbor edit failed: " + err);
+    if (err.status === 400 && (isLintFailure(err.detail) || ["skill_type_invalid", "skill_version_invalid"].includes(err.detail?.kind))) {
+      await sendChatPayload([
+        `Saving the selected edit of neighbor skill '${skill}' failed. The current skill was NOT the save target.`,
+        ...(err.detail.issues || [err.detail.message]).map((issue) => `- ${issue}`),
+        "Repair only that neighbor's currently SELECTED version using propose_neighbor_edit with its skill_name and a V4A patch.",
+        "Preserve the already accepted boundary edits and fix only the reported findings. Do not use propose_patch or propose_skill_draft for the current skill.",
+        "If the current stage is DONE or TEST, request a transition to REFINE first, then continue the neighbor repair.",
+        "Keep the patch Accept/Reject card and require an explicit Save skill after acceptance. Do not notify this neighbor's creator or claim it was saved.",
+      ].join("\n"), []);
+    }
   }
 }
 

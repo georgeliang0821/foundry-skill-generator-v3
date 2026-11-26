@@ -4915,7 +4915,35 @@ def neighbor_edit_select(session_id: str, skill: str, req: NeighborSelectRequest
 @app.post("/api/sessions/{session_id}/neighbor-edits/{skill}/save")
 def neighbor_edit_save(session_id: str, skill: str, upn: str = Depends(require_upn)) -> Session:
     with _skill_mutation_lock:
-        return _neighbor_edit_save(session_id, skill, upn)
+        session = get_session_for_user(session_id, upn)
+        name = safe_skill_name(skill)
+        acl_mod.assert_can_modify(upn, name)
+        try:
+            return _neighbor_edit_save(session_id, skill, upn)
+        except HTTPException as exc:
+            ne = next((edit for edit in session.neighbor_edits if edit.skill_name == name), None)
+            text = f"Save failed for neighbor skill `{name}`: {display_detail(exc.detail)}"
+            session.conversation.append(ChatMessage(
+                role=MessageRole.SYSTEM,
+                content=text,
+                metadata={"neighbor_save": {
+                    "skill_name": name,
+                    "version_id": ne.selected_version_id if ne else "",
+                    "status": "failed",
+                    "status_code": exc.status_code,
+                    "detail": exc.detail,
+                }},
+            ))
+            sync_history(session)
+            add_history(session, "status", {"text": text, "failed": True})
+            session.touch()
+            persist_session(session)
+            log_event(
+                "session.neighbor_edit.save_failed", level="warning",
+                session_id=session.id, skill=name, status_code=exc.status_code,
+                error=display_detail(exc.detail),
+            )
+            raise
 
 
 def _neighbor_edit_save(session_id: str, skill: str, upn: str) -> Session:
@@ -4989,6 +5017,18 @@ def _neighbor_edit_save(session_id: str, skill: str, upn: str) -> Session:
         ne.selected_version_id = version.version_id
     ne.saved_version_id = version.version_id
     ne.status = "saved"
+    text = f"Neighbor skill `{ne.skill_name}` saved to Blob + SQL."
+    session.conversation.append(ChatMessage(
+        role=MessageRole.SYSTEM,
+        content=text,
+        metadata={"neighbor_save": {
+            "skill_name": ne.skill_name,
+            "version_id": version.version_id,
+            "status": "saved",
+        }},
+    ))
+    sync_history(session)
+    add_history(session, "status", {"text": text})
     session.touch()
     persist_session(session)
     log_event("session.neighbor_edit.save", session_id=session.id, skill=ne.skill_name, version_id=version.version_id)
