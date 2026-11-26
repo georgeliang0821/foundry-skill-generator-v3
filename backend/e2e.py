@@ -353,7 +353,7 @@ class FakeE2EAgent:
                 yield from self._stage_stream(session, stage)
         elif scenario == "material_patch" and stage == Stage.PREPARE.value:
             yield from self._material_patch_stream(session)
-        elif scenario == "lint_failure" and "refused to save skill.md" in message:
+        elif scenario == "lint_failure" and "draft validation found these blocking lint issues" in message:
             yield {"event": "text_delta", "data": {"delta": "E2E fake agent fixed the lint findings."}}
             yield self._tool(session, "propose_skill_draft", {"skill_md": e2e_skill_files().skill_md})
         elif scenario in {"patch_refine", "patch_failure"} or "patch" in message or "boundary" in message or "change" in message:

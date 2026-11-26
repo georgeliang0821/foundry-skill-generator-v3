@@ -14,7 +14,7 @@ apply only to `host`; for `eaa` follow the registered EAA owner addendum instead
   the new-draft generation or acceptance rules below. A confirmed owner
   regeneration still requires the full draft card.
 - You may call `propose_skill_draft` **only while the current draft is empty**,
-  or again when the backend refused to save it (the message lists the lint
+  or again when validation or save was blocked (the message lists the lint
   findings): then send the COMPLETE corrected SKILL.md, changing only what the
   findings require. After acceptance, never call it again -- use REFINE.
 - The frontmatter must satisfy every topology rule in the Scenario Skill Format

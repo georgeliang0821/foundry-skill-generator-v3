@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import base64
@@ -1183,15 +1184,26 @@ def save_skill_dual_write(
         return _save_skill_dual_write(session, user_upn, requested_name, orphan_action)
 
 
-def _save_skill_dual_write(
+@dataclass
+class _PreparedSkillSave:
+    files: SkillFiles
+    lint: EaaLintResult
+    old_name: str
+    source_row: skills_repo.SkillRow | None
+    existing: skills_repo.SkillRow | None
+    declared_children: list[str]
+    internal_children: list[str]
+    orphaned_children: list[str]
+
+
+def _prepare_skill_save(
     session: Session,
     user_upn: str,
     requested_name: str | None = None,
     orphan_action: str | None = None,
-) -> SkillFiles:
-    # Validate topology and every ACL before the first write, then commit Blob,
-    # SQL metadata, and grants.
-    started = now_ms()
+    *,
+    preflight: bool = False,
+) -> _PreparedSkillSave:
     try:
         _assert_owner_preserved(session, session.current_skill.skill_md)
     except ValueError as exc:
@@ -1251,7 +1263,7 @@ def _save_skill_dual_write(
     if lint_errors:
         raise _lint_failure("skill_lint_failed", "Skill lint failed", [f"{issue.rule}: {issue.message}" for issue in lint_errors])
 
-    if session.current_skill.script is not None:
+    if session.current_skill.script is not None and not preflight:
         _assert_script_flags_on(session)
 
     previous_name = old_name or (skill_name if existing is not None else "")
@@ -1300,7 +1312,7 @@ def _save_skill_dual_write(
         [child for child in previous_children if child not in declared_children],
         session.remote_skill_id or skill_name,
     )
-    if orphaned_children and orphan_action not in {"keep_internal", "make_capability"}:
+    if orphaned_children and not preflight and orphan_action not in {"keep_internal", "make_capability"}:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1328,7 +1340,6 @@ def _save_skill_dual_write(
                 ),
             },
         )
-    old_row = source_row if is_rename else None
     script = session.current_skill.script
     if script is None and existing is not None and store.has_script(skill_name) and not session.script_removed:
         raise HTTPException(
@@ -1343,16 +1354,6 @@ def _save_skill_dual_write(
                 ),
             },
         )
-    # Overwriting the skill this session loaded must not clobber a concurrent write (e.g. a
-    # Gatekeeper Addendum); a rename writes a new path, and a first save has nothing to match.
-    expected_version = session.remote_version_hash if old_name == skill_name else ""
-    if existing is not None and not expected_version:
-        expected_version = store.load_skill(skill_name).version_hash
-    # Saving is a content action. Visibility is owned solely by
-    # PATCH /api/skills/{name}/visibility, so it is only ever inherited here --
-    # on a rename from the row being renamed, since the new name has none yet.
-    visibility_row = old_row if is_rename else existing
-    is_public = bool(visibility_row.is_public) if visibility_row is not None else False
     files = SkillFiles(
         name=skill_name,
         skill_md=versioned_md,
@@ -1361,6 +1362,33 @@ def _save_skill_dual_write(
         remove_script=script is None and session.script_removed,
         assets=assets,
     )
+    return _PreparedSkillSave(
+        files, eaa_lint, old_name, source_row, existing, declared_children,
+        internal_children, orphaned_children,
+    )
+
+
+def _save_skill_dual_write(
+    session: Session,
+    user_upn: str,
+    requested_name: str | None = None,
+    orphan_action: str | None = None,
+) -> SkillFiles:
+    started = now_ms()
+    prepared = _prepare_skill_save(session, user_upn, requested_name, orphan_action)
+    files, eaa_lint = prepared.files, prepared.lint
+    skill_name, script = files.name, files.script
+    assert files.assets is not None
+    old_name, source_row, existing = prepared.old_name, prepared.source_row, prepared.existing
+    is_rename = bool(old_name) and old_name != skill_name
+    old_row = source_row if is_rename else None
+    # Do not overwrite a concurrent write (e.g. a Gatekeeper Addendum).
+    expected_version = session.remote_version_hash if old_name == skill_name else ""
+    if existing is not None and not expected_version:
+        expected_version = store.load_skill(skill_name).version_hash
+    # Only the visibility endpoint can change visibility; a rename carries it over.
+    visibility_row = old_row if is_rename else existing
+    is_public = bool(visibility_row.is_public) if visibility_row is not None else False
     log_event(
         "skill.save.start",
         session_id=session.id,
@@ -1370,7 +1398,7 @@ def _save_skill_dual_write(
         is_public=is_public,
         skill_md_bytes=len(files.skill_md.encode("utf-8")),
         script_bytes=len(script.encode("utf-8")) if script is not None else 0,
-        asset_count=len(assets),
+        asset_count=len(files.assets),
         if_match=bool(expected_version),
     )
     try:
@@ -1408,7 +1436,7 @@ def _save_skill_dual_write(
         # reachable, including when it is being demoted back from public.
         if not is_public:
             skills_repo.add_grant(saved.name, user_upn, granted_by=user_upn)
-        for child in internal_children:
+        for child in prepared.internal_children:
             child_row = skills_repo.get_skill(child)
             skills_repo.upsert_skill(
                 child,
@@ -1417,7 +1445,7 @@ def _save_skill_dual_write(
                 is_internal=True,
             )
         if orphan_action == "make_capability":
-            for child in orphaned_children:
+            for child in prepared.orphaned_children:
                 child_row = skills_repo.get_skill(child)
                 if child_row is not None:
                     skills_repo.upsert_skill(
@@ -1451,7 +1479,7 @@ def _save_skill_dual_write(
     session.current_skill.skill_md = saved.skill_md
     session.current_skill.version_hash = saved.version_hash
     session.assets_synced = True
-    session.children = declared_children
+    session.children = prepared.declared_children
     session.blob_store_id = _active_store_id()
     session.eaa_ruleset_version = eaa_lint.ruleset_version
     session.owner_regeneration_pending = False
@@ -4309,6 +4337,31 @@ def save_session_skill(session_id: str, req: SaveSessionSkillRequest, upn: str =
     add_history(session, "status", {"text": "Saved to Blob + SQL."})
     persist_session(session)
     return session
+
+
+class DraftPreflightRequest(BaseModel):
+    call_id: str
+    version_hash: str
+    name: str = ""
+
+
+@app.post("/api/sessions/{session_id}/draft/preflight")
+def preflight_session_draft(
+    session_id: str, req: DraftPreflightRequest, upn: str = Depends(require_upn),
+) -> dict[str, list[str]]:
+    session = get_session_for_user(session_id, upn)
+    if (
+        session.current_stage != Stage.DRAFT
+        or session.remote_skill_id
+        or session.current_skill.version_hash != req.version_hash
+        or not any(c.tool == "propose_skill_draft" and c.call_id == req.call_id for c in session.pending_tool_calls)
+    ):
+        raise HTTPException(status_code=409, detail="This draft changed. Reload the current draft and validate it again.")
+    candidate = session.model_copy(deep=True)
+    name = req.name.strip()
+    _apply_draft_name_override(candidate, name)
+    prepared = _prepare_skill_save(candidate, upn, name, preflight=True)
+    return {"warnings": prepared.lint.warnings}
 
 
 @app.put("/api/sessions/{session_id}/draft")

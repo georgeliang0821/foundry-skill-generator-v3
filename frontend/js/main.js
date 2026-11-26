@@ -21,6 +21,7 @@ import {
   listSkills,
   logoutMicrosoft,
   postSSE,
+  preflightSessionDraft,
   refreshAcaEnv,
   refreshPeerSkills,
   runSessionTest,
@@ -4753,17 +4754,20 @@ function renderToolCall(call) {
 
   if (call.tool === "propose_skill_draft") {
     el("toolCalls").innerHTML = "";
+    el("chatStream").querySelectorAll('[data-testid="draft-card"]:not(.resolved)').forEach((draft) => draft.remove());
     card.dataset.testid = "draft-card";
-    card.innerHTML = `<strong>${svgIcon("i-document-text")} SKILL.md ready</strong><p>Review SKILL.md in the Files tab. Accepting stores this draft and moves you into refinement.</p>
+    card.innerHTML = `<strong>${svgIcon("i-document-text")} SKILL.md draft</strong><p>Review SKILL.md in the Files tab. Accepting stores this draft and moves you into refinement.</p>
       <label class="draft-name">Skill name
         <input type="text" data-testid="draft-name-input" value="${escapeHtml(normalizeSkillName(inferCurrentName(args.skill_md)))}" placeholder="my-skill-name" maxlength="64" spellcheck="false" autocomplete="off">
       </label>
       <p class="patch-note">Lowercase letters, digits and hyphens only, no leading or trailing hyphen, 64 characters max. Renaming after this point moves the Blob folder, the SQL row and every grant.</p>
       <p class="patch-note draft-script-note" data-draft-script-note data-testid="draft-script-note" hidden></p>
       <p class="patch-note card-error" hidden></p>
+      <p class="patch-note" role="status" data-testid="draft-preflight-status">Validating draft before save...</p>
       <div class="tool-actions"></div>`;
     const nameInput = card.querySelector("[data-testid='draft-name-input']");
     const nameError = card.querySelector(".card-error");
+    let nameTimer;
     nameInput.addEventListener("input", () => {
       const caret = nameInput.selectionStart;
       const coerced = coerceSkillNameInput(nameInput.value);
@@ -4773,20 +4777,31 @@ function renderToolCall(call) {
       }
       nameError.hidden = true;
       syncDraftScriptNotes();
+      updateActionButtons();
+      window.clearTimeout(nameTimer);
+      nameTimer = window.setTimeout(() => void validatePendingDraft(), 300);
     });
-    card.querySelector(".tool-actions").appendChild(
-      actionButton("Accept SKILL.md", async () => {
-        const name = normalizeSkillName(nameInput.value);
-        if (!SKILL_NAME_RE.test(name)) {
-          nameError.textContent = "Enter a name using lowercase letters, digits and hyphens, with no leading or trailing hyphen.";
-          nameError.hidden = false;
-          nameInput.focus();
-          return;
-        }
-        nameError.hidden = true;
-        if (await acceptTool(call, { action: "accept", name }) === false) return;
-      }),
-    );
+    nameInput.addEventListener("change", () => void validatePendingDraft());
+    const accept = actionButton("Accept SKILL.md", async () => {
+      const name = normalizeSkillName(nameInput.value);
+      if (!SKILL_NAME_RE.test(name)) {
+        nameError.textContent = "Enter a name using lowercase letters, digits and hyphens, with no leading or trailing hyphen.";
+        nameError.hidden = false;
+        nameInput.focus();
+        return;
+      }
+      const candidate = pendingDraftCandidate();
+      if (candidate && (candidate.call.call_id !== call.call_id || !syncDraftPreflight(candidate))) return;
+      nameError.hidden = true;
+      await acceptTool(call, { action: "accept", name });
+    });
+    accept.dataset.draftAccept = "";
+    accept.disabled = !session?.remote_skill_id;
+    card.querySelector('[data-testid="draft-preflight-status"]').hidden = Boolean(session?.remote_skill_id);
+    const recheck = actionButton("Check again", () => validatePendingDraft({ force: true }));
+    recheck.dataset.draftRecheck = "";
+    recheck.hidden = true;
+    card.querySelector(".tool-actions").append(accept, recheck);
   } else if (call.tool === "propose_patch") {
     card.classList.add("patch-card");
     card.dataset.testid = "patch-card";
@@ -5246,6 +5261,16 @@ async function acceptTool(call, result) {
     }
     if (isLintFailure(detail)) {
       removeConversationStatus(runningNode);
+      const candidate = pendingDraftCandidate();
+      if (call.tool === "propose_skill_draft" && candidate?.call.call_id === call.call_id) {
+        draftPreflight = {
+          key: candidate.key,
+          status: "failed",
+          message: `Draft was not saved: ${(detail.issues || [detail.message]).join(" ")} Review SKILL.md in Files or check again.`,
+        };
+        updateActionButtons();
+        return false;
+      }
       await reportLintFailure(detail);
       return false;
     }
@@ -5326,6 +5351,88 @@ function isLintFailure(detail) {
   return ["skill_lint_failed", "eaa_lint_failed"].includes(detail?.kind);
 }
 
+let draftPreflight = null;
+let draftPreflightRun = null;
+
+function pendingDraftCandidate() {
+  if (!session || session.remote_skill_id || currentStage() !== "DRAFT") return null;
+  const call = (session.pending_tool_calls || []).find((item) => item.tool === "propose_skill_draft");
+  if (!call) return null;
+  const card = el("chatStream").querySelector(`[data-call-id="${CSS.escape(call.call_id)}"][data-testid="draft-card"]`);
+  const name = normalizeSkillName(card?.querySelector('[data-testid="draft-name-input"]')?.value ?? inferCurrentName());
+  const versionHash = session.current_skill?.version_hash ?? "";
+  const key = JSON.stringify([session.id, call.call_id, versionHash, session.current_skill?.script, name]);
+  return { call, card, key, name, versionHash, sessionId: session.id };
+}
+
+function syncDraftPreflight(candidate = pendingDraftCandidate()) {
+  if (!candidate?.card) return false;
+  const check = !localEditorDirty && draftPreflight?.key === candidate.key ? draftPreflight : null;
+  const ready = check?.status === "ready";
+  const failed = check?.status === "failed";
+  const status = candidate.card.querySelector('[data-testid="draft-preflight-status"]');
+  status.textContent = ready
+    ? check.warnings.length ? `Ready to save with warnings: ${check.warnings.join(" ")}` : "Validation passed. Ready to save."
+    : failed ? check.message
+      : draftPreflightRun ? "Validating draft before save..." : "Draft needs validation before save.";
+  candidate.card.querySelector("[data-draft-accept]").disabled = isSending || !ready;
+  const recheck = candidate.card.querySelector("[data-draft-recheck]");
+  recheck.hidden = !failed;
+  recheck.disabled = isSending || Boolean(draftPreflightRun);
+  return ready;
+}
+
+async function validatePendingDraft({ autoRepair = false, force = false } = {}) {
+  const candidate = pendingDraftCandidate();
+  if (!candidate || !candidate.card || !SKILL_NAME_RE.test(candidate.name)
+      || localEditorDirty || isSending || draftPreflightRun) return;
+  if (!force && draftPreflight?.key === candidate.key) return;
+  const token = {};
+  draftPreflightRun = token;
+  draftPreflight = null;
+  updateActionButtons();
+  let latest = candidate;
+  const stillCurrent = () => latest.key === pendingDraftCandidate()?.key && !localEditorDirty;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const { warnings } = await preflightSessionDraft(latest.sessionId, {
+          call_id: latest.call.call_id, version_hash: latest.versionHash, name: latest.name,
+        });
+        if (stillCurrent()) draftPreflight = { key: latest.key, status: "ready", warnings };
+        break;
+      } catch (err) {
+        if (!stillCurrent()) break;
+        const detail = parseApiErrorDetail(err);
+        const issues = detail?.issues?.length ? detail.issues.join(" ") : detail?.message || err.message;
+        draftPreflight = {
+          key: latest.key,
+          status: "failed",
+          message: `Draft validation did not pass: ${issues} Review SKILL.md in Files or check again.`,
+        };
+        if (!autoRepair || attempt || !isLintFailure(detail) || isSending) break;
+        draftPreflight = null;
+        await sendChatPayload(lintFixPrompt(detail, true), [], { autoContinue: true, draftRepair: true });
+        const revised = pendingDraftCandidate();
+        if (!revised || revised.sessionId !== latest.sessionId || localEditorDirty) break;
+        if (revised.call.call_id === latest.call.call_id || revised.versionHash === latest.versionHash) {
+          draftPreflight = {
+            key: revised.key, status: "failed",
+            message: `Draft validation did not pass: ${issues} The automatic repair made no change. Review SKILL.md in Files.`,
+          };
+          break;
+        }
+        latest = revised;
+      }
+    }
+  } finally {
+    if (draftPreflightRun === token) draftPreflightRun = null;
+    updateActionButtons();
+    const current = pendingDraftCandidate();
+    if (current && current.key !== latest.key && draftPreflight?.key !== current.key) void validatePendingDraft();
+  }
+}
+
 async function reportLintFailure(detail) {
   const count = (detail.issues || []).length || 1;
   appendConversationStatus(
@@ -5337,10 +5444,12 @@ async function reportLintFailure(detail) {
   await sendChatPayload(lintFixPrompt(detail), []);
 }
 
-function lintFixPrompt(detail) {
+function lintFixPrompt(detail, preflight = false) {
   const redraft = session?.current_stage === "draft" && !session?.remote_skill_id;
   return [
-    "The backend refused to save SKILL.md because of these lint findings:",
+    preflight
+      ? "Draft validation found these blocking lint issues in SKILL.md:"
+      : "The backend refused to save SKILL.md because of these lint findings:",
     ...(detail.issues || [detail.message]).map((issue) => `- ${issue}`),
     redraft
       ? "The draft has not been saved yet. Call propose_skill_draft again with the COMPLETE corrected SKILL.md."
@@ -5989,7 +6098,7 @@ async function sendChatPayload(message, materials, options = {}) {
   let failure = "";
   let hasAssistantText = false;
   const originalDraft = JSON.stringify([session.current_skill?.skill_md, session.current_skill?.script]);
-  const activity = beginConversationActivity(conversationWaitText(options));
+  const activity = options.draftRepair ? null : beginConversationActivity(conversationWaitText(options));
   const flushAssistantMessage = () => {
     const text = assistantBuffer;
     assistantBuffer = "";
@@ -6086,7 +6195,9 @@ async function sendChatPayload(message, materials, options = {}) {
     const changed = originalDraft !== JSON.stringify([session.current_skill?.skill_md, session.current_skill?.script]);
     const outcome = failure
       ? `Model request failed: ${failure}`
-      : responseHasInteractiveTool
+      : pendingDraftCandidate()
+        ? "Draft proposed."
+        : responseHasInteractiveTool
         ? `Response ready; waiting for your confirmation.${changed ? "" : " Skill content unchanged."}`
         : changed
           ? "Request completed. Skill content updated."
@@ -6095,21 +6206,24 @@ async function sendChatPayload(message, materials, options = {}) {
             : responseStarted
               ? "Request completed. Skill content unchanged."
               : "Request finished without a response or proposed changes. Skill content unchanged.";
-    activity.finish(outcome, Boolean(failure));
-    const continuing = !failure && (options.autoDepth || 0) < 4 && !responseHasInteractiveTool
+    activity?.finish(outcome, Boolean(failure));
+    const continuing = !failure && !options.draftRepair && (options.autoDepth || 0) < 4 && !responseHasInteractiveTool
       && ((autoContinueTarget && autoContinueTarget !== "DONE") || recoverableRejection || neighborSelected || notificationConfirmed);
     if (!continuing) setInputBusy(false);
+  }
+  if (!failure && responseHasInteractiveTool && !options.draftRepair) {
+    await validatePendingDraft({ autoRepair: true });
   }
   await refreshSessions();
 
   const shouldAutoContinue =
-    !failure &&
+    !failure && !options.draftRepair &&
     autoContinueTarget &&
     autoContinueTarget !== "DONE" &&
     !responseHasInteractiveTool &&
     (options.autoDepth || 0) < 4;
   const shouldRecover =
-    !failure &&
+    !failure && !options.draftRepair &&
     recoverableRejection &&
     !shouldAutoContinue &&
     !responseHasInteractiveTool &&
@@ -6137,7 +6251,7 @@ async function sendChatPayload(message, materials, options = {}) {
     );
   }
 
-  if (!failure && (neighborSelected || notificationConfirmed) && !shouldRecover && !shouldAutoContinue
+  if (!failure && !options.draftRepair && (neighborSelected || notificationConfirmed) && !shouldRecover && !shouldAutoContinue
       && !responseHasInteractiveTool && (options.autoDepth || 0) < 4) {
     await sendChatPayload(
       notificationConfirmed
@@ -6204,6 +6318,8 @@ function setInputBusy(busy, label = "Running...") {
 }
 
 function updateActionButtons() {
+  const draftCandidate = pendingDraftCandidate();
+  const draftReady = syncDraftPreflight(draftCandidate);
   const hasDraft = Boolean(session?.current_skill?.skill_md);
   const binding = skillBindingState();
   const bindingDeleted = binding.hasRemote && missingSkillBindings.has(binding.remoteName);
@@ -6223,7 +6339,8 @@ function updateActionButtons() {
   if (el("saveDraftBtn")) {
     const upToDate = binding.hasRemote && !binding.unsaved && !binding.unknown && !localEditorDirty;
     const noticesPending = (session?.neighbor_notice_outcomes || []).some((outcome) => ["pending", "failed"].includes(outcome.status));
-    el("saveDraftBtn").disabled = isSending || bindingDeleted || !hasDraft || (upToDate && !noticesPending);
+    el("saveDraftBtn").disabled = isSending || bindingDeleted || !hasDraft || (upToDate && !noticesPending)
+      || Boolean(draftCandidate && !draftReady);
     el("saveDraftBtn").title = bindingDeleted ? "The source skill was deleted. This conversation is retained."
       : !hasDraft
       ? "Generate a skill draft first."
@@ -6501,6 +6618,7 @@ async function persistCurrentDraftNow() {
   persistSessionState();
   renderSkillBindingStatus();
   updateActionButtons();
+  void validatePendingDraft();
   await refreshSessions();
 }
 
@@ -6910,8 +7028,15 @@ document.addEventListener("click", async (event) => {
 
 bind("saveDraftBtn", "click", async () => {
   if (!session) return;
+  const candidate = pendingDraftCandidate();
+  if (candidate) {
+    if (!syncDraftPreflight(candidate)) return;
+    if (await acceptTool(candidate.call, { action: "accept", name: candidate.name }) === false) return;
+    appendConversationStatus(`Saved ${candidate.name} to the skill store.`);
+    return;
+  }
   await persistCurrentDraftNow();
-  const call = (session?.pending_tool_calls || []).find((c) => c.tool === "propose_skill_draft");
+  const call = (session?.pending_tool_calls || []).find((item) => item.tool === "propose_skill_draft");
   if (call) {
     const name = session.target_skill_id || inferCurrentName();
     if (await acceptTool(call, { action: "accept", name }) === false) return;
@@ -7163,6 +7288,7 @@ async function resumeSession(sessionId) {
     appLog(`Resume session failed: ${err.message}`);
   } finally {
     setInputBusy(false);
+    void validatePendingDraft();
   }
 }
 

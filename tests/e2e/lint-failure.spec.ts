@@ -6,26 +6,61 @@ test.beforeEach(async ({ request }) => {
   await resetE2E(request);
 });
 
-test("a draft refused by the skill lint is handed back to the agent and the redraft saves", async ({ page, request }) => {
+test("a draft is repaired before the user accepts it once", async ({ page, request }) => {
   await setScenario(request, "lint_failure");
   await openApp(page);
   await createDraftWithFakeAgent(page);
 
-  await page.getByRole("button", { name: "Accept SKILL.md" }).click();
-
   const chat = page.getByTestId("chat-stream");
-  await expect(chat).toContainText("SKILL.md was not saved: the skill lint found 1 problem(s)");
-  await expect(chat).not.toContainText("Test failed");
   await expect(chat).toContainText("E2E fake agent fixed the lint findings.");
+  await expect(chat).not.toContainText("SKILL.md was not saved");
+  await expect(page.getByTestId("draft-card")).toHaveCount(1);
+  await expect(page.getByTestId("draft-preflight-status")).toContainText("Validation passed");
   let session = await readSession(request, await currentSessionId(page));
   expect(session.remote_skill_id).toBeFalsy();
 
-  await page.getByRole("button", { name: "Accept SKILL.md" }).last().click();
+  await page.getByRole("button", { name: "Accept SKILL.md" }).click();
 
   await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
   session = await readSession(request, await currentSessionId(page));
   expect(session.remote_skill_id).toBe("e2e-calendar-skill");
   expect(session.pending_tool_calls.filter((call: { tool: string }) => call.tool === "propose_skill_draft")).toHaveLength(0);
+});
+
+test("repeated lint failure stops after one repair and retains the unsaved draft", async ({ page, request }) => {
+  await setScenario(request, "lint_failure");
+  let checks = 0;
+  await page.route("**/api/sessions/*/draft/preflight", async (route) => {
+    checks += 1;
+    await route.fulfill({ status: 400, json: { detail: {
+      kind: "eaa_lint_failed", issues: ["S3: Required Inputs do not match"],
+    } } });
+  });
+  await openApp(page);
+  await createDraftWithFakeAgent(page);
+
+  await expect(page.getByTestId("draft-preflight-status")).toContainText("S3: Required Inputs do not match");
+  await expect(page.getByRole("button", { name: "Accept SKILL.md" })).toBeDisabled();
+  await expect(page.getByTestId("accept-draft-button")).toBeDisabled();
+  expect(checks).toBe(2);
+  const session = await readSession(request, await currentSessionId(page));
+  expect(session.remote_skill_id).toBeFalsy();
+  expect(session.pending_tool_calls.filter((call: { tool: string }) => call.tool === "propose_skill_draft")).toHaveLength(1);
+});
+
+test("warnings are visible but do not require a repair or block acceptance", async ({ page }) => {
+  let checks = 0;
+  await page.route("**/api/sessions/*/draft/preflight", async (route) => {
+    checks += 1;
+    await route.fulfill({ json: { warnings: ["S3: verify actual argv calls in execution tests"] } });
+  });
+  await openApp(page);
+  await createDraftWithFakeAgent(page);
+
+  await expect(page.getByTestId("draft-preflight-status")).toContainText("S3: verify actual argv");
+  expect(checks).toBe(1);
+  await page.getByTestId("accept-draft-button").click();
+  await expect(page.getByTestId("skill-binding-status")).toContainText("e2e-calendar-skill");
 });
 
 test("neighbor save lint failures survive reload and request a neighbor-only repair", async ({ page, request }) => {

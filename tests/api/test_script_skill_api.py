@@ -748,6 +748,53 @@ def test_session_lint_and_save_use_the_script_form_rules(client, backend_main, f
 
 
 @pytest.mark.parametrize("eaa_accepts", [True, False])
+def test_draft_preflight_uses_saved_package_lint_without_writing(
+    client, backend_main, fake_sql, monkeypatch, eaa_accepts,
+) -> None:
+    packages = []
+
+    def lint_package(name, files):
+        packages.append((name, dict(files)))
+        return backend_main.EaaLintResult(
+            valid=eaa_accepts, errors=[] if eaa_accepts else ["S3: blocked"],
+            warnings=["S3: verify argv in tests"] if eaa_accepts else [],
+            ruleset_version="1.4",
+        )
+
+    monkeypatch.setattr(backend_main, "lint_skill_package", lint_package)
+    session = _script_session(backend_main, "original-name")
+    session.current_stage = "draft"
+    session.current_skill.version_hash = backend_main.compute_hash(session.current_skill.skill_md)
+    call = PendingToolCall(tool="propose_skill_draft", args={})
+    session.pending_tool_calls.append(call)
+    body = {"call_id": call.call_id, "version_hash": session.current_skill.version_hash, "name": "new-name"}
+    url = f"/api/sessions/{session.id}"
+    before = session.model_dump()
+
+    stale = client.post(f"{url}/draft/preflight", json={**body, "version_hash": "stale"})
+    assert stale.status_code == 409
+    assert not packages
+
+    response = client.post(f"{url}/draft/preflight", json=body)
+    assert response.status_code == (200 if eaa_accepts else 400), response.text
+    if eaa_accepts:
+        assert response.json() == {"warnings": ["S3: verify argv in tests"]}
+    else:
+        assert response.json()["detail"]["issues"] == ["S3: blocked"]
+    assert session.model_dump() == before
+    assert fake_sql.skills == {}
+    with pytest.raises(FileNotFoundError):
+        backend_main.store.load_skill("new-name")
+
+    saved = client.post(f"{url}/tool-result", json={
+        "tool_call_id": call.call_id, "result": {"action": "accept", "name": "new-name"},
+    })
+    assert saved.status_code == response.status_code, saved.text
+    assert len(packages) == 2 and packages[0] == packages[1]
+    assert packages[0][1]["scripts/new-name.py"] == SCRIPT
+
+
+@pytest.mark.parametrize("eaa_accepts", [True, False])
 def test_manual_arguments_warn_locally_and_still_require_eaa_verdict(
     client, backend_main, fake_sql, monkeypatch, eaa_accepts,
 ) -> None:

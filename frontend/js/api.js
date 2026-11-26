@@ -166,6 +166,16 @@ export async function updateSessionDraft(sessionId, draft) {
   return res.json();
 }
 
+export async function preflightSessionDraft(sessionId, draft) {
+  const res = await apiFetch(`/api/sessions/${sessionId}/draft/preflight`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(draft),
+  });
+  if (!res.ok) throw await responseError(res);
+  return res.json();
+}
+
 export async function undoSessionPatch(sessionId, patchId) {
   const res = await apiFetch(`/api/sessions/${sessionId}/patches/${encodeURIComponent(patchId)}/undo`, {
     method: "POST",

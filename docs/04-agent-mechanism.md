@@ -370,7 +370,7 @@ Agent 行使 `record_variables` 比照 0a 的 ACA 現有狀態分類歸檔：
 | 屬性 | 規格說明 |
 | --- | --- |
 | **Input (上下文)** | 完整的 Prepare Brief（定義、研究、三類變數、測試用例）、Peer Skills 名錄、`10_format_spec.md`。 |
-| **決策邏輯** | 草稿為空時發動 `propose_skill_draft`；若接受時被儲存 lint 擋下，前端會把 findings 交回 Agent，由它再送一次完整修正版（新卡片取代舊卡片）。大腦必須全力保證 YAML 格式合法（多國與 `:` 符號等引號包覆處理，避免 SQL 剖析 YAMLError）。 |
+| **決策邏輯** | 草稿為空時發動 `propose_skill_draft`。新草稿先跑正式儲存的 lint；有阻擋錯誤時，前端把所有 findings 一次交回 Agent，自動重送完整草稿最多一次。通過（含非阻擋警告）才開放接受與儲存。若修正版仍不通過或未改動，保留草稿並顯示原因，使用者可在 Files 修改後重新檢查。 |
 | **Output** | `propose_skill_draft` 工具調用（儲存成功前可重送修正版，`remote_skill_id` 存在後一律拒絕）。 |
 | **解鎖下一關條件** | 使用者在 UI 端予以接受（Accept Draft / 點選「儲存」），系統會儲存初版、執行 material fidelity 與 skill lint，隨即將 DRAFT 進展到 REFINE 狀態。 |
 
