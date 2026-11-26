@@ -37,15 +37,17 @@ The skills below do not appear in your `list_skills` catalog. **Not being in the
 
 ## S4 -- Step overview table
 
-| Step | Actor | Action | Host capability required? |
-|---|---|---|---|
-| 1 | Host | Establish one EAA Session, obtain and validate the shared case identifier, and retain it as workflow context. | No |
-| 2 | Host | Retrieve each declared child's contract once and retain the fetched sections for all continuation rounds. | Yes |
-| 3 | Backend | Run the OCR stage first. | No |
-| 4 | Backend | Run requirements analysis only after OCR succeeds. | No |
-| 5 | Host | Present the analysis-stage completion status and obtain explicit consent before an externally visible publication stage. | No |
-| 6 | Backend | Generate, validate, and publish deliverables only after OCR, analysis, and consent all succeed. | No |
-| 7 | Host | Aggregate the stage outcomes and provide a user-readable completion or stopped-workflow summary. | No |
+**Host-only capabilities:** None
+
+| Step | Actor | Action |
+|---|---|---|
+| 1 | Host | Establish one EAA Session, obtain and validate the shared case identifier, and retain it as workflow context. |
+| 2 | Host | Retrieve each declared child's contract once and retain the fetched sections for all continuation rounds. |
+| 3 | Backend | Run the OCR stage first. |
+| 4 | Backend | Run requirements analysis only after OCR succeeds. |
+| 5 | Host | Present the analysis-stage completion status and obtain explicit consent before an externally visible publication stage. |
+| 6 | Backend | Generate, validate, and publish deliverables only after OCR, analysis, and consent all succeed. |
+| 7 | Host | Aggregate the stage outcomes and provide a user-readable completion or stopped-workflow summary. |
 
 ## S5 -- Per-step detail
 

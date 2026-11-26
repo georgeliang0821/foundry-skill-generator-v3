@@ -40,7 +40,8 @@ apply only to `host`; for `eaa` follow the registered EAA owner addendum instead
   Silence there is indistinguishable from having forgotten it.
 - Build the body in EXACTLY the section order given in the Scenario Skill Format
   Spec: scenario-layer notice, fetch authorization, request-type table, not
-  applicable, step overview table, per-step detail, return-branch table,
+  applicable, Host-only capabilities declaration and step overview table,
+  per-step detail, return-branch table,
   boundary.
 - **Never emit `## Environment Variables`, `## OBO Token Scopes`, or
   `## API Reference / Sample Code`.** A scenario skill has no variables and no

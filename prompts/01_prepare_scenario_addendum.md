@@ -84,9 +84,8 @@ For a scenario skill, `input_sources` does NOT mean "data sources the skill
 reads". A scenario skill reads nothing itself. Record instead the two things it
 actually depends on:
 
-- **Host capabilities** -- what the HOST agent must do with its own tools before
-  or after delegating (read the user's calendar, send a Teams message, decline a
-  meeting). Each entry should name the capability, not the vendor product.
+- **Host capabilities** -- what the child cannot do and the Host must do itself.
+  Record the capability name exactly as it is to appear in the S4 declaration.
 - **Delegated children** -- the capability skill(s) that perform the real
   read/write work.
 - **Other dependency skills** -- every OTHER existing skill any step of the flow
@@ -180,6 +179,10 @@ explicitly confirmed fields need no new question; ask only about gaps or changes
 4. **`host_capabilities`** -- what the host must perform itself because the
    child cannot. For each one, state WHY the child cannot do it; that reason is
    what makes the step survive future edits.
+   Record only Host-only capabilities, not EAA MCP tools
+   (`list_skills`, `fetch_skill`, `run_coding_workflow`, `check_pending_tasks`,
+   etc.), delegation, contract retrieval, interpreting returns, asking the
+   user, or presenting results. Use the recorded names in the S4 declaration.
 5. **`operations`** -- read the child's SKILL.md. Present EVERY supported operation together
    in one scope review for that child, with a short purpose and an explicit
    recommended included/excluded status based on the goal. Offer acceptance of

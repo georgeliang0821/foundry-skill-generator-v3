@@ -96,7 +96,7 @@ _NEEDS_INFO_TEMPLATE = "[NEEDS_INFO] missing="
 _ERROR_KEY_RE = re.compile(r"[\"']error[\"'][ \t]*:[ \t]*[\"']([A-Za-z0-9_]+)[\"']")
 _SQL_THROW_RE = re.compile(r"\bTHROW[ \t]+\d|\bRAISERROR\b", re.IGNORECASE)
 _STEP_ROW_RE = re.compile(r"^\|[ \t]*(\d+)[ \t]*\|", re.MULTILINE)
-_STEP_HEADING_RE = re.compile(r"^Step[ \t]+(\d+)", re.IGNORECASE)
+_STEP_HEADING_RE = re.compile(r"^Step[ \t]+(\d+)\b", re.IGNORECASE)
 # The conventional payload key a child capability skill dispatches on.
 _OPERATION_KEY = "operation"
 
@@ -3463,10 +3463,9 @@ def _lint_scenario(
     host_capabilities: Sequence[str],
 ) -> list[LintIssue]:
     eaa = is_eaa_metadata(parse_frontmatter_meta(skill_md))
-    rows = _step_overview_rows(skill_md)
-    issues = _check_step_overview_values(rows, check_actor=not eaa)
+    issues: list[LintIssue] = []
     if not eaa:
-        issues.extend(_check_step_host_capability(skill_md, rows, host_capabilities))
+        issues.extend(_check_scenario_host_declaration(skill_md, host_capabilities))
     for name, child_md in (child_full_md or {}).items():
         if not eaa:
             issues.extend(_check_return_branches(skill_md, name, child_md))
@@ -3477,117 +3476,164 @@ def _lint_scenario(
 @dataclass(frozen=True)
 class _StepOverviewRow:
     step: int
-    actor: str | None
-    host_capability: str | None
+    actor: str
 
 
-def _step_overview_rows(skill_md: str) -> list[_StepOverviewRow]:
-    def cells(line: str) -> list[str]:
-        return [cell.strip() for cell in line.strip().removeprefix("|").removesuffix("|").split("|")]
+def _step_overview_rows(lines: Sequence[str], columns: Sequence[str]) -> list[_StepOverviewRow]:
+    actor_index = next((i for i, c in enumerate(columns) if c in {"actor", "執行者"}), None)
+    if actor_index is None:
+        return []
+    rows = []
+    for line in lines:
+        match = _STEP_ROW_RE.match(line)
+        if match:
+            row = _step_overview_cells(line)
+            rows.append(_StepOverviewRow(int(match.group(1)), row[actor_index] if actor_index < len(row) else ""))
+    return rows
 
-    def value(row: list[str], index: int | None) -> str | None:
-        if index is None:
+
+def _step_overview_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.removeprefix("|").removesuffix("|").split("|")]
+
+
+_HOST_DECLARATION_LABEL_RE = re.compile(r"^(?:\*\*)?(?:Host-only capabilities|宿主專屬能力)", re.IGNORECASE)
+_HOST_DECLARATION_RE = re.compile(r"^\*\*(Host-only capabilities:|宿主專屬能力：)\*\*\s+(.+)$", re.IGNORECASE)
+_EAA_MCP_TOOL_RE = re.compile(
+    r"\b(?:list_skills|fetch_skill|run_coding_workflow|check_pending_tasks|"
+    r"cancel_pending_task|clear_session|sync_skills|lint_skill_package)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_host_declaration(line: str) -> dict[str, set[int]] | None:
+    match = _HOST_DECLARATION_RE.fullmatch(line)
+    if not match:
+        return None
+    label, value = match.groups()
+    chinese = label.endswith("：")
+    if value.casefold() == ("無" if chinese else "none"):
+        return {}
+    separator, step_separator, opening, closing = ("；", "、", "（", "）") if chinese else (";", ",", "(", ")")
+    step = r"Step\s+[1-9][0-9]*"
+    entry = re.compile(
+        rf"(.+?)\s*{re.escape(opening)}({step}(?:\s*{step_separator}\s*{step})*){re.escape(closing)}",
+        re.IGNORECASE,
+    )
+    declared: dict[str, set[int]] = {}
+    for part in value.split(separator):
+        match = entry.fullmatch(part.strip())
+        if not match or not (name := match.group(1).strip()):
             return None
-        return row[index] if index < len(row) else ""
+        declared.setdefault(name, set()).update(int(n) for n in re.findall(r"[0-9]+", match.group(2)))
+    return declared
 
-    for _level, title, body in _sections(skill_md):
-        if "step overview" not in title.lower():
+
+def _scenario_step_details(skill_md: str) -> dict[int, list[str]]:
+    """Collect each Step heading's subtree without changing the shared section parser."""
+    headings = list(re.finditer(
+        r"^(#{1,6})[ \t]+([^\r\n]+?)[ \t]*\r?$|^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n"
+        r".*?^[ \t]{0,3}\3[`~]*[ \t]*\r?$",
+        skill_md,
+        re.MULTILINE | re.DOTALL,
+    ))
+    headings = [heading for heading in headings if heading.group(1)]
+    details: dict[int, list[str]] = {}
+    for i, heading in enumerate(headings):
+        match = _STEP_HEADING_RE.match(heading.group(2))
+        if not match:
             continue
-        lines = [line.strip() for line in body.splitlines() if line.strip().startswith("|")]
-        if not lines:
-            continue
-        columns = [cell.casefold() for cell in cells(lines[0])]
-        actor_index = next((i for i, c in enumerate(columns) if c in {"actor", "執行者"}), None)
-        capability_index = next((i for i, c in enumerate(columns) if "host capability" in c), None)
-        if actor_index is None and capability_index is None:
-            continue
-        rows = []
-        for line in lines[1:]:
-            match = _STEP_ROW_RE.match(line)
-            if match:
-                row = cells(line)
-                rows.append(_StepOverviewRow(int(match.group(1)), value(row, actor_index), value(row, capability_index)))
-        return rows
-    return []
+        level = len(heading.group(1))
+        end = next(
+            (following.start() for following in headings[i + 1:] if len(following.group(1)) <= level),
+            len(skill_md),
+        )
+        details.setdefault(int(match.group(1)), []).append(_normalize(skill_md[heading.end():end]))
+    return details
 
 
-def _host_capability_flag(value: str) -> bool | None:
-    normalized = value.strip().casefold()
-    if normalized.startswith(("yes", "是")):
-        return True
-    if normalized.startswith(("no", "否")):
-        return False
-    return None
-
-
-def _check_step_overview_values(rows: Sequence[_StepOverviewRow], *, check_actor: bool) -> list[LintIssue]:
-    issues = []
-    for row in rows:
-        if check_actor and row.actor is not None and row.actor.casefold() not in {"host", "backend"}:
+def _check_scenario_host_declaration(
+    skill_md: str, host_capabilities: Sequence[str],
+) -> list[LintIssue]:
+    sections = _sections(skill_md)
+    overview = next(
+        (body for _, title, body in sections
+         if "step overview" in title.casefold() or re.match(r"^S4\b", title, re.IGNORECASE)
+         or "步驟總覽" in title),
+        None,
+    )
+    lines = [line.strip() for line in (overview or "").splitlines()]
+    table_at = next((i for i, line in enumerate(lines) if line.startswith("|")), len(lines))
+    table = [line for line in lines[table_at:] if line.startswith("|")]
+    columns = [cell.casefold() for cell in _step_overview_cells(table[0])] if table else []
+    issues: list[LintIssue] = []
+    for row in _step_overview_rows(table[1:], columns):
+        if row.actor.casefold() not in {"host", "backend"}:
             issues.append(LintIssue(
                 rule="B5",
                 message=f"Step {row.step} has actor {row.actor!r}; use Host or Backend.",
                 detail=f"step {row.step}: {row.actor!r}",
             ))
-        if row.host_capability is not None and _host_capability_flag(row.host_capability) is None:
-            issues.append(LintIssue(
-                rule="B6",
-                message=f"Step {row.step} has host capability value {row.host_capability!r}; use Yes/No or 是/否.",
-                detail=f"step {row.step}: {row.host_capability!r}",
-            ))
-    return issues
+    if any("host capability" in column for column in columns):
+        issues.append(LintIssue(
+            rule="B10",
+            message="Remove the old S4 host capability column and use the Host-only capabilities declaration instead.",
+        ))
 
-
-def _check_step_host_capability(
-    skill_md: str, rows: Sequence[_StepOverviewRow], host_capabilities: Sequence[str],
-) -> list[LintIssue]:
-    """B1 -- the overview flag must agree with the recorded capabilities named in the step detail."""
-    flags = {
-        row.step: _host_capability_flag(row.host_capability)
-        for row in rows
-        if row.host_capability is not None
-    }
-    if not flags:
-        return []
-
-    capabilities = [(name, _normalize(name)) for c in host_capabilities if (name := str(c).strip())]
-    matches: dict[int, str] = {}
-    if capabilities:
-        for _level, title, body in _sections(skill_md):
-            match = _STEP_HEADING_RE.match(title.strip())
-            if not match:
-                continue
-            step = int(match.group(1))
-            normalized = _normalize(body)
-            for name, capability in capabilities:
-                if capability and capability in normalized:
-                    matches.setdefault(step, name)
-                    break
-
-    issues = [
-        LintIssue(
-            rule="B1",
-            message=(
-                f"Step {step} is not marked as needing a host capability, but its "
-                f"detail section tells the host to use `{capability}`."
-            ),
-            detail=f"step {step}: {capability}",
-        )
-        for step, capability in matches.items()
-        if flags.get(step) is not True
+    # Legacy Host workflows may declare capabilities before a prose flow instead of an S4 table.
+    candidates = lines[:table_at] if overview is not None else [
+        line.strip() for _, _, body in sections for line in body.splitlines()
     ]
-    issues.extend(
-        LintIssue(
-            rule="B1",
-            message=(
-                f"Step {step} is marked as needing a host capability, but its "
-                "detail section does not name any recorded host capability."
-            ),
-            detail=f"step {step}: no recorded host capability named",
-        )
-        for step, flag in flags.items()
-        if flag is True and step not in matches
-    )
+    declarations = [line for line in candidates if _HOST_DECLARATION_LABEL_RE.match(line)]
+    if overview is None and not declarations:
+        return issues
+    declared = _parse_host_declaration(declarations[0]) if len(declarations) == 1 else None
+    if declared is None:
+        issues.append(LintIssue(
+            rule="B7",
+            message="Add one valid Host-only capabilities declaration above the S4 table.",
+        ))
+        return issues
+
+    recorded = {name for cap in host_capabilities if (name := cap.strip())}
+    for name in sorted(declared):
+        if _EAA_MCP_TOOL_RE.search(name):
+            issues.append(LintIssue(
+                rule="B8",
+                message=f"`{name}` names an EAA MCP tool, not a Host-only capability.",
+                detail=name,
+            ))
+    missing, unrecorded = recorded - declared.keys(), declared.keys() - recorded
+    if recorded and (missing or unrecorded):
+        issues.append(LintIssue(
+            rule="B8",
+            message="The Host-only capabilities declaration must match the recorded capabilities.",
+            detail=f"missing: {', '.join(sorted(missing)) or 'none'}; "
+                   f"unrecorded: {', '.join(sorted(unrecorded)) or 'none'}",
+        ))
+
+    details = _scenario_step_details(skill_md)
+    declared_steps: dict[str, set[int]] = {}
+    for name, steps in declared.items():
+        name = _normalize(name)
+        if not name:
+            continue
+        declared_steps.setdefault(name, set()).update(steps)
+        for step in sorted(steps):
+            if not any(name in text for text in details.get(step, ())):
+                issues.append(LintIssue(
+                    rule="B9",
+                    message=f"Step {step} detail does not name the declared capability `{name}`.",
+                    detail=f"step {step}: {name}",
+                ))
+    normalized_recorded = sorted({_normalize(cap) for cap in recorded} - {""})
+    for step, bodies in details.items():
+        for name in normalized_recorded:
+            if any(name in body for body in bodies) and step not in declared_steps.get(name, ()):
+                issues.append(LintIssue(
+                    rule="B9",
+                    message=f"Step {step} names recorded capability `{name}` but the declaration does not list that step.",
+                    detail=f"step {step}: {name}",
+                ))
     return issues
 
 

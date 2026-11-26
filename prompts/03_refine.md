@@ -120,9 +120,11 @@ content and the metadata always stay consistent.
     defaulted read of `EAA_VERIFIED_USER_UPN` (I2), a `try` that recovers from
     its `KeyError` (I3), the verified identity reaching a log or output call
     (I4).
-  - Scenario: a step whose host-capability column contradicts its detail (B1), a
-    child branch with no row in the return-branch table (B2), or a child
-    operation the scenario never mentions (B4).
+  - Scenario: an invalid S4 actor (B5), a missing or invalid Host-only
+    capabilities declaration (B7), a mismatch with recorded capabilities or an
+    EAA MCP tool in that declaration (B8), a mismatch with S5 step details (B9),
+    a leftover per-step capability column (B10), a child branch with no row in
+    the return-branch table (B2), or a child operation never mentioned (B4).
 
   Patch each one, or state plainly why it is a false positive. Do not propose
   the next stage with findings left unexplained.

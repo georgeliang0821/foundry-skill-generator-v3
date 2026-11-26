@@ -49,6 +49,8 @@ metadata:
 
 ## submit_request 完整流程
 
+**宿主專屬能力：** Work IQ Calendar（Step 1、Step 5）
+
 ```
 Step 1  宿主   讀取請假區間的行事曆              ← 需要 M365 存取能力
 Step 2  宿主   組 payload,呼叫 run_coding_workflow

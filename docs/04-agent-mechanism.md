@@ -9,6 +9,8 @@
 
 ### Scenario 的 Host／EAA owner
 
+如果你正在撰寫由多個能力技能組成的情境，請參考[Scenario 與多 capability 設計指引](./scenario-multi-capability-guide.md)。
+
 Scenario 的作者選擇保存在 session `orchestration_owner`，不是模型自行推斷的執行模式。
 只有 scenario 會把 owner 寫入產物；既有未宣告 owner 的 Host 技能保留省略形式。
 `SCENARIO_OWNER_ADDENDA` 註冊 [18_scenario_ownership.md](../prompts/18_scenario_ownership.md)
@@ -197,9 +199,11 @@ request。拿不準時選 credentials，這也是預設值。
 [prompts/12_input_sources.md](../prompts/12_input_sources.md)；對應的 lint 規則 `A13` / `A14` 在
 [skill_lint.py](../backend/skill_lint.py)。
 
-#### Scenario 步驟表檢查（B1、B5、B6）
+#### Scenario 步驟表與宿主專屬能力宣告（B5、B7–B10）
 
-Generator 會檢查 S4 `Step overview` 表，這些結果都是 **warning**，不會因這些規則阻擋儲存。B5 檢查 `Actor`／`執行者` 欄只填 `Host` 或 `Backend`。B6 檢查含 `Host capability` 的欄位以 `Yes`／`是` 或 `No`／`否` 開頭。B1 對照 S5 的 `Step N` 說明：點名已記錄的 Host capability 就應標肯定；標肯定卻未點名任何已記錄的能力也會警告，包括能力清單為空時。EAA owner 跳過 B1、B5；若仍有這個表格和旗標欄，B6 照常檢查。這些是 [Generator 本地 lint](../backend/skill_lint.py)，不改變 EAA runtime 的規則。
+Host 情境的 S4 表只有「步驟／執行者／工作」三欄，表格上方用一行宣告宿主專屬能力與對應步驟。宿主專屬能力是 child 無法做、必須由 Host 自己做的事；宣告名稱必須與該技能 PREPARE 階段記錄的 `host_capabilities` 逐字相同。沒有能力就寫 `**宿主專屬能力：** 無` 或 `**Host-only capabilities:** None`。S2 仍說明請求需要的前置工作；有前置工作不代表需要專屬能力。EAA MCP 工具（如 `list_skills`、`fetch_skill`、`run_coding_workflow`、`check_pending_tasks`）、委派、取契約、判讀回傳、詢問使用者和呈現結果都不列入宣告。
+
+這些 [Generator 本地 lint](../backend/skill_lint.py) 結果都是 **warning**，不會阻擋儲存，也不改變 EAA runtime。B5 檢查執行者只能填 `Host` 或 `Backend`；B7 檢查宣告是否缺漏或格式無效；B8 逐字比對已記錄的能力名稱（忽略首尾空白；沒有記錄時不比對，但仍排除 EAA MCP 工具）；B9 雙向對照宣告與步驟詳情，兩個方向都包含步驟的子節，並在下一個同層或更高層標題停止；B10 提醒移除舊的逐列能力欄。無 S4 的舊流程不強制補表格，但有宣告時仍檢查。EAA owner 跳過這些檢查。
 
 #### EAA 平台規則（D4–D8、A15）
 

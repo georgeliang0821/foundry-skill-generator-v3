@@ -158,7 +158,10 @@ Each section is a numbered rule so it can be cited directly in review.
 3. **S2 -- Request-type table** -- one row per request the scenario covers: what
    the user wants, the child `operation` (or equivalent selector), and whether
    host pre-work is required. Readers must be able to tell in one glance which
-   requests are single-turn. Every operation the child supports must be
+   requests are single-turn. For a request that reaches a step listed in the
+   S4 Host-only capabilities declaration, reflect that requirement and any
+   conditions in the S2 pre-work column. Ordinary pre-work may still be needed
+   even when S4 declares no Host-only capabilities. Every operation the child supports must be
    accounted for: either it has a row here, or S3 says why this scenario does
    not do it. An operation named in neither is a child capability the host can
    never reach through this scenario, and nothing at runtime reports it.
@@ -167,14 +170,26 @@ Each section is a numbered rule so it can be cited directly in review.
   Do not name alternatives or dependency skills here. List, with its reason,
   every child operation deliberately left out of S2. For mixed requests,
   complete only the portion covered by this scenario.
-5. **S4 -- Step overview table** -- the whole flow as a numbered list of steps,
-   each labelled with its actor (host or backend) and marked when it needs a
-   host capability. This column must agree with the rest of the file: if a
-   step's detail section names a host tool or MCP capability, that step's row
-   MUST be marked as requiring a host capability, and the S2 pre-work column
-   for the requests that reach that step must agree. A step marked "No" that
-   later tells the host to call one of its own tools is a contradiction the
-   host cannot plan around.
+5. **S4 -- Step overview table** -- put exactly one declaration line above
+   the numbered table. Use the form matching the skill's language:
+
+   ```markdown
+   **Host-only capabilities:** None
+   **Host-only capabilities:** <capability> (Step N, Step M); <capability> (Step K)
+   **宿主專屬能力：** 無
+   **宿主專屬能力：** <capability>（Step N、Step M）；<capability>（Step K）
+   ```
+
+   Use one entry per capability, copying its name exactly from PREPARE `host_capabilities`,
+   listing every step whose S5 detail names it. A capability may have one step
+   or several; omit unused entries and separators. Host-only capabilities are
+   tasks the child cannot do and the Host must do itself.
+   Do not list EAA MCP tools (`list_skills`, `fetch_skill`, `run_coding_workflow`,
+   `check_pending_tasks`, etc.), delegation, contract retrieval, return-branch
+   interpretation, asking the user, or presenting results.
+
+   The table has only `Step | Actor | Action` (or `步驟 | 執行者 | 工作`).
+   Label each actor `Host` or `Backend`; do not add a per-step capability column.
 6. **S5 -- Per-step detail** -- one section per step that needs it. Cover:
    - **Host pre-work**: exactly which data the host must fetch itself, and every
      field that must be carried on each item.
