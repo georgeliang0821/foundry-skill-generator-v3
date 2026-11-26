@@ -3463,7 +3463,10 @@ def _lint_scenario(
     host_capabilities: Sequence[str],
 ) -> list[LintIssue]:
     eaa = is_eaa_metadata(parse_frontmatter_meta(skill_md))
-    issues = [] if eaa else _check_step_host_capability(skill_md, host_capabilities)
+    rows = _step_overview_rows(skill_md)
+    issues = _check_step_overview_values(rows, check_actor=not eaa)
+    if not eaa:
+        issues.extend(_check_step_host_capability(skill_md, rows, host_capabilities))
     for name, child_md in (child_full_md or {}).items():
         if not eaa:
             issues.extend(_check_return_branches(skill_md, name, child_md))
@@ -3471,65 +3474,120 @@ def _lint_scenario(
     return issues
 
 
-def _step_capability_flags(skill_md: str) -> dict[int, bool]:
-    """Step number -> whether its overview row claims a host capability is needed."""
+@dataclass(frozen=True)
+class _StepOverviewRow:
+    step: int
+    actor: str | None
+    host_capability: str | None
+
+
+def _step_overview_rows(skill_md: str) -> list[_StepOverviewRow]:
+    def cells(line: str) -> list[str]:
+        return [cell.strip() for cell in line.strip().removeprefix("|").removesuffix("|").split("|")]
+
+    def value(row: list[str], index: int | None) -> str | None:
+        if index is None:
+            return None
+        return row[index] if index < len(row) else ""
+
     for _level, title, body in _sections(skill_md):
         if "step overview" not in title.lower():
             continue
-        rows = [line for line in body.splitlines() if line.strip().startswith("|")]
-        header = next((r for r in rows if "host capability" in r.lower()), "")
-        if not header:
+        lines = [line.strip() for line in body.splitlines() if line.strip().startswith("|")]
+        if not lines:
             continue
-        columns = [c.strip() for c in header.strip().strip("|").split("|")]
-        index = next(
-            (i for i, c in enumerate(columns) if "host capability" in c.lower()), None
-        )
-        if index is None:
+        columns = [cell.casefold() for cell in cells(lines[0])]
+        actor_index = next((i for i, c in enumerate(columns) if c in {"actor", "執行者"}), None)
+        capability_index = next((i for i, c in enumerate(columns) if "host capability" in c), None)
+        if actor_index is None and capability_index is None:
             continue
-        flags: dict[int, bool] = {}
-        for row in rows:
-            cells = [c.strip() for c in row.strip().strip("|").split("|")]
-            if len(cells) <= index or not _STEP_ROW_RE.match(row):
-                continue
-            flags[int(cells[0])] = cells[index].lower().startswith("yes")
-        return flags
-    return {}
+        rows = []
+        for line in lines[1:]:
+            match = _STEP_ROW_RE.match(line)
+            if match:
+                row = cells(line)
+                rows.append(_StepOverviewRow(int(match.group(1)), value(row, actor_index), value(row, capability_index)))
+        return rows
+    return []
+
+
+def _host_capability_flag(value: str) -> bool | None:
+    normalized = value.strip().casefold()
+    if normalized.startswith(("yes", "是")):
+        return True
+    if normalized.startswith(("no", "否")):
+        return False
+    return None
+
+
+def _check_step_overview_values(rows: Sequence[_StepOverviewRow], *, check_actor: bool) -> list[LintIssue]:
+    issues = []
+    for row in rows:
+        if check_actor and row.actor is not None and row.actor.casefold() not in {"host", "backend"}:
+            issues.append(LintIssue(
+                rule="B5",
+                message=f"Step {row.step} has actor {row.actor!r}; use Host or Backend.",
+                detail=f"step {row.step}: {row.actor!r}",
+            ))
+        if row.host_capability is not None and _host_capability_flag(row.host_capability) is None:
+            issues.append(LintIssue(
+                rule="B6",
+                message=f"Step {row.step} has host capability value {row.host_capability!r}; use Yes/No or 是/否.",
+                detail=f"step {row.step}: {row.host_capability!r}",
+            ))
+    return issues
 
 
 def _check_step_host_capability(
-    skill_md: str, host_capabilities: Sequence[str]
+    skill_md: str, rows: Sequence[_StepOverviewRow], host_capabilities: Sequence[str],
 ) -> list[LintIssue]:
-    """B1 -- a step whose detail names a host capability must be marked as needing one."""
-    capabilities = [c for c in (str(c).strip() for c in host_capabilities or []) if c]
-    flags = _step_capability_flags(skill_md)
-    if not capabilities or not flags:
+    """B1 -- the overview flag must agree with the recorded capabilities named in the step detail."""
+    flags = {
+        row.step: _host_capability_flag(row.host_capability)
+        for row in rows
+        if row.host_capability is not None
+    }
+    if not flags:
         return []
 
-    issues: list[LintIssue] = []
-    seen: set[int] = set()
-    for _level, title, body in _sections(skill_md):
-        match = _STEP_HEADING_RE.match(title.strip())
-        if not match:
-            continue
-        step = int(match.group(1))
-        if flags.get(step, False) or step in seen:
-            continue
-        normalized = _normalize(body)
-        for capability in capabilities:
-            if _normalize(capability) and _normalize(capability) in normalized:
-                seen.add(step)
-                issues.append(
-                    LintIssue(
-                        rule="B1",
-                        message=(
-                            f"Step {step} is marked as needing no host capability, but its "
-                            f"detail section tells the host to use `{capability}`. The host "
-                            "cannot plan a step the overview table says it is not involved in."
-                        ),
-                        detail=f"step {step}: {capability}",
-                    )
-                )
-                break
+    capabilities = [(name, _normalize(name)) for c in host_capabilities if (name := str(c).strip())]
+    matches: dict[int, str] = {}
+    if capabilities:
+        for _level, title, body in _sections(skill_md):
+            match = _STEP_HEADING_RE.match(title.strip())
+            if not match:
+                continue
+            step = int(match.group(1))
+            normalized = _normalize(body)
+            for name, capability in capabilities:
+                if capability and capability in normalized:
+                    matches.setdefault(step, name)
+                    break
+
+    issues = [
+        LintIssue(
+            rule="B1",
+            message=(
+                f"Step {step} is not marked as needing a host capability, but its "
+                f"detail section tells the host to use `{capability}`."
+            ),
+            detail=f"step {step}: {capability}",
+        )
+        for step, capability in matches.items()
+        if flags.get(step) is not True
+    ]
+    issues.extend(
+        LintIssue(
+            rule="B1",
+            message=(
+                f"Step {step} is marked as needing a host capability, but its "
+                "detail section does not name any recorded host capability."
+            ),
+            detail=f"step {step}: no recorded host capability named",
+        )
+        for step, flag in flags.items()
+        if flag is True and step not in matches
+    )
     return issues
 
 

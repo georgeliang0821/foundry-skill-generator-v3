@@ -80,7 +80,12 @@ def test_inline_lint_is_unchanged(name: str) -> None:
     else:
         md = (REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
         md = md.replace("skill_type: script", "skill_type: inline")
-        issues = lint_skill(md, kind)
+        host_capabilities = (
+            ["Work IQ Calendar MCP occurrences", "meeting capability"]
+            if name == "leave-request-orchestration"
+            else []
+        )
+        issues = lint_skill(md, kind, host_capabilities=host_capabilities)
         topology = validate_topology(md, kind, mode=Mode.NEW, expected_name=name)
         assert [
             {"rule": i.rule, "severity": i.severity.value, "message": i.message} for i in topology

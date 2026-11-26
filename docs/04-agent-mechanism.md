@@ -197,6 +197,10 @@ request。拿不準時選 credentials，這也是預設值。
 [prompts/12_input_sources.md](../prompts/12_input_sources.md)；對應的 lint 規則 `A13` / `A14` 在
 [skill_lint.py](../backend/skill_lint.py)。
 
+#### Scenario 步驟表檢查（B1、B5、B6）
+
+Generator 會檢查 S4 `Step overview` 表，這些結果都是 **warning**，不會因這些規則阻擋儲存。B5 檢查 `Actor`／`執行者` 欄只填 `Host` 或 `Backend`。B6 檢查含 `Host capability` 的欄位以 `Yes`／`是` 或 `No`／`否` 開頭。B1 對照 S5 的 `Step N` 說明：點名已記錄的 Host capability 就應標肯定；標肯定卻未點名任何已記錄的能力也會警告，包括能力清單為空時。EAA owner 跳過 B1、B5；若仍有這個表格和旗標欄，B6 照常檢查。這些是 [Generator 本地 lint](../backend/skill_lint.py)，不改變 EAA runtime 的規則。
+
 #### EAA 平台規則（D4–D8、A15）
 
 EAA 從 skill 執行環境拿掉平台 secret、丟棄特定 caller 鍵名，且不再預設使用 Managed Identity；S3 的 MI 閘門（`MI_GATE_ENABLED`）只替「本輪已載入、且在 frontmatter 宣告 `metadata.mi_scopes`」的 skill 發 MI token，而且只限宣告過的資源。除特別註明者外，以下規則都是 **error**，會擋下儲存（實作：[skill_lint.py](../backend/skill_lint.py)、[eaa_platform.py](../backend/eaa_platform.py)；規則文字在 [10_format_spec.md](../prompts/10_format_spec.md) 的 The Managed Identity Contract 與 Platform-Reserved Names）：

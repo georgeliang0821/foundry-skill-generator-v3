@@ -782,15 +782,117 @@ def test_authored_capability_reports_its_known_defects(capability_md: str) -> No
 def test_authored_scenario_reports_the_step_table_contradiction(
     scenario_md: str, capability_md: str
 ) -> None:
+    # Reintroduce the old Step 2 contradiction only in the regression input.
+    scenario_md = scenario_md.replace(
+        "and invoke `hr-leave-requests`. | Yes |", "and invoke `hr-leave-requests`. | No |",
+    )
     issues = lint_skill(
         scenario_md,
         SkillKind.SCENARIO,
         child_full_md={"hr-leave-requests": capability_md},
-        host_capabilities=["Work IQ Calendar MCP occurrences"],
+        host_capabilities=["Work IQ Calendar MCP occurrences", "meeting capability"],
     )
     b1 = [i for i in issues if i.rule == "B1"]
     assert len(b1) == 1
     assert b1[0].detail == "step 2: Work IQ Calendar MCP occurrences"
+
+
+def _scenario_step_table(
+    actor: str, flag: str, detail: str = "", *, actor_header: str = "Actor", owner: str = "host",
+) -> str:
+    return f"""---
+metadata:
+  skill_type: scenario-orchestration
+  orchestration_owner: {owner}
+---
+## S4 -- Step overview table
+
+| Step | {actor_header} | Action | 需要 Host capability |
+| --- | --- | --- | --- |
+| 1 | {actor} | Run a step. | {flag} |
+
+## S5 -- Per-step detail
+
+### Step 1 — run a step
+
+{detail}
+"""
+
+
+@pytest.mark.parametrize("actor_header", ["Actor", "aCtOr", "執行者"])
+@pytest.mark.parametrize("actor", ["Host", "Backend", " host "])
+def test_scenario_step_actor_accepts_host_and_backend(actor: str, actor_header: str) -> None:
+    md = _scenario_step_table(actor, "No", actor_header=actor_header)
+    assert not [i for i in lint_skill(md, SkillKind.SCENARIO) if i.rule == "B5"]
+
+
+@pytest.mark.parametrize("actor", ["Host／Backend", "Host/Backend", ""])
+def test_scenario_step_actor_warns_for_invalid_values(actor: str) -> None:
+    md = _scenario_step_table(actor, "No", actor_header="執行者")
+    findings = [i for i in lint_skill(md, SkillKind.SCENARIO) if i.rule == "B5"]
+    assert [(i.severity, i.detail) for i in findings] == [("warning", f"step 1: {actor!r}")]
+    assert "Step 1" in findings[0].message and repr(actor) in findings[0].message
+
+
+@pytest.mark.parametrize("owner", ["host", "eaa"])
+def test_scenario_step_capability_warns_for_invalid_values(owner: str) -> None:
+    for flag in ["Maybe", ""]:
+        md = _scenario_step_table("Host", flag, owner=owner)
+        findings = [i for i in lint_skill(md, SkillKind.SCENARIO) if i.rule == "B6"]
+        assert [(i.severity, i.detail) for i in findings] == [("warning", f"step 1: {flag!r}")]
+
+
+@pytest.mark.parametrize("flag", ["Yes", " yES — calendar ", "是", "是，需讀行事曆"])
+def test_scenario_step_affirmative_requires_a_recorded_capability(flag: str) -> None:
+    md = _scenario_step_table("Host", flag, "Ask for consent.")
+    for capabilities in [[], ["Work IQ Calendar"]]:
+        findings = [i for i in lint_skill(md, SkillKind.SCENARIO, host_capabilities=capabilities)
+                    if i.rule in {"B1", "B6"}]
+        assert [(i.rule, i.severity, i.detail) for i in findings] == [
+            ("B1", "warning", "step 1: no recorded host capability named"),
+        ]
+
+    md = _scenario_step_table("Host", flag, "Read through Work IQ Calendar.")
+    assert not [i for i in lint_skill(md, SkillKind.SCENARIO, host_capabilities=["Work IQ Calendar"])
+                if i.rule in {"B1", "B6"}]
+
+
+@pytest.mark.parametrize("flag", ["No", " nO — backend ", "否", "否，不需行事曆"])
+def test_scenario_step_negative_conflicts_with_named_capability(flag: str) -> None:
+    md = _scenario_step_table("Host", flag, "Read through Work IQ Calendar.")
+    assert not [i for i in lint_skill(md, SkillKind.SCENARIO) if i.rule in {"B1", "B6"}]
+    findings = [i for i in lint_skill(md, SkillKind.SCENARIO, host_capabilities=["Work IQ Calendar"])
+                if i.rule in {"B1", "B6"}]
+    assert [(i.rule, i.severity, i.detail) for i in findings] == [
+        ("B1", "warning", "step 1: Work IQ Calendar"),
+    ]
+
+
+def test_scenario_step_overview_skips_missing_table_or_actor_column() -> None:
+    md = _scenario_step_table("Host／Backend", "No", "Read through Work IQ Calendar.")
+    no_table = md.replace("Step overview table", "Other notes")
+    assert not [i for i in lint_skill(no_table, SkillKind.SCENARIO, host_capabilities=["Work IQ Calendar"])
+                if i.rule in {"B1", "B5", "B6"}]
+
+    no_actor_column = md.replace("| Actor |", "| Other column |")
+    assert [i.rule for i in lint_skill(no_actor_column, SkillKind.SCENARIO,
+                                     host_capabilities=["Work IQ Calendar"])
+            if i.rule in {"B1", "B5", "B6"}] == ["B1"]
+
+
+def test_eaa_scenario_step_overview_skips_actor_and_capability_consistency() -> None:
+    md = _scenario_step_table("Host／Backend", "是", owner="eaa")
+    assert not [i for i in lint_skill(md, SkillKind.SCENARIO) if i.rule in {"B1", "B5", "B6"}]
+
+
+@pytest.mark.parametrize(("skill", "capabilities"), [
+    ("leave-request-orchestration", ["Work IQ Calendar MCP occurrences", "meeting capability"]),
+    ("procurement-workflow", ["fetch_skill"]),
+])
+def test_reference_scenario_step_overview_has_no_warnings(skill: str, capabilities: list[str]) -> None:
+    md = (REPO / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+    assert not [i for i in lint_skill(md, SkillKind.SCENARIO, host_capabilities=capabilities)
+                if i.rule in {"B1", "B5", "B6"}]
 
 
 def test_authored_scenario_return_branch_table_is_currently_exhaustive(

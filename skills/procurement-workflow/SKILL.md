@@ -39,13 +39,13 @@ The skills below do not appear in your `list_skills` catalog. **Not being in the
 
 | Step | Actor | Action | Host capability required? |
 |---|---|---|---|
-| 1 | Host | Establish one EAA Session, obtain and validate the shared case identifier, and retain it as workflow context. | Yes |
+| 1 | Host | Establish one EAA Session, obtain and validate the shared case identifier, and retain it as workflow context. | No |
 | 2 | Host | Retrieve each declared child's contract once and retain the fetched sections for all continuation rounds. | Yes |
 | 3 | Backend | Run the OCR stage first. | No |
 | 4 | Backend | Run requirements analysis only after OCR succeeds. | No |
-| 5 | Host | Present the analysis-stage completion status and obtain explicit consent before an externally visible publication stage. | Yes |
+| 5 | Host | Present the analysis-stage completion status and obtain explicit consent before an externally visible publication stage. | No |
 | 6 | Backend | Generate, validate, and publish deliverables only after OCR, analysis, and consent all succeed. | No |
-| 7 | Host | Aggregate the stage outcomes and provide a user-readable completion or stopped-workflow summary. | Yes |
+| 7 | Host | Aggregate the stage outcomes and provide a user-readable completion or stopped-workflow summary. | No |
 
 ## S5 -- Per-step detail
 

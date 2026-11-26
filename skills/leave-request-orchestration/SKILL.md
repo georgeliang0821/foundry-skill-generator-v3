@@ -32,7 +32,7 @@ This is a scenario-orchestration skill and is not executed by the backend. It in
 | Step | Actor | Action | Host capability required? |
 | --- | --- | --- | --- |
 | 1 | Host | Identify the request type and obtain any user-supplied leave-request details needed for the selected operation. | No |
-| 2 | Host | For a leave submission, assemble the delegated payload and invoke `hr-leave-requests`. | No |
+| 2 | Host | For a leave submission, assemble the delegated payload and invoke `hr-leave-requests`. | Yes |
 | 3 | Backend | Validate the payload, validate calendar event IDs, detect conflicts, check leave rules and balance, then read or write HR leave records. | No |
 | 4 | Host | Interpret the child return branch, including any required same-session retry. | No |
 | 5 | Host | After successful leave submission only, ask whether to handle affected meetings and act only after explicit consent. | Yes |
