@@ -3833,6 +3833,26 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                     with log_timing("chat.phase", phase="tool_effect", tool=data.get("tool"), call_id=data.get("call_id")):
                         apply_tool_effect(session, data["tool"], data.get("args", {}))
                 except QualityGateError as qge:
+                    session.conversation.append(
+                        ChatMessage(
+                            role=MessageRole.SYSTEM,
+                            content=(
+                                f"Quality gate failed in '{session.current_stage}'; transition was not applied. "
+                                f"Missing requirements: {', '.join(qge.missing)}."
+                            ),
+                            metadata={
+                                "tool": data.get("tool"),
+                                "missing": list(qge.missing),
+                                "recoverable_error": str(qge),
+                                "recovery_action": "complete_requirements",
+                            },
+                        )
+                    )
+                    session.touch()
+                    call_id = data.get("call_id")
+                    session.pending_tool_calls = [
+                        call for call in session.pending_tool_calls if call.call_id != call_id
+                    ]
                     log_event(
                         "chat.quality_gate_failed",
                         level="warning",
@@ -3845,6 +3865,8 @@ async def _chat_turn(session_id: str, req: ChatRequest, upn: str) -> dict[str, A
                         "missing": list(qge.missing),
                         "message": str(qge),
                     }})
+                    with log_timing("chat.phase", phase="rejected_tool_persist", call_id=call_id):
+                        persist_session(session)
                     continue
                 except ValueError as rejected:
                     # Recoverable tool effect (e.g. invalid stage transition).

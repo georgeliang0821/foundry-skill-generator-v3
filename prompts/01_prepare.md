@@ -249,8 +249,14 @@ omit filler like "the user said" repeated for every line.
 5. Call `record_understanding` with: `skill_goal`, `key_capabilities`,
    `differentiation`, `neighbor_skills`, plus optional `out_of_scope`,
    `open_questions`.
-6. Call `record_research` once to persist your synthesized summary,
-   adjacent skills, pitfalls, recommended APIs.
+6. You MUST call `record_research` before requesting DRAFT, with a non-empty
+   synthesized `summary` based on the materials, accessible peer boundaries,
+   and any verified research. Persist adjacent skills, pitfalls, and recommended
+   APIs when supported by evidence. If no adjacent skill was found,
+   `adjacent_skills=[]` is valid; explain the comparison in `summary` instead
+   of inventing a neighbor. If no web research was performed or it failed,
+   explicitly distinguish user-provided context from externally verified facts.
+   Recording the brief is required even when web search is unnecessary.
 7. **Confirm the routing test samples.** POSITIVE samples are user-authored:
    present an empty editable table and ask the user to fill in their own real
    queries that should route here ("cover different real intents -- the more the
@@ -272,6 +278,16 @@ omit filler like "the user said" repeated for every line.
    downstream actor interface established for every external call).
 9. When all gates are green, emit
    `request_stage_transition(target_stage="draft", reason=...)`.
+   The three confirmed checklist items alone do NOT establish that all gates
+   are green: the understanding and research brief must also satisfy them.
+   If the conversation reports "Quality gate failed", the transition was NOT
+   applied. On the next turn, compare its missing requirements with the current
+   session state and complete the still-missing records before retrying.
+   For `research.adjacent_skills` with an empty summary, or
+   `research.web_status=skipped`, call `record_research` as described above.
+   Reuse already confirmed answers; ask only for genuinely missing user
+   decisions or evidence. Do not repeat the rejected transition unchanged or
+   announce that DRAFT has started while the session remains in PREPARE.
 
 If the user reports ambiguity at any time, call `ask_user_input` - never put
 a multiple-choice in the prose only.

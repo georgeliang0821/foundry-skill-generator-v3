@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from backend.agent import _build_foundry_user_prompt
 from backend.models import Session
+from backend.state_machine import check_quality_gates
 
 
 def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
@@ -83,6 +87,10 @@ def test_inspect_endpoint_returns_tools_prompts_and_transitions(client) -> None:
     assert "definition_clear" in combined
     assert "routing_uniqueness_confirmed" in combined
     assert "variables_ok" in combined
+    assert "you must call `record_research` before requesting draft" in combined
+    assert 'if the conversation reports "quality gate failed"' in combined
+    assert "do not repeat the rejected transition unchanged" in combined
+    assert "reuse already confirmed answers" in combined
     assert "modify the existing skill" in combined
     assert "input_sources" in combined
     assert "persist all explicitly confirmed fields immediately" in rules
@@ -190,6 +198,89 @@ def test_record_research_normalizes_string_items(backend_main) -> None:
 
     assert session.prepare_brief.research.adjacent_skills == [{"name": "Azure Search skill"}]
     assert session.prepare_brief.research.recommended_apis == [{"name": "Responses API"}]
+
+
+@pytest.mark.parametrize("tool", ["request_stage_transition", "stage_transition"])
+def test_chat_quality_gate_feedback_survives_reload_and_allows_recovery(client, backend_main, tool) -> None:
+    session = Session(owner_upn="test@example.com")
+    understanding = session.prepare_brief.understanding
+    understanding.skill_goal = "Summarize meeting notes."
+    understanding.input_sources = ["User-provided meeting notes"]
+    understanding.key_capabilities = ["Summarize decisions"]
+    understanding.differentiation = "Meeting notes only, not general documents."
+    for key in session.prepare_brief.verify_checklist:
+        session.prepare_brief.verify_checklist[key] = True
+    backend_main.sessions[session.id] = session
+    queries = []
+
+    class RecoveringAgent:
+        def stream(self, session, message):
+            queries.append(_build_foundry_user_prompt(session, message))
+            if message == "Continue":
+                yield {
+                    "event": "tool_call",
+                    "data": {
+                        "call_id": "call_research",
+                        "tool": "record_research",
+                        "args": {
+                            "summary": "No verified web research; user-provided notes and peer boundaries were reviewed. No adjacent skill found.",
+                            "adjacent_skills": [],
+                        },
+                    },
+                }
+            yield {"event": "text_delta", "data": {"delta": "Requesting DRAFT."}}
+            yield {
+                "event": "tool_call",
+                "data": {
+                    "call_id": "call_transition",
+                    "tool": tool,
+                    "args": {"target_stage": "draft", "reason": "Prepare complete."},
+                },
+            }
+
+    backend_main.agent = RecoveringAgent()
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "Next stage"})
+    assert response.status_code == 200
+    events = response.json()["events"]
+    rejection = next(event["data"] for event in events if event["event"] == "quality_gate_failed")
+    missing = ["research.adjacent_skills", "research.web_status"]
+    assert rejection["missing"] == missing
+    assert not any(event["event"] in {"error", "tool_effect_rejected"} for event in events)
+    assert session.current_stage == "prepare"
+    assert all(session.prepare_brief.verify_checklist.values())
+    assert session.prepare_brief.research.web_status == "skipped"
+    assert session.pending_tool_calls == []
+    assert len(queries) == 1
+
+    reloaded = backend_main.session_store.load(session.id)
+    assert reloaded is not None
+    feedback = [message for message in reloaded.conversation if message.role == "system"]
+    assert len(feedback) == 1
+    assert feedback[0].metadata["tool"] == tool
+    assert feedback[0].metadata["missing"] == missing
+    assert all(key in feedback[0].content for key in missing)
+    assert "transition was not applied" in feedback[0].content
+
+    backend_main.sessions.clear()
+    response = client.post(f"/api/sessions/{session.id}/chat", json={"message": "Continue"})
+    assert response.status_code == 200
+    assert len(queries) == 2
+    assert feedback[0].content in queries[1]
+    assert not any(event["event"] in {"error", "quality_gate_failed", "tool_effect_rejected"} for event in response.json()["events"])
+    recovered = backend_main.session_store.load(session.id)
+    assert recovered is not None
+    assert recovered.current_stage == "draft"
+    assert recovered.prepare_brief.research.web_status == "ok"
+    assert recovered.prepare_brief.research.adjacent_skills == []
+    assert check_quality_gates(recovered) == []
+    assert recovered.pending_tool_calls == []
+
+
+def test_record_research_with_blank_summary_does_not_bypass_quality_gate(backend_main) -> None:
+    session = Session()
+    backend_main.apply_tool_effect(session, "record_research", {"summary": "   ", "adjacent_skills": []})
+    assert "research.adjacent_skills" in check_quality_gates(session)
+
 
 def test_auth_status_reports_unauthenticated(client) -> None:
     response = client.get("/api/auth/status")

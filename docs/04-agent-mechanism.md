@@ -497,7 +497,7 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 
 ### 移行核心約束
 
-1. **PREPARE ➔ DRAFT 是嚴格單向通道**，必須通過 `check_quality_gates` 計算。凡不符指標均拋出 `QualityGateError` (非致命) 攔截。
+1. **PREPARE ➔ DRAFT 是嚴格單向通道**，必須通過 `check_quality_gates` 計算。凡不符指標均拋出 `QualityGateError` (非致命) 攔截。後端保留原階段，將缺項寫入並持久化為 session 的 system 對話，同時維持前端的 `quality_gate_failed` 提示。下一回合 Agent 依目前狀態補齊尚缺的紀錄後才可重試，不重問已確認答案；不在同一回合自動補研究或重試轉移。
 2. **任何時候返回 PREPARE 階段時**，系統為了保證複檢嚴謹性，會**無條件清磁碟機**上的暫存草稿代碼 (`current_skill.skill_md = ""`)。但會完整留下已做好的 Prepare Brief（definition、變數等），並為 session 拍上 `prepare_brief.revisit = True` 標記避免重複確認。
 3. **非法階段躍遷保護：** 倘若 Agent 發出不合規的轉移事件，主執行緒不會 Crash，會拋出 ValueError 並啟動後端補救。系統會推送一條非致命事件 `tool_effect_rejected` 附帶合法出口 guidance 引導 Agent，Agent 有且僅能在下一回合自動下修判斷。
 
@@ -511,10 +511,12 @@ pytest 驗證提示組合與規則隔離，不證明模型每次遵守或真實�
 - ✅ `understanding.input_sources` 的容器列表至少要申報 1 項。
 - ✅ `understanding.key_capabilities` 的清單長度至少要申報 1 項。
 - ✅ `understanding.differentiation` 辨異說明欄不得為空白。
-- ✅ `research.adjacent_skills` 至少有 1 個，或滿足 `research.summary` 文字深度。
-- ✅ 上網研究完備性：`research.web_status` 絕對不可以標記為 `"skipped"`（在進 DRAFT 前大腦必須跑過搜尋）。
+- ✅ `research.adjacent_skills` 至少有 1 個，或 `research.summary` 有非空白內容；沒有鄰近技能時可保留空清單，但必須記錄比較摘要，不得捏造鄰近技能。
+- ✅ 研究紀錄完備性：`research.web_status` 不可以是 `"skipped"`。Agent 必須在進 DRAFT 前呼叫 `record_research`；目前後端會將 `"skipped"` 更新為 `"ok"`，表示已記錄研究考量，並非證明已執行網路搜尋。搜尋非必要或失敗時，摘要須清楚區分使用者材料與外部已驗證資訊；原有 `"failed"` 狀態不會被此工具覆蓋。
 - ✅ 自檢清單完備度：三項 check_list（`definition_clear`、`routing_uniqueness_confirmed`、`variables_ok`）必須皆在後端被設為 `True`。
 - ✅ **（重中之重）相似防撞防護**：若本地分析得出你的 Skill 與你具存權限的既有 Skill 相似度分數 **> 0.8**，大腦在 `differentiation` (辨異文字) 中**必須直接寫出那個 Skill 的全名**並表明功能區隔，否則直接拒絕移行。
+
+三項 checklist 全部確認不等於品質關卡通過；理解、研究及其他守衛仍須滿足。
 
 ---
 
